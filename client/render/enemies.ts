@@ -491,5 +491,5 @@ export function windupLength(e: Enemy): number {
   return ENEMY[e.type].windup + (e.type === 'ninja' ? 4 : 0);
 }
 
-export const BOSS_NAME = '赤鬼 · Akaoni, général démon';
+export const BOSS_NAME = '赤鬼 · Akaoni, demon general';
 export const BOSS_SLAM = BOSS.SLAM_W;

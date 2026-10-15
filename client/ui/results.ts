@@ -60,14 +60,14 @@ export class Results {
 
     const secs = Math.floor(st.time / TICK_RATE);
     const time = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    this.subtitle.setText(`Étape 1 · la forêt de bambous · 周 ${st.loop + 1}`);
+    this.subtitle.setText(`Stage 1 · the bamboo forest · 周 ${st.loop + 1}`);
     const rows: [string, string | number][] = [
-      ['Temps', time],
-      ['Ennemis tranchés', st.kills],
-      ['Combo maximal', st.bestCombo],
-      ['Parades réussies', st.parries],
-      ['Morts', st.deaths],
-      ['Honneur gagné', st.honor],
+      ['Time', time],
+      ['Foes slain', st.kills],
+      ['Best combo', st.bestCombo],
+      ['Perfect parries', st.parries],
+      ['Deaths', st.deaths],
+      ['Honor earned', st.honor],
     ];
     rows.forEach(([label, value], i) => {
       this.labels[i].setText(label);
@@ -75,12 +75,12 @@ export class Results {
     });
     const gr = GRADES[st.grade];
     this.stampKanji.setText(gr.kanji);
-    this.gradeName.setText(`${gr.name}\n+${st.bonus} honneur`).setAlpha(0);
+    this.gradeName.setText(`${gr.name}\n+${st.bonus} honor`).setAlpha(0);
     const sg = this.stampG;
     sg.clear();
     gFill(sg, [{ x: -62, y: -64 }, { x: 64, y: -60 }, { x: 60, y: 64 }, { x: -64, y: 60 }], C.red, 0.92);
     gStroke(sg, [{ x: -54, y: -54 }, { x: 55, y: -51 }, { x: 52, y: 54 }, { x: -55, y: 51 }, { x: -54, y: -54 }], C.paper, 0.5, { width: 3, taperStart: 0, taperEnd: 0, jitter: 0.4 }, r);
-    this.footer.setText(`Espace — reprendre la route  ·  周 ${st.loop + 2} : l’ennemi sera plus redoutable`).setAlpha(0);
+    this.footer.setText(`Space — continue the journey  ·  周 ${st.loop + 2}: the enemy grows fiercer`).setAlpha(0);
 
     this.visible = true;
     this.root.setVisible(true).setAlpha(0).setY(20);

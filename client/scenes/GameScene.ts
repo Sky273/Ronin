@@ -273,8 +273,8 @@ export class GameScene extends Phaser.Scene {
     this.deathText.setAlpha(da);
     this.deathSub.setAlpha(da);
     if (dead) {
-      const lost = this.lastLost > 0 ? `\n${this.lastLost} honneur laissé au sol — revenez le chercher` : '';
-      this.deathSub.setText(`${this.me.kills} ennemis tranchés${lost}\nVous renaîtrez au sanctuaire…`);
+      const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
+      this.deathSub.setText(`${this.me.kills} foes slain${lost}\nYou will be reborn at the shrine…`);
     }
   }
 
@@ -619,7 +619,7 @@ export class GameScene extends Phaser.Scene {
           this.slowmo = 1.1;
           this.flash = 0.2;
           this.sfx.gong();
-          this.hud.banner('討', 'Akaoni est tombé !', `+${ev.honor} honneur`, '#b8321f', 2400);
+          this.hud.banner('討', 'Akaoni has fallen!', `+${ev.honor} honor`, '#b8321f', 2400);
         }
         break;
       }
@@ -760,7 +760,7 @@ export class GameScene extends Phaser.Scene {
       case 'checkpoint':
         this.sfx.bell();
         fx.ring(ev.x, ev.y - 40, 6, 50, 0.6, C.red, 3);
-        this.hud.banner('社', 'Sanctuaire', 'point de renaissance · vie restaurée', '#15120e', 1100);
+        this.hud.banner('社', 'Shrine', 'rebirth point · life restored', '#15120e', 1100);
         break;
       case 'spawn':
         fx.mist(ev.x, ev.y - 22, 10, { color: C.ink, size: 9, alpha: 0.22, spread: 24, vy: -20, life: 0.9 });
@@ -812,15 +812,15 @@ export class GameScene extends Phaser.Scene {
         break;
       case 'bossPhase':
         this.flash = 0.15;
-        this.hud.banner('怒', 'Akaoni entre en rage', 'plus rapide · charge dévastatrice', '#8e2416', 1400);
+        this.hud.banner('怒', 'Akaoni is enraged', 'faster · devastating charge', '#8e2416', 1400);
         break;
       case 'bossSpawn':
-        this.hud.banner('赤鬼', 'Akaoni, général démon', 'balayage : baissez-vous · bond : sautez · charge : dash', '#8e2416', 2600);
+        this.hud.banner('赤鬼', 'Akaoni, demon general', 'sweep: crouch · leap: jump · charge: dash', '#8e2416', 2600);
         fx.mist(ev.x, ev.y - 50, 26, { color: C.ink, size: 16, alpha: 0.3, spread: 70, vy: -30, life: 1.2, front: true });
         break;
       case 'tideWarn':
         this.sfx.taiko(false);
-        this.hud.banner('潮', `La Marée monte — vague ${ev.n}`, 'tenez bon', '#8e2416', 1800);
+        this.hud.banner('潮', `The Tide rises — wave ${ev.n}`, 'hold fast', '#8e2416', 1800);
         break;
       case 'arenaLock':
         this.sfx.taiko(true);
@@ -837,7 +837,7 @@ export class GameScene extends Phaser.Scene {
           fx.sparks(sx, ev.y - 74, 10, C.red, 260);
           fx.mist(sx, ev.y - 74, 5, { color: C.redDeep, size: 6, alpha: 0.35, vy: -50, life: 0.9, front: true });
         }
-        this.hud.banner('開', 'La porte est ouverte', 'franchissez le torii pour achever l’étape', '#b8321f', 2000);
+        this.hud.banner('開', 'The gate is open', 'pass through the torii to end the stage', '#b8321f', 2000);
         break;
       }
       case 'stageClear':
@@ -856,14 +856,14 @@ export class GameScene extends Phaser.Scene {
         this.scarf = [];
         this.lastLost = 0;
         this.sfx.taiko(false);
-        this.hud.banner('周', `Le voyage recommence — boucle ${ev.loop + 1}`, 'les ennemis sont plus nombreux et plus redoutables', '#15120e', 2200);
+        this.hud.banner('周', `The journey begins anew — loop ${ev.loop + 1}`, 'the enemies are more numerous and fiercer', '#15120e', 2200);
         break;
       case 'tideStart':
         this.sfx.drum(0, true);
         break;
       case 'tideEnd':
         this.sfx.gong();
-        if (ev.bonus > 0) this.hud.banner('凪', 'La Marée se retire', `+${ev.bonus} honneur`, '#15120e', 1600);
+        if (ev.bonus > 0) this.hud.banner('凪', 'The Tide recedes', `+${ev.bonus} honor`, '#15120e', 1600);
         break;
     }
   }
