@@ -2,7 +2,7 @@ import { bodyRect } from './combat';
 import { DT, ENEMY, HONOR, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
-import { enemyHpMult, extraEnemies, firstCalmMult } from './difficulty';
+import { DIFFICULTIES, type DifficultyId, enemyHpMult, extraEnemies, firstCalmMult } from './difficulty';
 import { buildLevel } from './level';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
@@ -14,7 +14,11 @@ import { magnetRadius } from './upgrades';
 export { spawnEnemy };
 export { nextStage, warpToArena } from './stage';
 
-export function createWorld(seed = 7): World {
+export interface WorldOptions {
+  difficulty?: DifficultyId;
+}
+
+export function createWorld(seed = 7, opts: WorldOptions = {}): World {
   const level = buildLevel();
   const w: World = {
     tick: 0,
@@ -31,6 +35,9 @@ export function createWorld(seed = 7): World {
     totalKills: 0,
     wave: { n: 0, phase: 'calm', t: 0, kills: 0, quota: 0 },
     stage: newStageState(0, 0),
+    difficulty: opts.difficulty ?? 'normal',
+    over: false,
+    overT: 0,
   };
   populateStage(w);
   return w;
@@ -38,6 +45,7 @@ export function createWorld(seed = 7): World {
 
 export function addPlayer(w: World, name: string): Player {
   const p = createPlayer(w.nextId++, name, w.level.spawn.x, w.level.spawn.y);
+  p.lives = DIFFICULTIES[w.difficulty].lives;
   w.players.push(p);
   return p;
 }

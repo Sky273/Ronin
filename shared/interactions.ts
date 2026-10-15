@@ -79,7 +79,7 @@ function killPlayer(w: World, p: Player): void {
     p.lostX = p.x;
     p.lostY = p.y;
   }
-  w.events.push({ type: 'playerDeath', x: p.x, y: p.y, pid: p.id, lost });
+  w.events.push({ type: 'playerDeath', x: p.x, y: p.y, pid: p.id, lost, livesLeft: p.lives });
 }
 
 export function stunEnemy(w: World, e: Enemy, pushDir: number, ticks: number = ENEMY.STUN_TICKS): void {

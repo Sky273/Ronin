@@ -49,6 +49,7 @@ export const PLAYER = {
   HURT_TICKS: 18,
   HURT_IFRAMES: 55,
   RESPAWN_TICKS: 150,
+  GAME_OVER_DELAY: 150, // ticks entre la dernière mort et la fin de partie
 
   PARRY_ACTIVE: 10,
   PARRY_RECOVERY: 16,

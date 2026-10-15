@@ -1,4 +1,5 @@
 import type { AttackId } from './combat';
+import type { DifficultyId } from './difficulty';
 import type { Level } from './level';
 import type { Rng } from './math';
 import type { UpgradeId, Upgrades } from './upgrades';
@@ -79,6 +80,13 @@ export interface Player extends Body {
   up: Upgrades;
   lostX: number; // Honneur perdu laissé au sol (NaN si aucun)
   lostY: number;
+
+  // Partie (solo) : vies limitées, score cumulé qui ne baisse jamais
+  lives: number; // morts restantes avant la fin de la partie
+  score: number;
+  runKills: number; // ennemis tranchés sur toute la partie (kills est remis à zéro à chaque mort)
+  out: boolean; // plus de vie : ne renaîtra pas
+  outT: number; // ticks écoulés depuis la sortie
 
   respawnT: number;
   spawnX: number;
@@ -206,7 +214,8 @@ export type GameEvent =
   | { type: 'block'; x: number; y: number; dir: number }
   | { type: 'guardBreak'; x: number; y: number }
   | { type: 'playerHit'; x: number; y: number; dir: number; damage: number; pid: number }
-  | { type: 'playerDeath'; x: number; y: number; pid: number; lost: number }
+  | { type: 'playerDeath'; x: number; y: number; pid: number; lost: number; livesLeft: number }
+  | { type: 'gameOver'; pid: number; score: number; loop: number; kills: number; deaths: number }
   | { type: 'respawn'; x: number; y: number; pid: number }
   | { type: 'jump'; x: number; y: number; double: boolean; pid: number }
   | { type: 'wallJump'; x: number; y: number; dir: number; pid: number }
@@ -260,4 +269,8 @@ export interface World {
   totalKills: number;
   wave: WaveState;
   stage: StageState;
+  difficulty: DifficultyId;
+  /** Partie terminée (tous les joueurs sans vie) : la simulation est figée. */
+  over: boolean;
+  overT: number; // ticks écoulés depuis que tous les joueurs sont sortis
 }
