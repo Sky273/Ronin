@@ -1,2 +1,34 @@
-node_modules
-dist
+# Dépendances et sorties de build
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.vite/
+
+# Journaux
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environnement et secrets
+.env
+.env.*
+!.env.example
+
+# Outils locaux (Claude Code : worktrees des sous-agents, réglages personnels)
+.claude/
+
+# Éditeurs et systèmes
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Couverture de tests
+coverage/

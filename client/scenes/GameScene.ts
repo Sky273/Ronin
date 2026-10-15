@@ -153,8 +153,8 @@ export class GameScene extends Phaser.Scene {
     gStroke(seal, ringPoints(W / 2 - 20, H * 0.36, 175, -2.6, 2.9, 40), C.ink, 0.12, { width: 22, taperStart: 0.3, taperEnd: 0.6 }, r);
     const sealText = this.add.text(sx, sy, '侍', { fontFamily: FONT_BRUSH, fontSize: '44px', color: '#f0e7d3' }).setOrigin(0.5);
     const name = this.add.text(W / 2, H * 0.6, 'R O N I N . I O', { fontFamily: FONT_TEXT, fontSize: '34px', color: '#15120e' }).setOrigin(0.5);
-    const sub = this.add.text(W / 2, H * 0.66, 'la voie du sabre — prototype', { fontFamily: FONT_TEXT, fontSize: '18px', color: '#4a433b' }).setOrigin(0.5);
-    const press = this.add.text(W / 2, H * 0.8, 'Appuyez sur ENTRÉE ou cliquez pour dégainer', { fontFamily: FONT_TEXT, fontSize: '22px', color: '#b8321f' }).setOrigin(0.5);
+    const sub = this.add.text(W / 2, H * 0.66, 'the way of the sword — prototype', { fontFamily: FONT_TEXT, fontSize: '18px', color: '#4a433b' }).setOrigin(0.5);
+    const press = this.add.text(W / 2, H * 0.8, 'Press ENTER or click to draw your blade', { fontFamily: FONT_TEXT, fontSize: '22px', color: '#b8321f' }).setOrigin(0.5);
     this.tweens.add({ targets: press, alpha: 0.35, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
     this.title = this.add.container(0, 0, [veil, seal, kanji, sealText, name, sub, press]).setDepth(200);
     this.put(this.title, 'ui');
