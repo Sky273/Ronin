@@ -26,17 +26,31 @@ const KEYMAP: Record<string, number> = {
   Numpad3: BTN.PICK3,
 };
 
-const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4']);
+const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'Escape', 'Backspace', 'Tab']);
+
+// Touches dont le comportement navigateur gênerait la saisie d'un nom (retour arrière, défilement, focus).
+const TEXT_PREVENT = new Set(['Backspace', 'Space', 'Enter', 'NumpadEnter', 'Tab']);
+
+type TextFn = (key: string, code: string) => void;
 
 export class Controls {
   private held = 0;
   private latched = 0; // pressions brèves survenues entre deux ticks
   private mouse = 0;
   private handlers = new Map<string, () => void>();
+  private textFn: TextFn | null = null; // mode saisie : toutes les touches vont au champ texte
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
       if (PREVENT.has(e.code)) e.preventDefault();
+      if (this.textFn) {
+        // En saisie, ni boutons de jeu ni raccourcis (H, M, N…) : la touche n'appartient qu'au champ.
+        if (TEXT_PREVENT.has(e.code)) e.preventDefault();
+        // Répétition autorisée (effacer en maintenant Retour arrière), sauf pour valider.
+        if (e.repeat && (e.code === 'Enter' || e.code === 'NumpadEnter')) return;
+        this.textFn(e.key, e.code);
+        return;
+      }
       if (e.repeat) return;
       const b = KEYMAP[e.code];
       if (b) {
@@ -55,6 +69,7 @@ export class Controls {
     });
     target.addEventListener('contextmenu', (e) => e.preventDefault());
     target.addEventListener('mousedown', (e) => {
+      if (this.textFn) return;
       const b = e.button === 0 ? BTN.ATTACK : e.button === 2 ? BTN.PARRY : e.button === 1 ? BTN.IAI : 0;
       this.mouse |= b;
       this.latched |= b;
@@ -67,6 +82,22 @@ export class Controls {
 
   onKey(code: string, fn: () => void): void {
     this.handlers.set(code, fn);
+  }
+
+  /**
+   * Active (callback) ou désactive (null) le mode saisie de texte.
+   * Les états de boutons sont remis à zéro pour qu'aucune pression ne « fuie » vers le jeu.
+   */
+  setTextMode(fn: TextFn | null): void {
+    this.textFn = fn;
+    this.reset();
+  }
+
+  /** Oublie toutes les touches et clics en cours (changement d'écran, pause…). */
+  reset(): void {
+    this.held = 0;
+    this.latched = 0;
+    this.mouse = 0;
   }
 
   sample(): number {
