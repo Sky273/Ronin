@@ -1,7 +1,13 @@
 {
   "name": "ronin-io",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
+  "description": "Ronin.io — a side-scrolling samurai .io game painted in Japanese ink (sumi-e).",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sky273/Ronin.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
