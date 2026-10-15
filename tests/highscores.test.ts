@@ -213,5 +213,54 @@ const noThrow = (fn: () => unknown): boolean => {
   check('prefs : storage null → défaut / false', loadPrefs(null).difficulty === 'normal' && savePrefs(def, null) === false);
 }
 
+// ─── Robustesse complémentaire ──────────────────────────────────────────────
+{
+  check('nom non-chaîne → Ronin', sanitizeName(null as unknown as string) === DEFAULT_NAME && sanitizeName(42 as unknown as string) === DEFAULT_NAME);
+  check('retour à la ligne → espace', sanitizeName('Ken\nji') === 'Ken ji', JSON.stringify(sanitizeName('Ken\nji')));
+  const raw = (score: unknown, date: unknown = 1) => ({ v: 1, tables: { normal: [{ name: 'x', score, loop: 0, kills: 0, date }] } });
+  const kept = (r: unknown) => sanitizeTable(r).normal.length;
+  check(
+    'entrées invalides rejetées (score décimal, Infinity, négatif, chaîne, date NaN)',
+    kept(raw(1.5)) === 0 && kept(raw(Infinity)) === 0 && kept(raw(-3)) === 0 && kept(raw('100')) === 0 && kept(raw(10, NaN)) === 0 && kept(raw(10)) === 1,
+  );
+  const proto = JSON.parse('{"v":1,"tables":{"__proto__":{"normal":[{"name":"x","score":5,"loop":0,"kills":0,"date":1}]}}}') as unknown;
+  const tp = sanitizeTable(proto);
+  check('clé __proto__ dans les tables : ignorée, pas de pollution', tp.normal.length === 0 && ({} as Record<string, unknown>).normal === undefined);
+  const longName = sanitizeTable({ v: 1, tables: { easy: [{ name: 'abcdefghijklmnopqrstuvwxyz', score: 5, loop: 0, kills: 0, date: 1 }] } });
+  check('nom trop long en stockage → tronqué à 12', Array.from(longName.easy[0]?.name ?? '').length === MAX_NAME);
+
+  // Cohérence qualifies / insertScore sur des listes pseudo-aléatoires (déterministes).
+  let seed = 5;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  let coherent = true;
+  let sortedAfter = true;
+  for (let i = 0; i < 500; i++) {
+    const n = Math.floor(rnd() * 12);
+    const list = Array.from({ length: n }, (_, k) => entry(Math.floor(rnd() * 20), k)).sort(compareEntries).slice(0, MAX_SCORES);
+    const sc = Math.floor(rnd() * 22) - 1;
+    const res = insertScore(list, entry(sc, 1000));
+    if (qualifies(list, sc) !== res.rank >= 0) coherent = false;
+    if (res.rank >= 0 && res.list[res.rank].date !== 1000) coherent = false;
+    if (!res.list.every((e, k, a) => k === 0 || compareEntries(a[k - 1], e) <= 0) || res.list.length > MAX_SCORES) sortedAfter = false;
+  }
+  check('qualifies ⇔ insertScore rang ≥ 0 (500 cas)', coherent);
+  check('insertScore : liste toujours triée et ≤ 10 (500 cas)', sortedAfter);
+
+  // Flux de fin de partie : insertion à égalité, sauvegarde, relecture → la ligne surlignée est bien la nouvelle.
+  const s = memStorage();
+  const t = emptyTable();
+  t.hard = [100, 90, 80, 80, 70, 60, 50, 40, 30, 20].map((v, k) => entry(v, k + 1, `p${k}`));
+  t.easy = [entry(5, 1, 'autre')];
+  const { list, rank } = insertScore(t.hard, entry(80, 50, 'nouveau'));
+  saveScores({ ...t, hard: list }, s);
+  const back = loadScores(s);
+  check(
+    'égalité → sauvegarde → relecture : rang surligné = nouvelle entrée',
+    rank === 4 && back.hard[rank]?.name === 'nouveau' && back.hard.length === MAX_SCORES && back.hard[9].score === 30,
+    `rang=${rank} ligne=${back.hard[rank]?.name}`,
+  );
+  check('insertion dans une difficulté : les autres tables intactes', back.easy.length === 1 && back.easy[0].name === 'autre' && back.normal.length === 0);
+}
+
 console.log(failures === 0 ? '\nTous les tests des high scores passent.' : `\n${failures} échec(s).`);
 if (failures > 0) (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

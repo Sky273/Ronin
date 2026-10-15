@@ -50,7 +50,9 @@ export function compareEntries(a: ScoreEntry, b: ScoreEntry): number {
   return b.score - a.score || a.date - b.date;
 }
 
-const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+/** Entier sûr, positif et borné : une valeur trafiquée (1e300…) ne peut pas squatter le tableau. */
+const MAX_COUNT = 1e9;
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_COUNT;
 
 /** Valide une entrée brute ; null si invalide. */
 function sanitizeEntry(raw: unknown): ScoreEntry | null {

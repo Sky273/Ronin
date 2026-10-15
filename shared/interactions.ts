@@ -190,8 +190,11 @@ export function killEnemy(w: World, e: Enemy, p: Player | null, cut: number, byI
   if (p) {
     p.kills++;
     honor = Math.round(honor * (1 + Math.min(20, p.combo) * HONOR.COMBO_BONUS));
-    p.runKills++;
-    addScore(w, p, honor);
+    // Un projectile encore en vol après la dernière mort ne compte plus.
+    if (!p.out) {
+      p.runKills++;
+      addScore(w, p, honor);
+    }
   }
   spawnOrbs(w, e.x, e.y - e.h * 0.5, honor, false);
   w.events.push({

@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "test:sim": "esbuild tests/sim.smoke.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/sim.smoke.mjs && node node_modules/.cache/sim.smoke.mjs",
     "test:scores": "esbuild tests/highscores.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/highscores.test.mjs && node node_modules/.cache/highscores.test.mjs",
-    "test": "npm run test:sim && npm run test:scores"
+    "test:gameover": "esbuild tests/gameover.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/gameover.test.mjs && node node_modules/.cache/gameover.test.mjs",
+    "test": "npm run test:sim && npm run test:scores && npm run test:gameover"
   },
   "dependencies": {
     "phaser": "3.90.0"

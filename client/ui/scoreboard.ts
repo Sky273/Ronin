@@ -107,11 +107,24 @@ export class Scoreboard {
       this.rows.push({ box, rank, name, score, loop, kills, hanko });
     }
     this.empty = scene.add.text(cx, ROW_Y0 + 4.5 * ROW_STEP, 'No names inscribed yet', { fontFamily: FONT_TEXT, fontSize: '20px', color: WASH }).setOrigin(0.5).setVisible(false);
-    const help = scene.add.text(cx, 622, '←→ browse  ·  Enter play again  ·  Esc title', { fontFamily: FONT_TEXT, fontSize: '15px', color: WASH }).setOrigin(0.5).setAlpha(0.85);
+    // Aide + deux actions cliquables (souris), équivalentes à Entrée et Échap.
+    const help = scene.add.text(cx, 622, '←→ browse', { fontFamily: FONT_TEXT, fontSize: '15px', color: WASH }).setOrigin(0.5).setAlpha(0.85);
+    const action = (x: number, label: string, fn: () => void) => {
+      const t = scene.add.text(x, 622, label, { fontFamily: FONT_TEXT, fontSize: '18px', color: RED }).setOrigin(0.5);
+      t.setInteractive({ useHandCursor: true });
+      t.on('pointerover', () => t.setColor(INK));
+      t.on('pointerout', () => t.setColor(RED));
+      t.on('pointerdown', () => {
+        if (this.ready()) fn();
+      });
+      return t;
+    };
+    const playBtn = action(cx - 230, 'Enter — play', () => this.cb.onPlayAgain());
+    const titleBtn = action(cx + 230, 'Esc — title', () => this.cb.onTitle());
 
     this.root = put(
       scene.add
-        .container(0, 0, [veil, scroll, this.titleK, this.titleT, this.tabMark, ...tabs, ...this.header, ...this.rows.map((r) => r.box), this.empty, help])
+        .container(0, 0, [veil, scroll, this.titleK, this.titleT, this.tabMark, ...tabs, ...this.header, ...this.rows.map((r) => r.box), this.empty, help, playBtn, titleBtn])
         .setDepth(200)
         .setVisible(false),
       'ui',

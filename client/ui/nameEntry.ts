@@ -9,6 +9,9 @@ type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'worl
 
 const INPUT_GUARD_MS = 300;
 
+/** Caractères acceptés à la frappe : les mêmes que ceux conservés par sanitizeName. */
+const NAME_CHAR = /^[\p{L}\p{N} ._-]$/u;
+
 /** Longueur en points de code (un emoji ou un kanji hors BMP compte pour un). */
 const cpLen = (s: string): number => Array.from(s).length;
 
@@ -44,6 +47,9 @@ export class NameEntry {
     this.cursor = scene.add.graphics();
     gStroke(this.cursor, [{ x: 0, y: -18 }, { x: 1, y: 0 }, { x: 0, y: 18 }], C.red, 0.9, { width: 3.5, taperStart: 0.1, taperEnd: 0.3, jitter: 0.2 }, seeded(3));
     this.help = scene.add.text(cx, 548, 'Enter — inscribe your name', { fontFamily: FONT_TEXT, fontSize: '18px', color: '#b8321f' }).setOrigin(0.5);
+    // Cliquable aussi (souris, ou validation à la manette relayée par la scène).
+    this.help.setInteractive({ useHandCursor: true });
+    this.help.on('pointerdown', () => this.keyText('Enter', 'Enter'));
 
     // Petit hanko « 誉 » tamponné à côté du score.
     const sg = scene.add.graphics();
@@ -77,7 +83,8 @@ export class NameEntry {
     this.readyAt = this.scene.time.now + INPUT_GUARD_MS;
     this.text = Array.from(info.defaultName).slice(0, MAX_NAME).join('');
     this.scoreText.setText(fmtScore(info.score));
-    this.record.setText(`New record — rank #${info.rank + 1} in ${DIFFICULTY_TEXT[info.difficulty].name}`);
+    const where = DIFFICULTY_TEXT[info.difficulty].name;
+    this.record.setText(info.rank === 0 ? `New record — rank #1 in ${where}` : `A place in the Hall of Honor — rank #${info.rank + 1} in ${where}`);
     this.refresh();
 
     this.root.setVisible(true).setAlpha(0).setY(20);
@@ -106,7 +113,7 @@ export class NameEntry {
     } else if (code === 'Enter' || code === 'NumpadEnter') {
       this.cb.onSubmit(this.text);
       return;
-    } else if (cpLen(key) === 1) {
+    } else if (cpLen(key) === 1 && NAME_CHAR.test(key)) {
       if (cpLen(this.text) >= MAX_NAME) return;
       this.text += key;
     } else {

@@ -39,6 +39,8 @@ export class Controls {
   private mouse = 0;
   private handlers = new Map<string, () => void>();
   private textFn: TextFn | null = null; // mode saisie : toutes les touches vont au champ texte
+  private muteMouse = false; // après reset() : le clic en cours (ex. « Hard ») ne doit pas devenir une attaque
+  private padPrev = 0; // boutons de menu de la manette au tick précédent (fronts montants)
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
@@ -48,6 +50,8 @@ export class Controls {
         if (TEXT_PREVENT.has(e.code)) e.preventDefault();
         // Répétition autorisée (effacer en maintenant Retour arrière), sauf pour valider.
         if (e.repeat && (e.code === 'Enter' || e.code === 'NumpadEnter')) return;
+        // Raccourcis (Ctrl+V, ⌘+A…) : ne pas insérer la lettre. AltGr (Ctrl+Alt) reste permis.
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1) return;
         this.textFn(e.key, e.code);
         return;
       }
@@ -69,12 +73,13 @@ export class Controls {
     });
     target.addEventListener('contextmenu', (e) => e.preventDefault());
     target.addEventListener('mousedown', (e) => {
-      if (this.textFn) return;
+      if (this.textFn || this.muteMouse) return;
       const b = e.button === 0 ? BTN.ATTACK : e.button === 2 ? BTN.PARRY : e.button === 1 ? BTN.IAI : 0;
       this.mouse |= b;
       this.latched |= b;
     });
     window.addEventListener('mouseup', (e) => {
+      this.muteMouse = false;
       const b = e.button === 0 ? BTN.ATTACK : e.button === 2 ? BTN.PARRY : e.button === 1 ? BTN.IAI : 0;
       this.mouse &= ~b;
     });
@@ -98,6 +103,16 @@ export class Controls {
     this.held = 0;
     this.latched = 0;
     this.mouse = 0;
+    this.muteMouse = true;
+    this.padPrev = padMenuBits();
+  }
+
+  /** Codes de menu (ArrowUp, Enter, Escape…) correspondant aux boutons de manette tout juste pressés. */
+  padMenu(): string[] {
+    const now = padMenuBits();
+    const pressed = now & ~this.padPrev;
+    this.padPrev = now;
+    return PAD_MENU.filter((m) => pressed & m.bit).map((m) => m.code);
   }
 
   sample(): number {
@@ -126,6 +141,34 @@ function gamepadButtons(): number {
     if (btn(1) || btn(7)) b |= BTN.DASH;
     if (btn(3)) b |= BTN.IAI;
     if (btn(4) || btn(5) || btn(6)) b |= BTN.PARRY;
+  }
+  return b;
+}
+
+// ─── Navigation des menus à la manette ─────────────────────────────────────
+const PAD_MENU = [
+  { bit: 1, code: 'ArrowUp' },
+  { bit: 2, code: 'ArrowDown' },
+  { bit: 4, code: 'ArrowLeft' },
+  { bit: 8, code: 'ArrowRight' },
+  { bit: 16, code: 'Enter' }, // A
+  { bit: 32, code: 'Escape' }, // B
+];
+
+function padMenuBits(): number {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let b = 0;
+  for (const gp of pads) {
+    if (!gp || gp.mapping !== 'standard') continue;
+    const btn = (i: number) => !!gp.buttons[i]?.pressed;
+    const ax = gp.axes[0] ?? 0;
+    const ay = gp.axes[1] ?? 0;
+    if (ay < -0.5 || btn(12)) b |= 1;
+    if (ay > 0.5 || btn(13)) b |= 2;
+    if (ax < -0.5 || btn(14)) b |= 4;
+    if (ax > 0.5 || btn(15)) b |= 8;
+    if (btn(0) || btn(9)) b |= 16;
+    if (btn(1) || btn(8)) b |= 32;
   }
   return b;
 }

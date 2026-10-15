@@ -246,6 +246,8 @@ export class GameScene extends Phaser.Scene {
     this.slowmo = this.flash = this.shake = this.zoomPunch = this.wipe = this.hurtFlash = 0;
     this.orbStreak = this.orbStreakT = this.lastLost = 0;
     this.parryTick = -999;
+    this.best = 0; // « best » = meilleur nombre de kills d'une vie, pour cette partie
+    this.inputs.clear();
     this.overInfo = null;
     this.overT = 0;
     this.camX = this.me.x + 60;
@@ -255,7 +257,7 @@ export class GameScene extends Phaser.Scene {
     this.hud.reset();
     this.fx.clear();
     this.controls.reset();
-    this.deathText.setText('討死').setAlpha(0);
+    this.deathText.setAlpha(0);
     this.deathSub.setAlpha(0);
 
     this.screen = 'play';
@@ -276,6 +278,8 @@ export class GameScene extends Phaser.Scene {
   private leaveGameOver(): void {
     const info = this.overInfo;
     if (!info || this.screen !== 'over') return;
+    // Relu à chaque fois : un autre onglet a pu inscrire un score entre-temps.
+    this.scores = loadScores();
     const list = this.scores[this.difficulty];
     if (qualifies(list, info.score)) {
       const { rank } = insertScore(list, this.entryFor(info, sanitizeName(this.prefs.name)));
@@ -300,6 +304,7 @@ export class GameScene extends Phaser.Scene {
     if (!info) return;
     this.controls.setTextMode(null);
     const name = sanitizeName(raw);
+    this.scores = loadScores();
     const { list, rank } = insertScore(this.scores[this.difficulty], this.entryFor(info, name));
     this.scores = { ...this.scores, [this.difficulty]: list };
     // Stockage indisponible (navigation privée, quota) : le tableau reste valable pour la session.
@@ -314,7 +319,17 @@ export class GameScene extends Phaser.Scene {
     const dt = Math.min(delta, 50) / 1000;
     this.timeScale = 1;
     this.scoreboard.update(dt);
-    if (this.screen === 'over') this.overT += dt;
+    // Menus à la manette (fronts montants traduits en codes clavier).
+    for (const code of this.controls.padMenu()) {
+      if (this.screen === 'name') {
+        if (code === 'Enter') this.nameEntry.keyText('Enter', 'Enter');
+      } else this.menuKey(code);
+    }
+    if (this.screen === 'over') {
+      this.overT += dt;
+      // N'importe quel bouton de jeu, clic ou bouton de manette passe l'écran 討死.
+      if (this.controls.sample() !== 0 && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
+    }
     if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
     if (this.screen === 'play' || this.screen === 'over') {
       if (this.slowmo > 0) {
@@ -416,7 +431,7 @@ export class GameScene extends Phaser.Scene {
     if (dead) {
       if (this.me.out) {
         const skip = this.screen === 'over' && this.overT > GAME_OVER_SKIP ? '\n\npress any key' : '';
-        this.deathSub.setText(`Your journey ends\n${fmtScore(this.me.score)} · ${foesLabel(this.me.runKills)}${skip}`);
+        this.deathSub.setText(`Your journey ends\nscore ${fmtScore(this.me.score)} · ${foesLabel(this.me.runKills)}${skip}`);
       } else {
         const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
         this.deathSub.setText(`${foesLabel(this.me.kills)}${lost}\n${livesLabel(this.me.lives)} left — you will be reborn at the shrine…`);
@@ -810,7 +825,6 @@ export class GameScene extends Phaser.Scene {
       case 'playerDeath':
         this.sfx.death();
         this.lastLost = ev.lost;
-        if (ev.livesLeft <= 0) this.deathText.setText('討死');
         fx.inkBurst(ev.x, ev.y - 24, 1, 20, 400, C.red);
         fx.inkBurst(ev.x, ev.y - 24, -1, 20, 400, C.ink);
         this.slowmo = 0.6;

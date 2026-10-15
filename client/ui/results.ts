@@ -68,7 +68,7 @@ export class Results {
       ['Best combo', st.bestCombo],
       ['Perfect parries', st.parries],
       ['Deaths', st.deaths],
-      ['Remaining', livesLabel(p.lives)],
+      ['Lives left', livesLabel(p.lives)],
       ['Score', fmtScore(p.score)],
     ];
     rows.forEach(([label, value], i) => {
