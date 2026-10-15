@@ -1,0 +1,238 @@
+import { BOSS, ENEMY, HONOR, honorForLevel, PLAYER as P } from './constants';
+import { enemyDmgMult } from './difficulty';
+import { canFit } from './physics';
+import type { Enemy, Player, World } from './types';
+import { leechHeal, parryWindow, rollOffer } from './upgrades';
+
+// Résolution des coups échangés entre joueurs et ennemis, et économie d'Honneur.
+
+/** Jetons d'attaque : limite le nombre d'ennemis qui frappent en même temps (lisibilité). */
+export function takeToken(w: World, e: Enemy): boolean {
+  if (e.token) return true;
+  if (e.type === 'boss') return true; // le boss ne partage pas
+  if (w.attackTokens >= ENEMY.MAX_ATTACKERS) return false;
+  e.token = true;
+  w.attackTokens++;
+  return true;
+}
+
+export function releaseToken(w: World, e: Enemy): void {
+  if (!e.token) return;
+  e.token = false;
+  w.attackTokens--;
+}
+
+export type DamageResult = 'parried' | 'hit' | 'ignored';
+
+export function damagePlayer(w: World, p: Player, dmg: number, srcX: number): DamageResult {
+  if (p.state === 'dead') return 'ignored';
+  const srcSide = srcX >= p.x ? 1 : -1;
+
+  // Parade : fenêtre courte, il faut faire face à l'attaque.
+  if (p.state === 'parry' && p.stateT <= parryWindow(p) && p.facing === srcSide) {
+    p.state = 'normal';
+    p.stateT = 0;
+    p.iframes = P.PARRY_SUCCESS_IFRAMES;
+    p.freeze = 8;
+    p.vx = -srcSide * 120;
+    p.hp = Math.min(p.maxHp, p.hp + 6 * p.up.parry);
+    w.stage.parries++;
+    w.events.push({ type: 'parry', x: p.x + p.facing * 14, y: p.y - 30, pid: p.id });
+    return 'parried';
+  }
+  if (p.iframes > 0 || p.state === 'dash' || p.state === 'iaiStrike') return 'ignored';
+
+  dmg = Math.round(dmg * enemyDmgMult(w.stage.loop));
+  p.hp -= dmg;
+  p.combo = 0;
+  p.comboTimer = 0;
+  p.attack = null;
+  p.vx = -srcSide * 260;
+  p.vy = -320;
+  p.onGround = false;
+  p.iframes = P.HURT_IFRAMES;
+  p.freeze = 5;
+  if (p.h !== P.H && canFit(p, w.level, P.H)) {
+    p.h = P.H;
+    p.crouch = false;
+  }
+  w.events.push({ type: 'playerHit', x: p.x, y: p.y - p.h / 2, dir: -srcSide, damage: dmg, pid: p.id });
+
+  if (p.hp <= 0) killPlayer(w, p);
+  else {
+    p.state = 'hurt';
+    p.stateT = 0;
+  }
+  return 'hit';
+}
+
+function killPlayer(w: World, p: Player): void {
+  p.hp = 0;
+  p.state = 'dead';
+  p.stateT = 0;
+  p.respawnT = P.RESPAWN_TICKS;
+  w.stage.deaths++;
+  // L'Honneur à moitié perdu reste au sol : on peut revenir le chercher.
+  const lost = Math.floor(p.honor * HONOR.DEATH_DROP);
+  if (lost > 0) {
+    spawnOrbs(w, p.x, p.y - 20, lost, true);
+    p.lostX = p.x;
+    p.lostY = p.y;
+  }
+  w.events.push({ type: 'playerDeath', x: p.x, y: p.y, pid: p.id, lost });
+}
+
+export function stunEnemy(w: World, e: Enemy, pushDir: number, ticks: number = ENEMY.STUN_TICKS): void {
+  releaseToken(w, e);
+  e.state = 'stunned';
+  e.stateT = 0;
+  e.stunLen = e.type === 'boss' ? BOSS.STAGGER : ticks;
+  e.move = 'none';
+  if (e.type !== 'boss') e.vx = pushDir * 180;
+  e.freeze = 8;
+}
+
+export interface HitInfo {
+  dmg: number;
+  kbx: number;
+  kby: number;
+  hitstop: number;
+  cut: number;
+  heavy: boolean; // brise la garde de l'oni
+  fromX: number;
+  fromY: number;
+}
+
+export type HitResult = 'none' | 'blocked' | 'hit' | 'kill';
+
+/** Oni en garde, frappé de face et pas depuis le dessus ? */
+function guards(e: Enemy, h: HitInfo): boolean {
+  if (e.type !== 'oni') return false;
+  if (e.state !== 'patrol' && e.state !== 'chase' && e.state !== 'windup') return false;
+  const front = Math.sign(h.fromX - e.x) === e.facing;
+  const fromAbove = h.fromY < e.y - e.h * 0.85;
+  return front && !fromAbove;
+}
+
+export function hitEnemy(w: World, p: Player, e: Enemy, h: HitInfo): HitResult {
+  if (e.state === 'dead' || e.state === 'doomed' || e.state === 'hidden' || e.state === 'intro') return 'none';
+
+  if (guards(e, h)) {
+    if (!h.heavy) {
+      // Bouclier : le coup rebondit.
+      e.flash = 2;
+      e.freeze = 3;
+      p.freeze = Math.max(p.freeze, 4);
+      p.vx = -Math.sign(e.x - p.x) * 220;
+      w.events.push({ type: 'block', x: e.x + e.facing * 14, y: e.y - e.h * 0.55, dir: -e.facing });
+      return 'blocked';
+    }
+    stunEnemy(w, e, Math.sign(e.x - h.fromX) || 1, 80);
+    w.events.push({ type: 'guardBreak', x: e.x + e.facing * 14, y: e.y - e.h * 0.55 });
+  }
+
+  const mult = e.state === 'stunned' ? 1.5 : 1; // punition après parade
+  const dmg = h.dmg * mult;
+  e.hp -= dmg;
+  e.flash = 5;
+  e.freeze = h.hitstop;
+  if (e.type !== 'boss') {
+    e.vx = h.kbx;
+    e.vy = h.kby;
+    if (h.kby < 0) e.onGround = false;
+  }
+  if (p.state !== 'dead') p.hp = Math.min(p.maxHp, p.hp + leechHeal(p));
+  bumpCombo(p);
+  w.events.push({ type: 'hit', x: e.x, y: e.y - e.h * 0.55, dir: h.kbx >= 0 ? 1 : -1, damage: dmg, heavy: h.heavy, targetId: e.id });
+
+  if (e.hp <= 0) {
+    killEnemy(w, e, p, h.cut, false);
+    return 'kill';
+  }
+  // Le boss a une super-armure : il ne vacille pas, sauf s'il est déjà étourdi.
+  if (e.type !== 'boss' && e.state !== 'stunned') {
+    releaseToken(w, e);
+    e.state = 'hitstun';
+    e.stateT = 0;
+    e.move = 'none';
+    e.stunLen = h.heavy ? 30 : 20;
+  }
+  return 'hit';
+}
+
+/** Frappe d'iai fatale : l'ennemi se fige… puis se sépare en deux un instant plus tard. */
+export function doomEnemy(w: World, p: Player, e: Enemy): void {
+  if (e.state === 'dead' || e.state === 'doomed') return;
+  releaseToken(w, e);
+  e.state = 'doomed';
+  e.stateT = 0;
+  e.vx = 0;
+  e.vy = 0;
+  e.flash = 4;
+  e.doomBy = p.id;
+  bumpCombo(p);
+  w.events.push({ type: 'doom', id: e.id, x: e.x, y: e.y - e.h / 2 });
+}
+
+export function killEnemy(w: World, e: Enemy, p: Player | null, cut: number, byIai: boolean): void {
+  releaseToken(w, e);
+  e.state = 'dead';
+  w.totalKills++;
+  w.stage.kills++;
+  if (w.wave.phase === 'tide') w.wave.kills++;
+  let honor: number = HONOR[e.type];
+  if (p) {
+    p.kills++;
+    honor = Math.round(honor * (1 + Math.min(20, p.combo) * HONOR.COMBO_BONUS));
+  }
+  spawnOrbs(w, e.x, e.y - e.h * 0.5, honor, false);
+  w.events.push({
+    type: 'kill',
+    id: e.id,
+    enemyType: e.type,
+    x: e.x,
+    y: e.y,
+    facing: e.facing,
+    dir: p ? (e.x >= p.x ? 1 : -1) : 1,
+    cutAngle: cut,
+    byIai,
+    pid: p ? p.id : 0,
+    honor,
+  });
+}
+
+function bumpCombo(p: Player): void {
+  p.combo++;
+  p.comboTimer = P.COMBO_TIMEOUT;
+  if (p.combo > p.bestCombo) p.bestCombo = p.combo;
+}
+
+// ─── Honneur ────────────────────────────────────────────────────────────────
+
+export function spawnOrbs(w: World, x: number, y: number, total: number, lost: boolean): void {
+  let left = Math.round(total);
+  let count = 0;
+  while (left > 0 && count < 40) {
+    const v = left >= 50 ? 25 : left >= 12 ? 5 : 1;
+    const value = Math.min(left, count === 39 ? left : v);
+    left -= value;
+    count++;
+    const ang = -Math.PI / 2 + (w.rng.next() - 0.5) * 2.2;
+    const spd = 120 + w.rng.next() * 220;
+    w.orbs.push({
+      id: w.nextId++, x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd, value,
+      life: lost ? HONOR.LOST_LIFE : HONOR.ORB_LIFE, lost, onGround: false,
+    });
+  }
+}
+
+export function gainHonor(w: World, p: Player, v: number): void {
+  p.honor += v;
+  w.stage.honor += v;
+  while (p.honor >= honorForLevel(p.level + 1)) {
+    p.level++;
+    p.picks++;
+    w.events.push({ type: 'levelUp', level: p.level, pid: p.id });
+  }
+  if (p.picks > 0 && p.offer.length === 0) p.offer = rollOffer(w.rng, p.up);
+}
