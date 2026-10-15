@@ -36,7 +36,8 @@ You are a lone ronin with a katana, cutting through hordes along the Tōkaidō r
 - **Ink rendering**: brush strokes that boil like hand-drawn animation, ink stains that build up on the ground, foes cut in half, hit-stop, slow motion.
 - **Adaptive music**, generated in the *In* (Miyako-bushi) scale:
   - koto and shamisen synthesized with Karplus-Strong;
-  - shakuhachi and taiko;
+  - a **shinobue** (bamboo transverse flute) lead: phrases built as motif, variation, contrast and cadence, with grace notes, trills, slides and falls;
+  - shakuhachi in call-and-response with the flute, and taiko;
   - it follows the action: calm, Tide, guardian.
 
 ## Getting started

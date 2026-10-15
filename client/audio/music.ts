@@ -2,23 +2,25 @@
 // Un séquenceur à anticipation (lookahead) planifie des doubles-croches ; chaque
 // ambiance active des pistes différentes, avec des fondus calés sur les mesures.
 //
-//  calm : koto en arpèges, shakuhachi, nappe, claves
-//  tide : + taiko, ostinato de shamisen, basse
-//  boss : taiko martelé et roulements, kane, shamisen agressif, cris de shakuhachi
-//  rest : koto lent et nappe (bilan)
+//  calm : koto en arpèges, nappe, claves ; shakuhachi et shinobue en question-réponse
+//  tide : + taiko, ostinato de shamisen, basse, mélodie vive de shinobue
+//  boss : taiko martelé et roulements, kane, shamisen agressif, shinobue perçant, cris de shakuhachi
+//  rest : koto lent, nappe et quelques phrases de shinobue (bilan)
+
+import { type MelodyNote, type Ornament, PHRASE_STEPS, phraseFor } from './melody';
 
 export type Mood = 'calm' | 'tide' | 'boss' | 'rest';
-type Track = 'pad' | 'koto' | 'flute' | 'drums' | 'shamisen' | 'bass';
+type Track = 'pad' | 'koto' | 'flute' | 'shinobue' | 'drums' | 'shamisen' | 'bass';
 
 const IN_SCALE = [0, 1, 5, 7, 8]; // ré, mi♭, sol, la, si♭
 const ROOT_MIDI = 50; // ré 3
 const PROG = [0, 0, -1, -2]; // ré, ré, si♭, la (en degrés de la gamme), 2 mesures chacun
 
 const MOODS: Record<Mood, { bpm: number; mix: Record<Track, number> }> = {
-  calm: { bpm: 112, mix: { pad: 0.55, koto: 0.75, flute: 0.7, drums: 0.3, shamisen: 0, bass: 0 } },
-  tide: { bpm: 132, mix: { pad: 0.35, koto: 0.35, flute: 0.25, drums: 1, shamisen: 0.8, bass: 0.8 } },
-  boss: { bpm: 144, mix: { pad: 0.3, koto: 0.2, flute: 0.6, drums: 1.15, shamisen: 1, bass: 1 } },
-  rest: { bpm: 96, mix: { pad: 0.65, koto: 0.8, flute: 0.35, drums: 0, shamisen: 0, bass: 0 } },
+  calm: { bpm: 112, mix: { pad: 0.55, koto: 0.7, flute: 0.7, shinobue: 0.6, drums: 0.3, shamisen: 0, bass: 0 } },
+  tide: { bpm: 132, mix: { pad: 0.35, koto: 0.3, flute: 0.25, shinobue: 0.75, drums: 1, shamisen: 0.7, bass: 0.8 } },
+  boss: { bpm: 144, mix: { pad: 0.3, koto: 0.2, flute: 0.5, shinobue: 0.7, drums: 1.15, shamisen: 0.9, bass: 1 } },
+  rest: { bpm: 96, mix: { pad: 0.65, koto: 0.8, flute: 0.35, shinobue: 0.45, drums: 0, shamisen: 0, bass: 0 } },
 };
 
 // Motifs (degrés relatifs à l'accord, null = silence), 16 doubles-croches par mesure.
@@ -69,6 +71,7 @@ export class Music {
   private reverb: ConvolverNode;
   private noise: AudioBuffer;
   private plucks = new Map<string, { buf: AudioBuffer; rate: number }>();
+  private flueCurve: Float32Array<ArrayBuffer>; // courbe de saturation douce : harmoniques du shinobue
   private padOscs: OscillatorNode[] = [];
   private padLfo: OscillatorNode | null = null;
   private timer = 0;
@@ -93,14 +96,21 @@ export class Music {
     this.reverb.connect(wet);
     wet.connect(this.out);
 
-    const pans: Record<Track, number> = { pad: 0, koto: -0.3, flute: 0.15, drums: 0, shamisen: 0.3, bass: 0 };
-    const sends: Record<Track, number> = { pad: 0.6, koto: 0.5, flute: 0.7, drums: 0.15, shamisen: 0.25, bass: 0 };
+    const pans: Record<Track, number> = { pad: 0, koto: -0.3, flute: 0.15, shinobue: -0.12, drums: 0, shamisen: 0.3, bass: 0 };
+    const sends: Record<Track, number> = { pad: 0.6, koto: 0.5, flute: 0.7, shinobue: 0.5, drums: 0.15, shamisen: 0.25, bass: 0 };
     for (const t of Object.keys(pans) as Track[]) {
       const g = ctx.createGain();
       g.gain.value = MOODS.calm.mix[t];
       const p = ctx.createStereoPanner();
       p.pan.value = pans[t];
-      g.connect(p);
+      if (t === 'shinobue') {
+        // Passe-haut : supprime la composante continue créée par la saturation.
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 160;
+        g.connect(hp);
+        hp.connect(p);
+      } else g.connect(p);
       p.connect(this.out);
       const send = ctx.createGain();
       send.gain.value = sends[t];
@@ -112,6 +122,17 @@ export class Music {
     this.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+    // Polynômes de Tchebychev : un sinus devient fondamentale + 2e et 3e harmoniques,
+    // qui suivent automatiquement les glissés et les trilles.
+    const n = 1024;
+    this.flueCurve = new Float32Array(new ArrayBuffer(n * 4));
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 2 - 1;
+      // Courbe nulle en 0 (pas de tension continue au repos) ; le léger décalage qu'ajoute
+      // le terme pair pendant une note est retiré par le passe-haut de la piste.
+      this.flueCurve[i] = (x + 0.44 * x * x + 0.08 * (4 * x * x * x - 3 * x)) / 1.3;
+    }
 
     this.startPad();
     this.nextTime = ctx.currentTime + 0.15;
@@ -226,11 +247,44 @@ export class Music {
       if (s === 0 && this.bar % 4 === 0) this.odaiko(t, 0.35);
     }
 
-    // Shakuhachi : longues phrases au calme, cris pendant le combat du gardien
+    // Shinobue : la mélodie principale, phrase par phrase (planifiée mesure par mesure)
+    if (mix.shinobue > 0 && s === 0) this.shinobueBar(t, chord);
+
+    // Shakuhachi : longues phrases au calme (en alternance avec le shinobue), cris contre le gardien
+    const section = Math.floor(this.bar / 8);
     if (mix.flute > 0 && s === 0) {
-      if ((m === 'calm' || m === 'rest') && this.bar % 4 === 1) this.flutePhrase(t, chord, phrase);
+      if ((m === 'calm' || m === 'rest') && this.bar % 4 === 1 && section % 2 === 0) this.flutePhrase(t, chord, phrase);
       if (m === 'boss' && this.bar % 4 === 0) this.fluteNote(midiToHz(degreeMidi(chord + 7, 1)), t, this.stepDur() * 10, 0.16, true);
       if (m === 'tide' && this.bar % 8 === 4) this.fluteNote(midiToHz(degreeMidi(chord + 5, 1)), t, this.stepDur() * 12, 0.12, true);
+    }
+  }
+
+  /** Le shinobue joue-t-il dans cette section ? (question-réponse avec le shakuhachi au calme) */
+  private shinobueActive(section: number, slot: number): boolean {
+    switch (this.mood) {
+      case 'calm':
+        return section % 2 === 1;
+      case 'rest':
+        return slot === 0 || slot === 3;
+      default:
+        return true;
+    }
+  }
+
+  /** Planifie la moitié de phrase qui tombe dans la mesure qui commence à `t`. */
+  private shinobueBar(t: number, chord: number): void {
+    const section = Math.floor(this.bar / 8);
+    const slot = Math.floor((this.bar % 8) / 2);
+    if (!this.shinobueActive(section, slot)) return;
+    const half = this.bar % 2;
+    const sd = this.stepDur();
+    const gain = this.mood === 'tide' ? 0.16 : this.mood === 'boss' ? 0.17 : this.mood === 'rest' ? 0.15 : 0.18;
+    const notes: MelodyNote[] = phraseFor(section, slot, this.mood, chord);
+    for (const nt of notes) {
+      const local = nt.start - half * (PHRASE_STEPS / 2);
+      if (local < 0 || local >= PHRASE_STEPS / 2) continue;
+      const upper = midiToHz(degreeMidi(nt.deg + 1, 1));
+      this.shinobueNote(midiToHz(degreeMidi(nt.deg, 1)), upper, t + local * sd, nt.len * sd * 0.92, gain, nt.orn);
     }
   }
 
@@ -352,6 +406,87 @@ export class Music {
       s.start(t);
       s.stop(t + dur + 0.05);
     }
+  }
+
+  /**
+   * Shinobue : sinus saturé (harmoniques), attaque soufflée « chiff », vibrato tardif,
+   * et ornements : appoggiature (grace), trille, glissé montant (slide), chute finale (fall).
+   */
+  private shinobueNote(freq: number, upper: number, t: number, dur: number, gain: number, orn: Ornament): void {
+    const ctx = this.ctx;
+    const t0 = Math.max(ctx.currentTime, t);
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    const f = o.frequency;
+    if (orn === 'grace') {
+      f.setValueAtTime(upper, t0);
+      f.setValueAtTime(freq, t0 + 0.05);
+    } else if (orn === 'slide') {
+      f.setValueAtTime(freq * 0.89, t0);
+      f.exponentialRampToValueAtTime(freq, t0 + 0.14);
+    } else f.setValueAtTime(freq, t0);
+    if (orn === 'trill' && dur > 0.35) {
+      // Trille vers la note supérieure, entre 30 % et 85 % de la durée.
+      for (let k = 0, at = t0 + dur * 0.3; at < t0 + dur * 0.85; k++, at += 1 / 11) f.setValueAtTime(k % 2 ? freq : upper, at);
+      f.setValueAtTime(freq, t0 + dur * 0.85);
+    }
+    if (orn === 'fall' && dur > 0.3) {
+      f.setValueAtTime(freq, t0 + dur * 0.7);
+      f.exponentialRampToValueAtTime(freq * 0.84, t0 + dur);
+    }
+    // Vibrato qui n'arrive qu'après l'attaque (jeu traditionnel)
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 6.2;
+    const lfoG = ctx.createGain();
+    lfoG.gain.setValueAtTime(0, t0);
+    lfoG.gain.setValueAtTime(0, t0 + Math.min(0.25, dur * 0.4));
+    lfoG.gain.linearRampToValueAtTime(freq * 0.007, t0 + Math.max(0.3, dur * 0.8));
+    lfo.connect(lfoG);
+    lfoG.connect(f);
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = this.flueCurve;
+    shaper.oversample = '2x';
+    // Enveloppe : événements toujours dans l'ordre chronologique, même pour une double-croche.
+    const atk = Math.min(0.03, dur * 0.3);
+    const rel = Math.min(0.08, dur * 0.4);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.exponentialRampToValueAtTime(gain, t0 + atk);
+    if (dur > atk + 0.09 + rel) {
+      env.gain.exponentialRampToValueAtTime(gain * 0.8, t0 + atk + 0.09);
+      env.gain.setValueAtTime(gain * 0.8, t0 + dur - rel);
+    } else env.gain.setValueAtTime(gain, t0 + dur - rel);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(shaper);
+    shaper.connect(env);
+    env.connect(this.tracks.shinobue);
+    // Souffle : bouffée à l'attaque, puis un filet d'air
+    const n = ctx.createBufferSource();
+    n.buffer = this.noise;
+    n.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = Math.min(9000, freq * 1.6);
+    bp.Q.value = 1.2;
+    const chiff = Math.min(0.015, dur * 0.15);
+    const settle = Math.min(0.09, dur * 0.5);
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t0);
+    ng.gain.exponentialRampToValueAtTime(gain * 0.55, t0 + chiff);
+    ng.gain.exponentialRampToValueAtTime(gain * 0.06, t0 + settle);
+    ng.gain.setValueAtTime(gain * 0.06, t0 + Math.max(settle, dur - 0.06));
+    ng.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    n.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.tracks.shinobue);
+    o.start(t0);
+    lfo.start(t0);
+    n.start(t0, Math.random() * 0.5);
+    for (const src of [o, lfo, n]) src.stop(t0 + dur + 0.05);
+    // Libère le graphe de la note une fois jouée (la saturation n'est plus alimentée).
+    o.onended = () => {
+      for (const node of [o, lfo, lfoG, shaper, env, n, bp, ng]) node.disconnect();
+    };
   }
 
   private bass(freq: number, t: number, gain: number): void {
