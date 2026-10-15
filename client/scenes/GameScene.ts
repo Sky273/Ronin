@@ -4,7 +4,8 @@ import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, PLAYER as P, SPEAR_HB, T
 import { gainHonor } from '../../shared/interactions';
 import type { Rect } from '../../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../../shared/types';
-import { addPlayer, createWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
+import { DIFFICULTIES, type DifficultyId } from '../../shared/difficulty';
+import { addPlayer, createWorld, resetWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
 import { Sfx } from '../audio/sfx';
 import { Fx } from '../fx/fx';
@@ -17,11 +18,26 @@ import {
 import { bossTrail, drawEnemy, enemyPose, enemySkeleton, isGuarding, SCALE, windupLength } from '../render/enemies';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
 import { Terrain } from '../render/terrain';
+import { insertScore, loadPrefs, loadScores, type Prefs, qualifies, sanitizeName, saveScores, savePrefs } from '../scores/highscores';
+import type { ScoreTable } from '../scores/types';
+import { DifficultySelect } from '../ui/difficultySelect';
+import { DIFFICULTY_TEXT, fmtScore, foesLabel, livesLabel } from '../ui/difficultyText';
 import { Hud } from '../ui/hud';
+import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
+import { Scoreboard } from '../ui/scoreboard';
 import { UPGRADE_TEXT } from '../ui/texts';
+import { TitleScreen } from '../ui/title';
 
 type Layer = 'bg' | 'world' | 'ui';
+/** Écran courant : menus, partie, fin de partie, saisie du nom, tableau des scores. */
+type Screen = 'title' | 'select' | 'play' | 'over' | 'name' | 'scores';
+type GameOverInfo = { score: number; loop: number; kills: number };
+
+const MENU_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyS', 'KeyA', 'KeyD', 'Enter', 'NumpadEnter', 'Space', 'Escape'];
+/** Délai avant de quitter l'écran de fin de partie (s) : automatique, ou à la première touche après GAME_OVER_SKIP. */
+const GAME_OVER_HOLD = 3.2;
+const GAME_OVER_SKIP = 1.2;
 type G = Phaser.GameObjects.Graphics;
 
 const ZOOM = 1.4;
@@ -46,14 +62,22 @@ export class GameScene extends Phaser.Scene {
   private gFront!: G;
   private gDebug!: G;
   private gOverlay!: G;
-  private title!: Phaser.GameObjects.Container;
+  private titleScreen!: TitleScreen;
+  private diffSelect!: DifficultySelect;
+  private nameEntry!: NameEntry;
+  private scoreboard!: Scoreboard;
   private deathText!: Phaser.GameObjects.Text;
   private deathSub!: Phaser.GameObjects.Text;
 
   private inputs = new Map<number, number>();
   private acc = 0;
   private timeScale = 1;
-  private started = false;
+  private screen: Screen = 'title';
+  private difficulty: DifficultyId = 'normal';
+  private prefs: Prefs = { difficulty: 'normal', name: '' };
+  private scores: ScoreTable = loadScores();
+  private overInfo: GameOverInfo | null = null;
+  private overT = 0;
   private debug = false;
   private slowmo = 0;
   private flash = 0;
@@ -91,7 +115,9 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     const W = this.scale.width;
     const H = this.scale.height;
-    this.world = createWorld((Date.now() & 0xffff) + 1);
+    this.prefs = loadPrefs();
+    this.difficulty = this.prefs.difficulty;
+    this.world = createWorld((Date.now() & 0xffff) + 1, { difficulty: this.difficulty });
     this.me = addPlayer(this.world, 'Ronin');
     const L = this.world.level;
 
@@ -121,61 +147,176 @@ export class GameScene extends Phaser.Scene {
     });
     this.deathText = this.put(this.add.text(W / 2, H * 0.42, '討死', { fontFamily: FONT_BRUSH, fontSize: '150px', color: '#b8321f' }).setOrigin(0.5).setDepth(150).setAlpha(0), 'ui');
     this.deathSub = this.put(this.add.text(W / 2, H * 0.6, '', { fontFamily: FONT_TEXT, fontSize: '22px', color: '#15120e', align: 'center' }).setOrigin(0.5).setDepth(150).setAlpha(0), 'ui');
-    this.buildTitle();
+    this.buildScreens();
 
     this.controls = new Controls(this.game.canvas);
     this.controls.onKey('F1', () => (this.debug = !this.debug));
     this.controls.onKey('KeyM', () => this.sfx.toggleMute());
     this.controls.onKey('KeyN', () => this.music?.toggle());
     this.controls.onKey('KeyH', () => this.hud.toggleHelp());
-    this.controls.onKey('Enter', () => this.start());
-    this.controls.onKey('Space', () => this.start());
-    this.input.on('pointerdown', () => this.start());
+    for (const code of MENU_KEYS) this.controls.onKey(code, () => this.menuKey(code));
     if (import.meta.env.DEV) {
       // Raccourcis de test : F2 phase de Marée suivante, F3 arène du gardien, F4 +100 Honneur.
-      this.controls.onKey('F2', () => skipWavePhase(this.world));
-      this.controls.onKey('F3', () => warpToArena(this.world));
-      this.controls.onKey('F4', () => gainHonor(this.world, this.me, 100));
+      this.controls.onKey('F2', () => this.screen === 'play' && skipWavePhase(this.world));
+      this.controls.onKey('F3', () => this.screen === 'play' && warpToArena(this.world));
+      this.controls.onKey('F4', () => this.screen === 'play' && gainHonor(this.world, this.me, 100));
       (window as unknown as { __ronin: unknown }).__ronin = this;
     }
   }
 
-  private buildTitle(): void {
-    const W = this.scale.width;
-    const H = this.scale.height;
-    const r = seeded(9);
-    const veil = this.add.rectangle(0, 0, W, H, C.paper, 0.78).setOrigin(0);
-    const kanji = this.add.text(W / 2 - 20, H * 0.36, '浪人', { fontFamily: FONT_BRUSH, fontSize: '200px', color: '#15120e' }).setOrigin(0.5);
-    const seal = this.add.graphics();
-    const sx = W / 2 + 205;
-    const sy = H * 0.2;
-    gFill(seal, [{ x: sx - 30, y: sy - 31 }, { x: sx + 31, y: sy - 29 }, { x: sx + 29, y: sy + 31 }, { x: sx - 31, y: sy + 29 }], C.red, 0.92);
-    gStroke(seal, ringPoints(W / 2 - 20, H * 0.36, 175, -2.6, 2.9, 40), C.ink, 0.12, { width: 22, taperStart: 0.3, taperEnd: 0.6 }, r);
-    const sealText = this.add.text(sx, sy, '侍', { fontFamily: FONT_BRUSH, fontSize: '44px', color: '#f0e7d3' }).setOrigin(0.5);
-    const name = this.add.text(W / 2, H * 0.6, 'R O N I N . I O', { fontFamily: FONT_TEXT, fontSize: '34px', color: '#15120e' }).setOrigin(0.5);
-    const sub = this.add.text(W / 2, H * 0.66, 'the way of the sword — prototype', { fontFamily: FONT_TEXT, fontSize: '18px', color: '#4a433b' }).setOrigin(0.5);
-    const press = this.add.text(W / 2, H * 0.8, 'Press ENTER or click to draw your blade', { fontFamily: FONT_TEXT, fontSize: '22px', color: '#b8321f' }).setOrigin(0.5);
-    this.tweens.add({ targets: press, alpha: 0.35, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    this.title = this.add.container(0, 0, [veil, seal, kanji, sealText, name, sub, press]).setDepth(200);
-    this.put(this.title, 'ui');
+  // ─── Écrans et enchaînement des parties ──────────────────────────────────
+
+  private buildScreens(): void {
+    this.titleScreen = new TitleScreen(this, this.put, {
+      onPlay: () => this.goSelect(),
+      onScores: () => this.goScores(this.difficulty, -1),
+    });
+    this.diffSelect = new DifficultySelect(this, this.put, {
+      onPick: (d) => this.newRun(d),
+      onBack: () => this.goTitle(),
+    });
+    this.nameEntry = new NameEntry(this, this.put, { onSubmit: (raw) => this.submitName(raw) });
+    this.scoreboard = new Scoreboard(this, this.put, {
+      onPlayAgain: () => this.goSelect(),
+      onTitle: () => this.goTitle(),
+    });
+    this.titleScreen.show();
   }
 
-  private start(): void {
-    if (this.started) return;
-    this.started = true;
+  /** Premier geste de l'utilisateur : le navigateur autorise alors l'audio. */
+  private ensureAudio(): void {
     this.sfx.init();
     const out = this.sfx.output;
     if (out && !this.music) {
       this.music = new Music(out.ctx, out.dest);
       this.events.once('destroy', () => this.music?.dispose());
     }
-    this.tweens.add({ targets: this.title, alpha: 0, duration: 600, ease: 'Sine.easeIn', onComplete: () => this.title.setVisible(false) });
+  }
+
+  /** Aiguillage des touches de menu vers l'écran actif (sans effet en jeu). */
+  private menuKey(code: string): void {
+    if (this.screen === 'play') return;
+    this.ensureAudio();
+    if (this.screen === 'title') this.titleScreen.key(code);
+    else if (this.screen === 'select') this.diffSelect.key(code);
+    else if (this.screen === 'scores') this.scoreboard.key(code);
+    else if (this.screen === 'over' && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
+  }
+
+  private hideScreens(): void {
+    for (const s of [this.titleScreen, this.diffSelect, this.nameEntry, this.scoreboard]) if (s.visible) s.hide();
+  }
+
+  private goTitle(): void {
+    this.hideScreens();
+    this.screen = 'title';
+    this.titleScreen.show();
+  }
+
+  private goSelect(): void {
+    this.ensureAudio();
+    this.hideScreens();
+    this.screen = 'select';
+    this.diffSelect.show(this.difficulty);
+  }
+
+  private goScores(focus: DifficultyId, highlight: number): void {
+    this.hideScreens();
+    this.screen = 'scores';
+    this.scoreboard.show(this.scores, focus, highlight);
+  }
+
+  /** Nouvelle partie : le monde est réinitialisé sur place, tout l'état client aussi. */
+  private newRun(d: DifficultyId): void {
+    this.ensureAudio();
+    this.hideScreens();
+    this.difficulty = d;
+    this.prefs = { ...this.prefs, difficulty: d };
+    savePrefs(this.prefs);
+
+    resetWorld(this.world, (Date.now() & 0xffff) + 1, { difficulty: d });
+    this.me = addPlayer(this.world, sanitizeName(this.prefs.name));
+    this.terrain.repaint();
+    this.prev.clear();
+    this.phase.clear();
+    this.lastPose.clear();
+    this.scarf = [];
+    this.lastPlayerPose = null;
+    this.acc = 0;
+    this.slowmo = this.flash = this.shake = this.zoomPunch = this.wipe = this.hurtFlash = 0;
+    this.orbStreak = this.orbStreakT = this.lastLost = 0;
+    this.parryTick = -999;
+    this.overInfo = null;
+    this.overT = 0;
+    this.camX = this.me.x + 60;
+    this.camY = this.me.y - 60;
+    this.worldCam.centerOn(this.camX, this.camY);
+    this.results.hide();
+    this.hud.reset();
+    this.fx.clear();
+    this.controls.reset();
+    this.deathText.setText('討死').setAlpha(0);
+    this.deathSub.setAlpha(0);
+
+    this.screen = 'play';
+    const t = DIFFICULTY_TEXT[d];
+    this.sfx.taiko(false);
+    this.hud.banner(t.kanji, `${t.name} — the journey begins`, `${livesLabel(DIFFICULTIES[d].lives)} · score ×${DIFFICULTIES[d].scoreMult}`, '#15120e', 2000);
+  }
+
+  private onGameOver(info: GameOverInfo): void {
+    this.overInfo = info;
+    this.overT = 0;
+    this.screen = 'over';
+    this.controls.reset();
+    this.sfx.gong();
+  }
+
+  /** Après l'écran 討死 : inscription du nom si le score entre au tableau, sinon tableau direct. */
+  private leaveGameOver(): void {
+    const info = this.overInfo;
+    if (!info || this.screen !== 'over') return;
+    const list = this.scores[this.difficulty];
+    if (qualifies(list, info.score)) {
+      const { rank } = insertScore(list, this.entryFor(info, sanitizeName(this.prefs.name)));
+      this.screen = 'name';
+      this.deathText.setAlpha(0);
+      this.deathSub.setAlpha(0);
+      this.nameEntry.show({ score: info.score, rank, difficulty: this.difficulty, defaultName: this.prefs.name });
+      this.controls.setTextMode((key, code) => this.nameEntry.keyText(key, code));
+    } else {
+      this.deathText.setAlpha(0);
+      this.deathSub.setAlpha(0);
+      this.goScores(this.difficulty, -1);
+    }
+  }
+
+  private entryFor(info: GameOverInfo, name: string) {
+    return { name, score: info.score, loop: info.loop, kills: info.kills, date: Date.now() };
+  }
+
+  private submitName(raw: string): void {
+    const info = this.overInfo;
+    if (!info) return;
+    this.controls.setTextMode(null);
+    const name = sanitizeName(raw);
+    const { list, rank } = insertScore(this.scores[this.difficulty], this.entryFor(info, name));
+    this.scores = { ...this.scores, [this.difficulty]: list };
+    // Stockage indisponible (navigation privée, quota) : le tableau reste valable pour la session.
+    if (!saveScores(this.scores)) console.warn('Ronin.io: high scores could not be saved (storage unavailable).');
+    this.prefs = { ...this.prefs, name };
+    savePrefs(this.prefs);
+    this.sfx.bell();
+    this.goScores(this.difficulty, rank);
   }
 
   update(time: number, delta: number): void {
     const dt = Math.min(delta, 50) / 1000;
     this.timeScale = 1;
-    if (this.started) {
+    this.scoreboard.update(dt);
+    if (this.screen === 'over') this.overT += dt;
+    if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
+    if (this.screen === 'play' || this.screen === 'over') {
       if (this.slowmo > 0) {
         this.slowmo -= dt;
         this.timeScale = 0.3;
@@ -268,13 +409,18 @@ export class GameScene extends Phaser.Scene {
     this.hud.update(this.me, w, this.best, dt, time, this.worldCam);
     this.updateMusic();
 
-    const dead = this.me.state === 'dead';
+    const dead = this.me.state === 'dead' && (this.screen === 'play' || this.screen === 'over');
     const da = dead ? Math.min(1, this.me.stateT / 40) : Math.max(0, this.deathText.alpha - dt * 3);
     this.deathText.setAlpha(da);
     this.deathSub.setAlpha(da);
     if (dead) {
-      const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
-      this.deathSub.setText(`${this.me.kills} foes slain${lost}\nYou will be reborn at the shrine…`);
+      if (this.me.out) {
+        const skip = this.screen === 'over' && this.overT > GAME_OVER_SKIP ? '\n\npress any key' : '';
+        this.deathSub.setText(`Your journey ends\n${fmtScore(this.me.score)} · ${foesLabel(this.me.runKills)}${skip}`);
+      } else {
+        const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
+        this.deathSub.setText(`${foesLabel(this.me.kills)}${lost}\n${livesLabel(this.me.lives)} left — you will be reborn at the shrine…`);
+      }
     }
   }
 
@@ -283,9 +429,10 @@ export class GameScene extends Phaser.Scene {
     if (!this.music) return;
     const st = this.world.stage.state;
     const wave = this.world.wave.phase;
-    const mood: Mood = st === 'arena' ? 'boss' : st === 'cleared' || st === 'gateOpen' ? 'rest' : wave === 'calm' ? 'calm' : 'tide';
+    const inGame = this.screen === 'play';
+    const mood: Mood = !inGame ? 'rest' : st === 'arena' ? 'boss' : st === 'cleared' || st === 'gateOpen' ? 'rest' : wave === 'calm' ? 'calm' : 'tide';
     this.music.setMood(mood);
-    this.music.duck(this.me.state === 'dead');
+    this.music.duck(inGame && this.me.state === 'dead');
   }
 
   /** Barrière de l'arène (kekkai) et porte de fin d'étape. */
@@ -663,6 +810,7 @@ export class GameScene extends Phaser.Scene {
       case 'playerDeath':
         this.sfx.death();
         this.lastLost = ev.lost;
+        if (ev.livesLeft <= 0) this.deathText.setText('討死');
         fx.inkBurst(ev.x, ev.y - 24, 1, 20, 400, C.red);
         fx.inkBurst(ev.x, ev.y - 24, -1, 20, 400, C.ink);
         this.slowmo = 0.6;
@@ -844,7 +992,10 @@ export class GameScene extends Phaser.Scene {
         this.sfx.bell();
         this.flash = 0.25;
         fx.ring(this.world.level.gate.x, this.world.level.gate.y - 50, 10, 120, 0.8, C.red, 4);
-        this.results.show(this.world.stage);
+        this.results.show(this.world.stage, this.me);
+        break;
+      case 'gameOver':
+        this.onGameOver({ score: ev.score, loop: ev.loop, kills: ev.kills });
         break;
       case 'stageStart':
         this.results.hide();

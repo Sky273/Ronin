@@ -587,6 +587,11 @@ function stepDead(w: World, p: Player): void {
   p.vx = approach(p.vx, 0, 900 * DT);
   gravity(p);
   physics(w, p);
+  // Plus de vie : le corps reste au sol, plus de renaissance.
+  if (p.out) {
+    p.outT++;
+    return;
+  }
   if (--p.respawnT <= 0) {
     p.x = p.spawnX;
     p.y = p.spawnY;

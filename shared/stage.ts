@@ -1,7 +1,7 @@
 import { TICK_RATE, TILE } from './constants';
-import { clearBonus, enemyHpMult, guardianHpMult } from './difficulty';
+import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { spawnEnemy } from './enemy';
-import { gainHonor } from './interactions';
+import { addScore, gainHonor } from './interactions';
 import { BTN } from './input';
 import { buildLevel, T_SOLID } from './level';
 import { handlePicks, resetForStage } from './player';
@@ -19,7 +19,7 @@ export function newStageState(loop: number, tick: number): StageState {
 
 /** Peuple l'étape avec ses ennemis de départ. */
 export function populateStage(w: World): void {
-  const hp = enemyHpMult(w.stage.loop);
+  const hp = enemyHpScale(w);
   for (const s of w.level.enemySpawns) spawnEnemy(w, s.type, s.x, s.y, false, hp);
 }
 
@@ -76,7 +76,7 @@ function lockArena(w: World): void {
   w.projectiles = [];
   w.wave.phase = 'calm';
   w.wave.t = 0;
-  const g = spawnEnemy(w, 'boss', a.guardianX, a.guardianY, false, guardianHpMult(st.loop));
+  const g = spawnEnemy(w, 'boss', a.guardianX, a.guardianY, false, guardianHpScale(w));
   g.state = 'intro';
   g.facing = -1;
   st.guardianId = g.id;
@@ -103,7 +103,10 @@ function clearStage(w: World): void {
   st.time = w.tick - st.startTick;
   st.grade = st.deaths === 0 && st.time < 6 * 60 * TICK_RATE ? 0 : st.deaths <= 1 ? 1 : 2;
   st.bonus = clearBonus(st.grade, st.loop);
-  for (const p of w.players) gainHonor(w, p, st.bonus);
+  for (const p of w.players) {
+    gainHonor(w, p, st.bonus);
+    if (!p.out) addScore(w, p, st.bonus);
+  }
   w.events.push({ type: 'stageClear', loop: st.loop, grade: st.grade, bonus: st.bonus });
 }
 

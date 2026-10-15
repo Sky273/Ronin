@@ -95,6 +95,15 @@ export class Fx {
 
   constructor(private level: Level, private terrain: Terrain) {}
 
+  /** Efface tous les effets en cours (nouvelle partie). */
+  clear(): void {
+    this.particles.length = 0;
+    this.corpses.length = 0;
+    this.ghosts.length = 0;
+    this.lines.length = 0;
+    this.rings.length = 0;
+  }
+
   private push(p: Partial<Particle> & { kind: Kind; x: number; y: number }): void {
     if (this.particles.length >= MAX_PARTICLES) this.particles.shift();
     this.particles.push({
