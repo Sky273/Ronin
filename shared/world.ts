@@ -1,8 +1,8 @@
 import { bodyRect } from './combat';
-import { DT, ENEMY, HONOR, SPAWN, TILE, WAVES } from './constants';
+import { DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
-import { damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
-import { DIFFICULTIES, type DifficultyId, enemyHpMult, extraEnemies, firstCalmMult } from './difficulty';
+import { addScore, damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
+import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
 import { buildLevel } from './level';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
@@ -43,6 +43,16 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
   return w;
 }
 
+/**
+ * Réinitialise le monde sur place (nouvelle partie) en conservant la référence
+ * w.level (le rendu du client la garde). Aucun joueur : rappeler addPlayer ensuite.
+ */
+export function resetWorld(w: World, seed: number, opts: WorldOptions = {}): void {
+  const fresh = createWorld(seed, opts);
+  Object.assign(w.level, fresh.level);
+  Object.assign(w, { ...fresh, level: w.level });
+}
+
 export function addPlayer(w: World, name: string): Player {
   const p = createPlayer(w.nextId++, name, w.level.spawn.x, w.level.spawn.y);
   p.lives = DIFFICULTIES[w.difficulty].lives;
@@ -52,6 +62,11 @@ export function addPlayer(w: World, name: string): Player {
 
 /** Un pas de simulation (1/60 s). inputs : masque de boutons par id de joueur. */
 export function stepWorld(w: World, inputs: Map<number, number>): void {
+  // Partie terminée : le monde est figé.
+  if (w.over) {
+    w.tick++;
+    return;
+  }
   if (w.stage.state === 'cleared') {
     stepCleared(w, inputs);
     w.tick++;
@@ -68,7 +83,20 @@ export function stepWorld(w: World, inputs: Map<number, number>): void {
     stepWaves(w);
     spawner(w);
   }
+  stepGameOver(w);
   w.tick++;
+}
+
+/** Tous les joueurs sont sortis : la simulation continue un instant, puis la partie se termine. */
+function stepGameOver(w: World): void {
+  if (!w.players.length || !w.players.every((p) => p.out)) return;
+  if (++w.overT < PLAYER.GAME_OVER_DELAY) return;
+  w.over = true;
+  const p = w.players[0];
+  w.events.push({
+    type: 'gameOver', pid: p.id, score: p.score, loop: w.stage.loop, kills: p.runKills,
+    deaths: DIFFICULTIES[w.difficulty].lives - p.lives,
+  });
 }
 
 // ─── Projectiles ────────────────────────────────────────────────────────────
@@ -208,6 +236,7 @@ function stepWaves(w: World): void {
         const bonus = 25 * wv.n;
         const p = w.players.find((q) => q.state !== 'dead');
         if (p) spawnOrbs(w, p.x, p.y - 60, bonus, false);
+        for (const q of w.players) if (!q.out) addScore(w, q, bonus);
         w.events.push({ type: 'tideEnd', n: wv.n, bonus });
         wv.phase = 'calm';
         wv.t = 0;
@@ -229,7 +258,7 @@ export function skipWavePhase(w: World): void {
   else wv.t = 1e6;
 }
 
-const hpMult = (w: World) => (1 + 0.12 * Math.max(0, w.wave.n - 1)) * enemyHpMult(w.stage.loop);
+const hpMult = (w: World) => (1 + 0.12 * Math.max(0, w.wave.n - 1)) * enemyHpScale(w);
 
 function pickType(w: World): EnemyType {
   const n = w.wave.n + w.stage.loop;
@@ -261,10 +290,11 @@ function spawner(w: World): void {
   w.spawnTimer = Math.floor(tide ? w.rng.range(26, 52) : w.rng.range(SPAWN.MIN_DELAY, SPAWN.MAX_DELAY));
   const alive = w.players.filter((p) => p.state !== 'dead');
   if (!alive.length) return;
-  const extra = extraEnemies(w.stage.loop);
-  const target = tide
+  const extra = extraEnemiesFor(w);
+  // Plancher : même en très facile, la horde garde au moins 2 ennemis.
+  const target = Math.max(2, tide
     ? Math.min(26 + extra, 10 + 3 * wv.n + extra)
-    : Math.min(SPAWN.MAX + extra, SPAWN.BASE + extra + Math.floor(w.stage.kills / SPAWN.PER_KILLS));
+    : Math.min(SPAWN.MAX + extra, SPAWN.BASE + extra + Math.floor(w.stage.kills / SPAWN.PER_KILLS)));
   if (w.enemies.length >= target) return;
   const p = alive[Math.floor(w.rng.next() * alive.length)];
   for (let attempt = 0; attempt < 6; attempt++) {
