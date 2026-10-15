@@ -446,13 +446,13 @@ function boss(c: Ctx): void {
       }
       if (c.adx > 100) {
         c.move = e.facing;
-        c.speed = d.speed * (p2 ? 1.4 : 1);
+        c.speed = d.speed * (p2 ? BOSS.RAGE_SPEED : 1);
       }
       if (c.move !== 0 && touchingWall(e, w.level, c.move)) c.move = 0;
       break;
     }
     case 'windup': {
-      const wind = e.move === 'sweep' ? (p2 ? 24 : d.windup) : e.move === 'horn' ? 50 : e.move === 'charge' ? 32 : 24;
+      const wind = bossWindup(e);
       if (t && e.move !== 'charge') e.facing = c.dx >= 0 ? 1 : -1;
       if (e.stateT < wind) break;
       e.hitDone = false;
@@ -472,7 +472,7 @@ function boss(c: Ctx): void {
       } else if (e.move === 'horn') {
         e.hornStage++;
         w.events.push({ type: 'horn', x: e.x, y: e.y - e.h });
-        for (const side of [-1, 1, -1]) {
+        for (const side of [-1, 1, -1].slice(0, BOSS.HORN_ADDS)) {
           const x = clamp(e.x + side * (150 + w.rng.next() * 80), 3 * TILE, (w.level.w - 3) * TILE);
           const gy = findGround(w.level, x, e.y);
           if (gy !== null) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpScale(w));
@@ -509,9 +509,12 @@ function boss(c: Ctx): void {
     }
     case 'recover': {
       c.friction = 2400;
-      const rec = e.move === 'charge' ? 50 : e.move === 'leap' ? (p2 ? 26 : 40) : p2 ? 28 : d.recover;
+      const rec =
+        e.move === 'charge' ? BOSS.CHARGE_RECOVER
+        : e.move === 'leap' ? (p2 ? BOSS.LEAP_RECOVER_RAGE : BOSS.LEAP_RECOVER)
+        : p2 ? BOSS.SWEEP_RECOVER_RAGE : d.recover;
       if (e.stateT >= rec) {
-        e.cd = p2 ? 20 : d.cooldown;
+        e.cd = p2 ? BOSS.COOLDOWN_RAGE : d.cooldown;
         setState(e, 'chase', 'none');
       }
       break;
@@ -519,3 +522,17 @@ function boss(c: Ctx): void {
   }
 }
 
+
+/** Durée de préparation de l'attaque en cours du boss (partagée avec le rendu des télégraphes). */
+export function bossWindup(e: Enemy): number {
+  switch (e.move) {
+    case 'sweep':
+      return e.phase2 ? BOSS.SWEEP_WINDUP_RAGE : ENEMY.boss.windup;
+    case 'horn':
+      return BOSS.HORN_WINDUP;
+    case 'charge':
+      return BOSS.CHARGE_WINDUP;
+    default:
+      return BOSS.LEAP_WINDUP;
+  }
+}

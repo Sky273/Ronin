@@ -1,5 +1,6 @@
 import type Phaser from 'phaser';
 import { BOSS, ENEMY } from '../../shared/constants';
+import { bossWindup } from '../../shared/enemy';
 import type { Enemy, EnemyType } from '../../shared/types';
 import { catmull, gBlob, gFill, gStroke, type Pt, type Rand, ringPoints } from './brush';
 import {
@@ -156,7 +157,7 @@ function ninjaPose(e: Enemy, t: number, phase: number): Pose {
 }
 
 function bossPose(e: Enemy, t: number, phase: number): Pose {
-  const wind = e.phase2 ? 24 : ENEMY.boss.windup;
+  const wind = bossWindup(e);
   switch (e.state) {
     case 'intro':
       return lerpPose(B_IDLE, B_ROAR, clamp01((t - 18) / 12));
@@ -482,12 +483,7 @@ export function isGuarding(e: Enemy): boolean {
 }
 
 export function windupLength(e: Enemy): number {
-  if (e.type === 'boss') {
-    if (e.move === 'sweep') return e.phase2 ? 24 : ENEMY.boss.windup;
-    if (e.move === 'horn') return 50;
-    if (e.move === 'charge') return 32;
-    return 24;
-  }
+  if (e.type === 'boss') return bossWindup(e);
   return ENEMY[e.type].windup + (e.type === 'ninja' ? 4 : 0);
 }
 

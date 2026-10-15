@@ -95,8 +95,8 @@ export const ENEMY = {
   },
   /** Akaoni, général démon (boss). */
   boss: {
-    w: 40, h: 92, hp: 560, speed: 90, patrolSpeed: 0, sight: 3000, range: 135,
-    windup: 34, active: 8, recover: 40, cooldown: 40, damage: 25, lunge: 0, arrowSpeed: 0,
+    w: 40, h: 92, hp: 420, speed: 80, patrolSpeed: 0, sight: 3000, range: 135,
+    windup: 42, active: 8, recover: 56, cooldown: 58, damage: 18, lunge: 0, arrowSpeed: 0,
   },
 } as const;
 
@@ -105,17 +105,33 @@ export const SPEAR_HB = { x: 4, y: -40, w: 62, h: 14 } as const;
 export const ONI_SMASH_HB = { x: 0, y: -64, w: 80, h: 64 } as const;
 export const NINJA_SLASH_HB = { x: 0, y: -40, w: 46, h: 32 } as const;
 
+// Réglages d'Akaoni (valeurs de base, avant multiplicateurs de difficulté et de boucle).
+// Assoupli après les premiers retours : préparations plus longues (plus lisibles),
+// fenêtres de punition plus larges, coups moins lourds, rage plus tardive.
 export const BOSS = {
   SWEEP_HB: { x: -10, y: -60, w: 145, h: 28 }, // passe au-dessus d'un joueur accroupi
-  SLAM_W: 150,
+  SLAM_W: 130,
   SLAM_H: 22, // onde de choc basse : il faut sauter
-  SLAM_DMG: 20,
-  CHARGE_SPEED: 560,
+  SLAM_DMG: 14,
+  CHARGE_SPEED: 500,
   CHARGE_TICKS: 55,
-  CHARGE_DMG: 22,
+  CHARGE_DMG: 16,
   LEAP_TICKS: 42,
-  STAGGER: 95,
+  STAGGER: 120, // étourdissement après une parade réussie
   INTRO: 100,
+  // Préparations (ticks) — la phase de rage les raccourcit
+  SWEEP_WINDUP_RAGE: 32,
+  LEAP_WINDUP: 32,
+  CHARGE_WINDUP: 40,
+  HORN_WINDUP: 50,
+  // Récupérations (ticks) : fenêtres où le boss est vulnérable
+  SWEEP_RECOVER_RAGE: 40,
+  LEAP_RECOVER: 56,
+  LEAP_RECOVER_RAGE: 38,
+  CHARGE_RECOVER: 64,
+  COOLDOWN_RAGE: 34,
+  RAGE_SPEED: 1.3,
+  HORN_ADDS: 2,
 } as const;
 
 export const SPAWN = {
