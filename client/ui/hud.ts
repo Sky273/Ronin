@@ -12,11 +12,11 @@ type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'worl
 type Text = Phaser.GameObjects.Text;
 
 const HELP = [
-  '←→ / Q D   se déplacer          Espace   sauter (double saut, saut mural)',
-  '↓ / S   se baisser · ↓ en courant : glissade · ↓ + Espace : traverser',
-  'J / clic   katana (combo ×3) · ↑+J   coupe montante · ↓+J en l’air   plongeon',
-  'Maj   dash · K / clic droit   parade · L (maintenir)   iai, dégainer-frapper',
-  '1 2 3   choisir une amélioration · H   aide · M   son · N   musique · F1   hitbox',
+  '← → / A D (Q D on AZERTY)   move          Space   jump (double jump, wall jump)',
+  '↓ / S   crouch · ↓ while running: slide · ↓ + Space: drop through',
+  'J / click   katana (combo ×3) · ↑+J   rising cut · ↓+J in the air   plunge',
+  'Shift   dash · K / right click   parry · L (hold)   iai, draw-and-strike',
+  '1 2 3   choose an upgrade · H   help · M   sound · N   music · F1   hitboxes',
 ];
 
 interface Card {
@@ -116,11 +116,11 @@ export class Hud {
     // Rang
     const rk = rankOf(p.level);
     if (rk.kanji !== this.lastRank) {
-      if (rk.level > 0 && p.level > 0) this.banner(rk.kanji, `Rang atteint : ${rk.name}`, '', '#b8321f', 1300);
+      if (rk.level > 0 && p.level > 0) this.banner(rk.kanji, `Rank attained: ${rk.name}`, '', '#b8321f', 1300);
       this.lastRank = rk.kanji;
     }
     this.rank.setText(rk.kanji);
-    this.rankName.setText(`${rk.name} · niveau ${p.level}`);
+    this.rankName.setText(`${rk.name} · level ${p.level}`);
 
     // Vie : trait vermillon sur un trait de lavis (s'allonge avec la Vitalité)
     this.shownHp += (p.hp - this.shownHp) * Math.min(1, dt * 6);
@@ -150,7 +150,7 @@ export class Hud {
     }
 
     this.kills.setText(String(p.kills));
-    this.record.setText(best > 0 ? `record ${best} · combo max ${p.bestCombo}` : '');
+    this.record.setText(best > 0 ? `best ${best} · best combo ${p.bestCombo}` : '');
 
     // Combo
     if (p.combo > this.lastCombo) this.comboPop = 1;
@@ -174,14 +174,14 @@ export class Hud {
     const W = this.scene.scale.width;
     const boss = w.enemies.find((e) => e.type === 'boss');
     const loop = st.loop > 0 ? `周 ${st.loop + 1}  ·  ` : '';
-    if (st.state === 'arena') this.wave.setText(`${loop}門  le gardien barre la route`).setColor('#8e2416');
-    else if (st.state === 'gateOpen') this.wave.setText(`${loop}門  la porte est ouverte — avancez →`).setColor('#b8321f');
+    if (st.state === 'arena') this.wave.setText(`${loop}門  the guardian bars the way`).setColor('#8e2416');
+    else if (st.state === 'gateOpen') this.wave.setText(`${loop}門  the gate is open — press on →`).setColor('#b8321f');
     else if (st.state === 'cleared') this.wave.setText('');
-    else if (wv.phase === 'tide') this.wave.setText(`${loop}潮  Marée ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`).setColor('#8e2416');
+    else if (wv.phase === 'tide') this.wave.setText(`${loop}潮  Tide ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`).setColor('#8e2416');
     else if (wv.phase === 'calm') {
       const left = Math.max(0, (calmLength(w) - wv.t) / 60);
-      this.wave.setText(`${loop}凪  accalmie — la Marée dans ${Math.ceil(left)} s`).setColor('#4a433b');
-    } else this.wave.setText(`${loop}潮  la Marée monte…`).setColor('#8e2416');
+      this.wave.setText(`${loop}凪  calm — the Tide comes in ${Math.ceil(left)} s`).setColor('#4a433b');
+    } else this.wave.setText(`${loop}潮  the Tide is rising…`).setColor('#8e2416');
 
     if (boss) {
       this.shownBoss += (boss.hp / boss.maxHp - this.shownBoss) * 0.15;
