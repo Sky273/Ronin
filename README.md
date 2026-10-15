@@ -31,6 +31,8 @@ You are a lone ronin with a katana, cutting through hordes along the Tōkaidō r
   - ranks go from Ronin to Shogun;
   - when you die, half your honor stays where you fell.
 - **Journey loops (周)**: after the stage results, the journey starts over, harder, keeping your upgrades.
+- **Five difficulty levels**, from Very Easy to Very Hard: 10 / 8 / 5 / 3 / 1 lives, tougher and faster foes, a denser horde, and a score multiplier of ×0.5 to ×2.5.
+- **Hall of Honor (誉)**: when your last life is gone, inscribe your name among the local top 10 for your difficulty. The score only grows: kills (with a combo bonus), repelled Tides and stage results, multiplied by difficulty and loop.
 - **Ink rendering**: brush strokes that boil like hand-drawn animation, ink stains that build up on the ground, foes cut in half, hit-stop, slow motion.
 - **Adaptive music**, generated in the *In* (Miyako-bushi) scale:
   - koto and shamisen synthesized with Karplus-Strong;
