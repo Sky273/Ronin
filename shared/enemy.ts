@@ -1,6 +1,6 @@
 import { bodyRect, boxFromFacing } from './combat';
 import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from './constants';
-import { enemyCooldownMult, enemyHpMult, guardianRageAt } from './difficulty';
+import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
 import { type Level, T_EMPTY, tileAt } from './level';
 import { approach, clamp, overlaps, type Rect } from './math';
@@ -187,7 +187,7 @@ function endRecover(c: Ctx): void {
   const d = ENEMY[c.e.type];
   if (c.e.stateT >= d.recover) {
     releaseToken(c.w, c.e);
-    c.e.cd = Math.round(d.cooldown * enemyCooldownMult(c.w.stage.loop));
+    c.e.cd = Math.round(d.cooldown * enemyCooldownScale(c.w));
     setState(c.e, 'chase', 'none');
   }
 }
@@ -475,7 +475,7 @@ function boss(c: Ctx): void {
         for (const side of [-1, 1, -1]) {
           const x = clamp(e.x + side * (150 + w.rng.next() * 80), 3 * TILE, (w.level.w - 3) * TILE);
           const gy = findGround(w.level, x, e.y);
-          if (gy !== null) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpMult(w.stage.loop));
+          if (gy !== null) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpScale(w));
         }
         setState(e, 'recover');
       } else setState(e, 'chase', 'none');

@@ -1,3 +1,5 @@
+import type { World } from './types';
+
 // ─── Niveaux de difficulté (choisis avant la partie, solo) ──────────────────
 // Normal reproduit exactement le comportement historique (tout à 1 / 0).
 
@@ -38,3 +40,15 @@ export const guardianRageAt = (loop: number): number => Math.min(0.7, 0.5 + 0.1 
 export const extraEnemies = (loop: number): number => 2 * loop;
 export const firstCalmMult = (loop: number): number => Math.max(0.5, 1 - 0.2 * loop);
 export const clearBonus = (grade: number, loop: number): number => Math.round([150, 80, 30][grade] * (1 + 0.5 * loop));
+
+// ─── Multiplicateurs combinés boucle × difficulté choisie ───────────────────
+// En Normal, D vaut 1 / 0 : on retrouve exactement les multiplicateurs par boucle.
+
+const D = (w: World): DifficultyDef => DIFFICULTIES[w.difficulty];
+
+export const enemyHpScale = (w: World): number => enemyHpMult(w.stage.loop) * D(w).enemyHp;
+export const guardianHpScale = (w: World): number => guardianHpMult(w.stage.loop) * D(w).enemyHp;
+export const enemyDmgScale = (w: World): number => enemyDmgMult(w.stage.loop) * D(w).enemyDmg;
+export const enemyCooldownScale = (w: World): number => enemyCooldownMult(w.stage.loop) * D(w).enemyCooldown;
+/** Ennemis supplémentaires dans la horde (peut être négatif : plancher appliqué à l'usage). */
+export const extraEnemiesFor = (w: World): number => extraEnemies(w.stage.loop) + D(w).extraEnemies;

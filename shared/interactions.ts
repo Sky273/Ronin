@@ -1,5 +1,5 @@
 import { BOSS, ENEMY, HONOR, honorForLevel, PLAYER as P } from './constants';
-import { enemyDmgMult } from './difficulty';
+import { DIFFICULTIES, enemyDmgScale, loopScoreMult } from './difficulty';
 import { canFit } from './physics';
 import type { Enemy, Player, World } from './types';
 import { leechHeal, parryWindow, rollOffer } from './upgrades';
@@ -42,7 +42,7 @@ export function damagePlayer(w: World, p: Player, dmg: number, srcX: number): Da
   }
   if (p.iframes > 0 || p.state === 'dash' || p.state === 'iaiStrike') return 'ignored';
 
-  dmg = Math.round(dmg * enemyDmgMult(w.stage.loop));
+  dmg = Math.round(dmg * enemyDmgScale(w));
   p.hp -= dmg;
   p.combo = 0;
   p.comboTimer = 0;
@@ -72,8 +72,14 @@ function killPlayer(w: World, p: Player): void {
   p.stateT = 0;
   p.respawnT = P.RESPAWN_TICKS;
   w.stage.deaths++;
+  p.lives--;
+  // Plus de vie : le joueur sort de la partie, il ne laisse pas d'Honneur à ramasser.
+  if (p.lives <= 0) {
+    p.out = true;
+    p.outT = 0;
+  }
   // L'Honneur à moitié perdu reste au sol : on peut revenir le chercher.
-  const lost = Math.floor(p.honor * HONOR.DEATH_DROP);
+  const lost = p.out ? 0 : Math.floor(p.honor * HONOR.DEATH_DROP);
   if (lost > 0) {
     spawnOrbs(w, p.x, p.y - 20, lost, true);
     p.lostX = p.x;
@@ -184,6 +190,8 @@ export function killEnemy(w: World, e: Enemy, p: Player | null, cut: number, byI
   if (p) {
     p.kills++;
     honor = Math.round(honor * (1 + Math.min(20, p.combo) * HONOR.COMBO_BONUS));
+    p.runKills++;
+    addScore(w, p, honor);
   }
   spawnOrbs(w, e.x, e.y - e.h * 0.5, honor, false);
   w.events.push({
@@ -205,6 +213,14 @@ function bumpCombo(p: Player): void {
   p.combo++;
   p.comboTimer = P.COMBO_TIMEOUT;
   if (p.combo > p.bestCombo) p.bestCombo = p.combo;
+}
+
+// ─── Score ──────────────────────────────────────────────────────────────────
+
+/** Crédite le score (entier, jamais décroissant), pondéré par la difficulté et la boucle. */
+export function addScore(w: World, p: Player, base: number): void {
+  if (base <= 0) return;
+  p.score += Math.round(base * DIFFICULTIES[w.difficulty].scoreMult * loopScoreMult(w.stage.loop));
 }
 
 // ─── Honneur ────────────────────────────────────────────────────────────────
