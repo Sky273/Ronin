@@ -1,11 +1,13 @@
 import Phaser from 'phaser';
 import { honorForLevel, PLAYER as P } from '../../shared/constants';
+import { DIFFICULTIES } from '../../shared/difficulty';
 import type { Player, World } from '../../shared/types';
 import { calmLength } from '../../shared/world';
 import { UPGRADE_MAX } from '../../shared/upgrades';
-import { gBlob, gFill, gStroke, type Rand, seeded } from '../render/brush';
+import { gBlob, gFill, gStroke, type Rand, ringPoints, seeded } from '../render/brush';
 import { BOSS_NAME } from '../render/enemies';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
+import { DIFFICULTY_TEXT, fmtScore } from './difficultyText';
 import { rankOf, UPGRADE_TEXT } from './texts';
 
 type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'world' | 'ui') => T;
@@ -35,6 +37,7 @@ export class Hud {
   private honor: Text;
   private kills: Text;
   private record: Text;
+  private score: Text;
   private combo: Text;
   private wave: Text;
   private bossName: Text;
@@ -64,6 +67,7 @@ export class Hud {
     txt(W - 40, 26, '討', { fontFamily: FONT_BRUSH, fontSize: '40px', color: '#b8321f' }).setOrigin(1, 0);
     this.kills = txt(W - 92, 22, '0', { fontFamily: FONT_BRUSH, fontSize: '48px', color: '#15120e' }).setOrigin(1, 0);
     this.record = txt(W - 40, 84, '', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#4a433b' }).setOrigin(1, 0);
+    this.score = txt(W - 40, 106, '', { fontFamily: FONT_BRUSH, fontSize: '20px', color: '#15120e' }).setOrigin(1, 0);
     this.combo = txt(W - 60, 250, '', { fontFamily: FONT_BRUSH, fontSize: '56px', color: '#15120e', align: 'right' }).setOrigin(1, 0.5);
     this.wave = txt(W / 2, 22, '', { fontFamily: FONT_TEXT, fontSize: '17px', color: '#15120e' }).setOrigin(0.5, 0);
     this.bossName = txt(W / 2, 50, '', { fontFamily: FONT_BRUSH, fontSize: '24px', color: '#8e2416' }).setOrigin(0.5, 0);
@@ -87,6 +91,21 @@ export class Hud {
       this.cardRoot.add([g, kanji, name, desc, lvl, key]);
       this.cards.push({ g, kanji, name, desc, lvl, key });
     }
+    this.cardRoot.setVisible(false);
+  }
+
+  /** Nouvelle partie : oublie l'état affiché de la précédente. */
+  reset(): void {
+    const els = [this.bannerKanji, this.bannerTitle, this.bannerSub];
+    this.scene.tweens.killTweensOf(els);
+    for (const e of els) e.setAlpha(0);
+    this.offerKey = '';
+    this.cardsIn = 0;
+    this.lastCombo = 0;
+    this.comboPop = 0;
+    this.shownHp = P.MAX_HP;
+    this.shownBoss = 1;
+    this.lastRank = '浪人';
     this.cardRoot.setVisible(false);
   }
 
@@ -144,13 +163,21 @@ export class Hud {
 
     // Dash et charge d'iai
     gBlob(g, x0 + 5, 101, 5, p.dashCd <= 0 ? C.ink : C.washLight, p.dashCd <= 0 ? 0.85 : 0.4, r);
+    // Vies restantes : une goutte d'encre pleine par vie, vide pour les vies perdues.
+    const maxLives = Math.max(p.lives, DIFFICULTIES[w.difficulty].lives);
+    for (let i = 0; i < maxLives; i++) {
+      const lx = x0 + 6 + i * 15;
+      if (i < p.lives) gBlob(g, lx, 124, 5, C.red, 0.85, r, 0.25);
+      else gStroke(g, ringPoints(lx, 124, 4.5, 0, Math.PI * 2, 10), C.ink, 0.45, { width: 1.4, taperStart: 0, taperEnd: 0 }, r);
+    }
     if (p.state === 'iaiCharge') {
       const c = Math.min(1, p.iaiCharge / P.IAI_FULL_CHARGE);
-      gStroke(g, [{ x: x0, y: 122 }, { x: x0 + 140 * c, y: 122 }], c >= 1 ? C.red : C.ink, 0.85, { width: 5, taperStart: 0.05, taperEnd: 0.3 }, r);
+      gStroke(g, [{ x: x0, y: 144 }, { x: x0 + 140 * c, y: 144 }], c >= 1 ? C.red : C.ink, 0.85, { width: 5, taperStart: 0.05, taperEnd: 0.3 }, r);
     }
 
     this.kills.setText(String(p.kills));
     this.record.setText(best > 0 ? `best ${best} · best combo ${p.bestCombo}` : '');
+    this.score.setText(`${fmtScore(p.score)} · ${DIFFICULTY_TEXT[w.difficulty].name}`);
 
     // Combo
     if (p.combo > this.lastCombo) this.comboPop = 1;

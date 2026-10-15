@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { DIFFICULTY_TEXT } from './difficultyText';
 import { DIFFICULTIES, DIFFICULTY_ORDER, type DifficultyId } from '../../shared/difficulty';
 import { gFill, gStroke, seeded, type Pt } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
@@ -8,14 +9,6 @@ type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'worl
 const INPUT_GUARD_MS = 300;
 
 /** Présentation de chaque voie : kanji, nom et une ligne d'ambiance. */
-const PATHS: Record<DifficultyId, { kanji: string; name: string; desc: string }> = {
-  veryEasy: { kanji: '童', name: 'Very Easy', desc: 'A child’s first steps on the road. The forest forgives.' },
-  easy: { kanji: '易', name: 'Easy', desc: 'A gentle wind through the bamboo. Learn the blade.' },
-  normal: { kanji: '常', name: 'Normal', desc: 'The road as it is. Steel meets steel.' },
-  hard: { kanji: '難', name: 'Hard', desc: 'Every shadow hides a blade. Few return.' },
-  veryHard: { kanji: '鬼', name: 'Very Hard', desc: 'The demon’s path. One life, no mercy.' },
-};
-
 const ROW_Y0 = 252;
 const ROW_STEP = 76;
 
@@ -50,7 +43,7 @@ export class DifficultySelect {
     const rows: Phaser.GameObjects.GameObject[] = [];
     DIFFICULTY_ORDER.forEach((id, i) => {
       const y = ROW_Y0 + i * ROW_STEP;
-      const p = PATHS[id];
+      const p = DIFFICULTY_TEXT[id];
       const lives = DIFFICULTIES[id].lives;
       const k = scene.add.text(cx - 300, y, p.kanji, { fontFamily: FONT_BRUSH, fontSize: '50px', color: '#15120e' }).setOrigin(0.5);
       const n = scene.add.text(cx - 250, y - 12, p.name, { fontFamily: FONT_TEXT, fontSize: '25px', color: '#6b6359' }).setOrigin(0, 0.5);

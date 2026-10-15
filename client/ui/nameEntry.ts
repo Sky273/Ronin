@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { DIFFICULTY_TEXT, fmtScore } from './difficultyText';
 import type { DifficultyId } from '../../shared/difficulty';
 import { gFill, gStroke, seeded, type Pt } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
@@ -7,19 +8,6 @@ import { MAX_NAME } from '../scores/types';
 type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'world' | 'ui') => T;
 
 const INPUT_GUARD_MS = 300;
-
-const DIFF_NAMES: Record<DifficultyId, string> = {
-  veryEasy: 'Very Easy',
-  easy: 'Easy',
-  normal: 'Normal',
-  hard: 'Hard',
-  veryHard: 'Very Hard',
-};
-
-/** Séparateur de milliers fixe (indépendant de la locale du navigateur). */
-function fmtScore(n: number): string {
-  return String(Math.max(0, Math.round(n))).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-}
 
 /** Longueur en points de code (un emoji ou un kanji hors BMP compte pour un). */
 const cpLen = (s: string): number => Array.from(s).length;
@@ -89,7 +77,7 @@ export class NameEntry {
     this.readyAt = this.scene.time.now + INPUT_GUARD_MS;
     this.text = Array.from(info.defaultName).slice(0, MAX_NAME).join('');
     this.scoreText.setText(fmtScore(info.score));
-    this.record.setText(`New record — rank #${info.rank + 1} in ${DIFF_NAMES[info.difficulty]}`);
+    this.record.setText(`New record — rank #${info.rank + 1} in ${DIFFICULTY_TEXT[info.difficulty].name}`);
     this.refresh();
 
     this.root.setVisible(true).setAlpha(0).setY(20);

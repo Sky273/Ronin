@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { DIFFICULTY_TEXT, fmtScore } from './difficultyText';
 import { DIFFICULTY_ORDER, type DifficultyId } from '../../shared/difficulty';
 import { gBlob, gFill, gStroke, seeded, type Pt } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
@@ -10,14 +11,6 @@ const INPUT_GUARD_MS = 300;
 /** Intervalle du défilement automatique entre onglets (secondes). */
 const AUTO_CYCLE_S = 6;
 
-const TABS: Record<DifficultyId, { kanji: string; name: string }> = {
-  veryEasy: { kanji: '童', name: 'Very Easy' },
-  easy: { kanji: '易', name: 'Easy' },
-  normal: { kanji: '常', name: 'Normal' },
-  hard: { kanji: '難', name: 'Hard' },
-  veryHard: { kanji: '鬼', name: 'Very Hard' },
-};
-
 const TAB_Y = 178;
 const TAB_STEP = 150;
 const ROW_Y0 = 284;
@@ -27,10 +20,6 @@ const INK = '#15120e';
 const SOFT = '#3a342d';
 const WASH = '#6b6359';
 const RED = '#b8321f';
-
-function fmtScore(n: number): string {
-  return String(Math.max(0, Math.round(n))).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-}
 
 interface Row {
   box: Phaser.GameObjects.Container;
@@ -78,8 +67,8 @@ export class Scoreboard {
     const tabs: Phaser.GameObjects.GameObject[] = [];
     DIFFICULTY_ORDER.forEach((id, i) => {
       const x = cx + (i - 2) * TAB_STEP;
-      const k = scene.add.text(x, TAB_Y - 8, TABS[id].kanji, { fontFamily: FONT_BRUSH, fontSize: '32px', color: WASH }).setOrigin(0.5);
-      const n = scene.add.text(x, TAB_Y + 22, TABS[id].name, { fontFamily: FONT_TEXT, fontSize: '14px', color: WASH }).setOrigin(0.5);
+      const k = scene.add.text(x, TAB_Y - 8, DIFFICULTY_TEXT[id].kanji, { fontFamily: FONT_BRUSH, fontSize: '32px', color: WASH }).setOrigin(0.5);
+      const n = scene.add.text(x, TAB_Y + 22, DIFFICULTY_TEXT[id].name, { fontFamily: FONT_TEXT, fontSize: '14px', color: WASH }).setOrigin(0.5);
       const z = scene.add.zone(x, TAB_Y + 6, TAB_STEP - 14, 64).setInteractive({ useHandCursor: true });
       z.on('pointerdown', () => {
         if (!this.ready()) return;

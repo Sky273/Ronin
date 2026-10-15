@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { TICK_RATE } from '../../shared/constants';
-import type { StageState } from '../../shared/types';
+import type { Player, StageState } from '../../shared/types';
+import { fmtScore, livesLabel } from './difficultyText';
 import { gFill, gStroke, seeded } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
 
@@ -33,8 +34,8 @@ export class Results {
     const title = scene.add.text(cx - 150, 150, '結果', { fontFamily: FONT_BRUSH, fontSize: '84px', color: '#15120e' }).setOrigin(0.5);
     this.subtitle = scene.add.text(cx - 150, 212, '', { fontFamily: FONT_TEXT, fontSize: '17px', color: '#4a433b' }).setOrigin(0.5);
     // Une ligne de texte par statistique : libellé et valeur restent alignés.
-    for (let i = 0; i < 6; i++) {
-      const y = 262 + i * 34;
+    for (let i = 0; i < 7; i++) {
+      const y = 258 + i * 31;
       this.labels.push(scene.add.text(cx - 270, y, '', { fontFamily: FONT_TEXT, fontSize: '19px', color: '#3a342d' }).setOrigin(0, 0.5));
       this.values.push(scene.add.text(cx - 30, y, '', { fontFamily: FONT_BRUSH, fontSize: '23px', color: '#15120e' }).setOrigin(1, 0.5));
     }
@@ -49,7 +50,7 @@ export class Results {
     );
   }
 
-  show(st: StageState): void {
+  show(st: StageState, p: Player): void {
     const W = this.scene.scale.width;
     const r = seeded(st.loop * 31 + 7);
     const g = this.panel;
@@ -67,7 +68,8 @@ export class Results {
       ['Best combo', st.bestCombo],
       ['Perfect parries', st.parries],
       ['Deaths', st.deaths],
-      ['Honor earned', st.honor],
+      ['Remaining', livesLabel(p.lives)],
+      ['Score', fmtScore(p.score)],
     ];
     rows.forEach(([label, value], i) => {
       this.labels[i].setText(label);
