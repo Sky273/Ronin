@@ -2,6 +2,7 @@
 // Lancer : npm run test:predict
 import { clonePlayer, type PredictionContext, Predictor } from '../client/net/predictor';
 import { createEnemy, findGround } from '../shared/enemy';
+import { TILE as TILE_PX } from '../shared/constants';
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../shared/types';
@@ -368,6 +369,49 @@ function directSetup(seed: number): { w: World; p: Player; pred: Predictor; ctx:
   pred.reconcile(dead, 5, ctx(), () => []);
   check('mort : recalage net', pred.snaps === s1 + 1);
   check('joueur absent du serveur : tout est vidé', (pred.reconcile(null, 5, ctx(), () => []), pred.display(0, 16) === null && pred.pending.length === 0));
+}
+
+// M3. Kekkai à sens unique : la prédiction le respecte (pousser vers la sortie, entrer).
+{
+  const bench = new NetBench({ seed: 21, lagMs: 75, jitterMs: 10 });
+  const a = bench.addClient('a');
+  const b = bench.addClient('b');
+  const w = bench.session.world;
+  calm(w);
+  bench.run(800, () => 0, () => calm(w));
+  warpToArena(w, a.pid); // a ferme l'arène ; b reste dehors
+  /** Calme, mais le gardien reste (figé) : sinon l'arène se rouvrirait. */
+  const still = (): void => {
+    w.enemies = w.enemies.filter((e) => e.type === 'boss');
+    for (const e of w.enemies) e.freeze = 1e9;
+    w.projectiles = [];
+    w.spawnTimer = 1e6;
+  };
+  const limit = (w.level.arena.col + 1) * TILE_PX;
+  bench.run(800, (i) => (i === 0 ? BTN.RIGHT : 0), still);
+  const sa = bench.serverPlayer(a.pid)!;
+  check('kekkai prédit : arène fermée, a à l’intérieur', w.stage.state === 'arena' && sa.x - sa.w / 2 > limit, `${w.stage.state} x=${(sa.x / TILE_PX).toFixed(1)}`);
+  const la = logCorrections(a);
+  const lb = logCorrections(b);
+  let minLeft = Infinity;
+  bench.run(5000, (i) => (i === 0 ? BTN.LEFT : 0), () => {
+    still();
+    const p = bench.shownPlayer(a);
+    if (p) minLeft = Math.min(minLeft, p.x - p.w / 2);
+  });
+  const px = la.px.filter((_, i) => !la.snapped[i]);
+  check('kekkai prédit : le joueur affiché ne sort jamais de l’arène', w.stage.state === 'arena' && minLeft >= limit - 0.5, `marge ${(minLeft - limit).toFixed(2)} px`);
+  check('kekkai prédit : pousser vers la sortie ne provoque aucune correction notable', percentile(px, 99) < 1 && !la.snapped.some(Boolean), `p99 ${percentile(px, 99).toFixed(2)} px`);
+  // b (dehors) court vers l'arène et y entre sans correction notable.
+  const sb = bench.serverPlayer(b.pid)!;
+  sb.x = limit - 4 * TILE_PX;
+  sb.y = findGround(w.level, sb.x, sa.y, 12) ?? sa.y;
+  sb.vx = sb.vy = 0;
+  bench.run(400, () => 0, still);
+  lb.px.length = lb.snapped.length = 0;
+  bench.run(1500, (i) => (i === 1 ? BTN.RIGHT : 0), still);
+  const pb = lb.px.filter((_, i) => !lb.snapped[i]);
+  check('kekkai prédit : un joueur de dehors y entre, correction max < 4 px', sb.x - sb.w / 2 > limit && Math.max(0, ...pb) < 4, `x=${(sb.x / TILE_PX).toFixed(1)} max ${Math.max(0, ...pb).toFixed(2)} px`);
 }
 
 if (failures) {

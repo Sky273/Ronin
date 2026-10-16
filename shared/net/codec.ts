@@ -18,6 +18,7 @@ import type {
   GameEvent,
   Orb,
   Player,
+  PlayerStageStats,
   PlayerState,
   Projectile,
   ProjectileKind,
@@ -241,17 +242,49 @@ function decodeOrb(a: unknown[]): Orb {
 
 const STAGE_KEYS = [
   'loop', 'state', 't', 'startTick', 'kills', 'parries', 'deaths', 'honor', 'bestCombo', 'guardianId', 'grade', 'bonus', 'time',
+  'byPlayer',
 ] as const satisfies readonly (keyof StageState)[];
+/** Statistiques d'un joueur (coop) : [pid, …PLAYER_STAGE_KEYS], `ready` en 0/1. */
+const PLAYER_STAGE_KEYS = ['kills', 'parries', 'deaths', 'honor', 'bestCombo', 'grade', 'bonus', 'ready'] as const satisfies readonly (keyof PlayerStageStats)[];
+export const PLAYER_STAGE_KEYS_COMPLETE: [Exclude<keyof PlayerStageStats, (typeof PLAYER_STAGE_KEYS)[number]>] extends [never] ? true : never = true;
+
+/** Statistiques par joueur : transmises seulement pendant le bilan (inutiles en jeu, coût nul). */
+function encodeByPlayer(s: StageState): unknown {
+  if (!s.byPlayer || s.state !== 'cleared') return null;
+  return Object.entries(s.byPlayer).map(([pid, st]) => [Number(pid), ...PLAYER_STAGE_KEYS.map((k) => (k === 'ready' ? (st.ready ? 1 : 0) : st[k]))]);
+}
+function decodeByPlayer(x: unknown): Record<number, PlayerStageStats> | undefined {
+  if (!Array.isArray(x)) return undefined;
+  const out: Record<number, PlayerStageStats> = {};
+  for (const row of x) {
+    if (!Array.isArray(row) || row.length !== PLAYER_STAGE_KEYS.length + 1 || !Number.isFinite(row[0])) continue;
+    const st = {} as Record<string, unknown>;
+    let ok = true;
+    PLAYER_STAGE_KEYS.forEach((k, i) => {
+      const v = row[i + 1];
+      if (k === 'ready') st[k] = v === 1 || v === true;
+      else if (typeof v === 'number' && Number.isFinite(v)) st[k] = v;
+      else ok = false;
+    });
+    if (ok) out[row[0] as number] = st as unknown as PlayerStageStats;
+  }
+  return out;
+}
 export const STAGE_KEYS_COMPLETE: [Exclude<keyof StageState, (typeof STAGE_KEYS)[number]>] extends [never] ? true : never = true;
 const WAVE_KEYS = ['n', 'phase', 't', 'kills', 'quota'] as const satisfies readonly (keyof WaveState)[];
 export const WAVE_KEYS_COMPLETE: [Exclude<keyof WaveState, (typeof WAVE_KEYS)[number]>] extends [never] ? true : never = true;
 
 function encodeStage(s: StageState): unknown[] {
-  return STAGE_KEYS.map((k) => (k === 'state' ? encEnum(STAGE_STATES, s.state) : s[k]));
+  return STAGE_KEYS.map((k) => (k === 'state' ? encEnum(STAGE_STATES, s.state) : k === 'byPlayer' ? encodeByPlayer(s) : s[k]));
 }
 function decodeStage(a: unknown[]): StageState {
   const r = {} as Record<string, unknown>;
-  STAGE_KEYS.forEach((k, i) => (r[k] = k === 'state' ? decEnum(STAGE_STATES, a[i]) : a[i]));
+  STAGE_KEYS.forEach((k, i) => {
+    if (k === 'byPlayer') {
+      const bp = decodeByPlayer(a[i]);
+      if (bp) r[k] = bp; // absent hors bilan
+    } else r[k] = k === 'state' ? decEnum(STAGE_STATES, a[i]) : a[i];
+  });
   return r as unknown as StageState;
 }
 function encodeWave(s: WaveState): unknown[] {

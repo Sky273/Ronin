@@ -5,6 +5,11 @@ import type { EnemyType } from './types';
 export const T_EMPTY = 0;
 export const T_SOLID = 1;
 export const T_ONEWAY = 2; // plateforme traversable par le dessous
+/**
+ * Kekkai à sens unique (coop) : barrière de l'arène qu'un joueur traverse vers l'intérieur (la droite)
+ * mais ne peut plus repasser ; solide pour les ennemis, les orbes et les projectiles.
+ */
+export const T_KEKKAI = 3;
 
 export type DecoKind = 'torii' | 'lantern' | 'bamboo' | 'pine' | 'stone' | 'banner' | 'shrine' | 'sakura' | 'house' | 'rampart';
 
@@ -33,6 +38,11 @@ export interface Level {
   arena: { col: number; rows: number; trigger: number; guardianX: number; guardianY: number; backup: number[] };
   /** Porte de fin d'étape (torii scellé). */
   gate: { x: number; y: number };
+}
+
+/** `x` est-il dans l'arène du gardien (à droite de la barrière) ? */
+export function arenaInside(l: Level, x: number): boolean {
+  return x > (l.arena.col + 1) * TILE;
 }
 
 export function tileAt(l: Level, tx: number, ty: number): number {

@@ -1,10 +1,10 @@
-import { COOP, COOP_CLEARED_TICKS, PLAYER, TICK_RATE, TILE } from './constants';
+import { COOP_CLEARED_TICKS, TICK_RATE, TILE } from './constants';
 import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { spawnEnemy } from './enemy';
 import { addScore, gainHonor } from './interactions';
 import { BTN } from './input';
-import { T_SOLID } from './level';
-import { arenaEntrance, handlePicks, resetForStage } from './player';
+import { arenaInside, T_KEKKAI, T_SOLID } from './level';
+import { handlePicks, resetForStage } from './player';
 import { buildStage } from './stagebuild';
 import type { StageState, World } from './types';
 
@@ -24,14 +24,18 @@ export function populateStage(w: World): void {
   for (const s of w.level.enemySpawns) spawnEnemy(w, s.type, s.x, s.y, false, hp);
 }
 
-/** Pose (on) ou retire la barrière de l'arène dans les tuiles du niveau. */
+/**
+ * Pose (on) ou retire la barrière de l'arène dans les tuiles du niveau. En coop, c'est un kekkai à
+ * sens unique (on peut toujours rejoindre le combat, jamais le fuir) ; en solo, un mur plein.
+ */
 export function setBarrier(w: World, on: boolean): void {
   const l = w.level;
   const a = l.arena;
-  for (let r = 0; r < a.rows; r++) l.tiles[r * l.w + a.col] = on ? T_SOLID : a.backup[r];
+  const wall = w.mode === 'coop' ? T_KEKKAI : T_SOLID;
+  for (let r = 0; r < a.rows; r++) l.tiles[r * l.w + a.col] = on ? wall : a.backup[r];
 }
 
-const inArena = (w: World, x: number) => x > (w.level.arena.col + 1) * TILE;
+const inArena = (w: World, x: number) => arenaInside(w.level, x);
 
 export function stepStage(w: World): void {
   const st = w.stage;
@@ -46,7 +50,13 @@ export function stepStage(w: World): void {
     }
     case 'arena': {
       // Salle vide (coop) : every() serait vrai, mais personne n'a perdu — l'arène reste fermée.
-      if (w.players.length > 0 && w.players.every((p) => p.state === 'dead')) {
+      // Coop : l'arène se rouvre dès qu'aucun joueur vivant n'est plus à l'intérieur (ceux du dehors
+      // ne sont pas touchés) ; solo : quand le joueur est mort.
+      const lost =
+        w.mode === 'coop'
+          ? !w.players.some((p) => p.state !== 'dead' && inArena(w, p.x))
+          : w.players.every((p) => p.state === 'dead');
+      if (w.players.length > 0 && lost) {
         resetArena(w);
         break;
       }
@@ -83,31 +93,11 @@ function lockArena(w: World): void {
   g.state = 'intro';
   g.facing = -1;
   st.guardianId = g.id;
-  if (w.mode === 'coop') pullIntoArena(w);
   w.events.push({ type: 'arenaLock', x: (a.col + 0.5) * TILE });
   w.events.push({ type: 'bossSpawn', id: g.id, x: g.x, y: g.y });
 }
 
-/** Coop : la salle affronte le gardien ensemble — les joueurs vivants restés dehors sont amenés à l'entrée. */
-function pullIntoArena(w: World): void {
-  const at = arenaEntrance(w);
-  for (const p of w.players) {
-    if (p.state === 'dead' || inArena(w, p.x)) continue;
-    p.x = at.x;
-    p.y = at.y;
-    p.vx = 0;
-    p.vy = 0;
-    p.onGround = true;
-    p.state = 'normal';
-    p.stateT = 0;
-    p.attack = null;
-    p.h = PLAYER.H;
-    p.crouch = false;
-    p.iframes = Math.max(p.iframes, COOP.ARENA_PULL_IFRAMES);
-  }
-}
-
-/** Tous les joueurs sont morts dans l'arène : elle se rouvre, le gardien attendra. */
+/** Plus personne ne combat dans l'arène : elle se rouvre, le gardien attendra. */
 function resetArena(w: World): void {
   const st = w.stage;
   w.enemies = w.enemies.filter((e) => !inArena(w, e.x) && e.id !== st.guardianId);

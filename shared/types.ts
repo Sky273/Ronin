@@ -178,6 +178,18 @@ export interface WaveState {
 }
 
 /** Déroulé de l'étape : exploration → arène du gardien → porte ouverte → bilan. */
+/** Statistiques d'un joueur pour l'étape en cours (coop seulement). */
+export interface PlayerStageStats {
+  kills: number;
+  parries: number;
+  deaths: number;
+  honor: number;
+  bestCombo: number;
+  grade: number; // 0 = 優, 1 = 良, 2 = 可 (fixée au bilan)
+  bonus: number; // Honneur de fin d'étape versé à ce joueur
+  ready: boolean; // a voté pour reprendre la route (bilan)
+}
+
 export interface StageState {
   loop: number; // 0 = premier voyage ; chaque boucle est plus difficile
   state: 'playing' | 'arena' | 'gateOpen' | 'cleared';
@@ -192,6 +204,11 @@ export interface StageState {
   grade: number; // 0 = 優, 1 = 良, 2 = 可
   bonus: number;
   time: number; // durée de l'étape (ticks), figée au bilan
+  /**
+   * Coop : statistiques par joueur (id → stats). Absent en solo (empreintes inchangées).
+   * En ligne, transmis seulement pendant le bilan (`state === 'cleared'`).
+   */
+  byPlayer?: Record<number, PlayerStageStats>;
 }
 
 /** Événements émis par la simulation et consommés par le client (FX, sons). */

@@ -6,7 +6,7 @@ import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interaction
 import { claimGhost, hurtRect, isGhost, projectileSeenBy, sliceableProjectiles } from './lagcomp';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
-import { canFit, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
+import { canFit, crossesKekkaiOut, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
 import type { Player, World } from './types';
 
 // Machine à états du samouraï. Fonction pure de (état, entrées) → nouvel état :
@@ -85,7 +85,8 @@ export function stepPlayer(w: World, p: Player, buttons: number): void {
 function physics(w: World, p: Player): MoveResult {
   const wasGround = p.onGround;
   const vyBefore = p.vy;
-  const res = moveBody(p, w.level, DT, p.dropT > 0);
+  // Le kekkai de l'arène (coop) laisse entrer les joueurs, jamais sortir.
+  const res = moveBody(p, w.level, DT, p.dropT > 0, true);
   if (!wasGround && p.onGround) w.events.push({ type: 'land', x: p.x, y: p.y, impact: vyBefore, pid: p.id });
   return res;
 }
@@ -168,7 +169,7 @@ function stepNormal(w: World, p: Player, b: number, pressed: number): void {
 
   // Glissade contre un mur
   p.wallDir = 0;
-  if (!p.onGround && dirX !== 0 && touchingWall(p, L, dirX)) {
+  if (!p.onGround && dirX !== 0 && touchingWall(p, L, dirX, true)) {
     p.wallDir = dirX as 1 | -1;
     p.airJumps = airJumps(p);
     p.airDash = false;
@@ -176,7 +177,7 @@ function stepNormal(w: World, p: Player, b: number, pressed: number): void {
 
   // Saut (avec coyote time, saut mural, double saut, descente de plateforme)
   if (p.jumpBuffer > 0) {
-    const wallSide = p.wallDir || (!p.onGround ? (touchingWall(p, L, 1) ? 1 : touchingWall(p, L, -1) ? -1 : 0) : 0);
+    const wallSide = p.wallDir || (!p.onGround ? (touchingWall(p, L, 1, true) ? 1 : touchingWall(p, L, -1, true) ? -1 : 0) : 0);
     if (p.onGround && down && standingOnOneWay(p, L)) {
       p.dropT = 12;
       p.jumpBuffer = 0;
@@ -539,7 +540,7 @@ function iaiStrike(w: World, p: Player): void {
   let x = p.x;
   for (let d = 0; d < dist; d += 4) {
     const nx = x + p.facing * 4;
-    if (!fitsAt(L, nx, p.y, p.w, p.h)) break;
+    if (!fitsAt(L, nx, p.y, p.w, p.h) || crossesKekkaiOut(L, x, nx, p.y, p.w / 2, p.h)) break;
     x = nx;
   }
   p.x = x;

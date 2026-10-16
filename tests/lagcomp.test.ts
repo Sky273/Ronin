@@ -599,7 +599,8 @@ function meleeLoop(type: EnemyType, lagAt: (S: number) => number, ticks: number,
   check('mort et renaissance pendant le délai : aucune exception, au plus une touche pour la frappe', !err && deathAt > 0 && all <= 1, err || `${all} touche(s)`);
 }
 {
-  // 7i. Aspiration dans l'arène avec une frappe différée en attente : pas de touche fantôme à l'entrée.
+  // 7i. Fermeture de l'arène par b alors qu'une frappe différée vise a, resté dehors : a n'est pas
+  // déplacé (plus d'aspiration en coop, kekkai à sens unique) et la frappe est jugée normalement.
   const { w, ps } = arena(2, true);
   const [a, b] = ps;
   setLag(w.net!, a.id, 20);
@@ -616,7 +617,7 @@ function meleeLoop(type: EnemyType, lagAt: (S: number) => number, ticks: number,
     evs = step(w, 300, (_S, q) => (q === b && pulledAt >= 0 ? BTN.RIGHT : 0), (S) => {
       if (pulledAt < 0 && w.net!.strikes.some((st) => st.enemy === e)) {
         pulledAt = S;
-        warpToArena(w, b.id); // b entre dans l'arène : a est aspiré à l'entrée
+        warpToArena(w, b.id); // b entre dans l'arène et la ferme ; a reste dehors
       }
       if (eState(e) === 'recover') e.cd = 1e9;
     });
@@ -624,10 +625,12 @@ function meleeLoop(type: EnemyType, lagAt: (S: number) => number, ticks: number,
     err = String((x as Error)?.stack ?? x).slice(0, 300);
   }
   const onA = evs.filter((ev) => (ev.type === 'playerHit' || ev.type === 'parry') && ev.pid === a.id).length;
+  // L'ashigaru, resté dehors avec a, continue de l'attaquer : au plus une touche par attaque.
+  const swings = evs.filter((ev) => ev.type === 'windup' && ev.id === e.id).length;
   check(
-    'aspiration dans l’arène avec une frappe en attente : aucune exception, aucune touche à l’entrée',
-    !err && pulledAt > 0 && w.stage.state === 'arena' && Math.abs(a.x - x0) > 300 && onA === 0,
-    err || `${onA} touche(s), état ${w.stage.state}, déplacé de ${Math.round(a.x - x0)} px`,
+    'fermeture de l’arène avec une frappe en attente sur un joueur resté dehors : aucune exception, a non téléporté, une touche par attaque au plus',
+    !err && pulledAt > 0 && w.stage.state === 'arena' && Math.abs(a.x - x0) < 200 && onA <= swings,
+    err || `${onA} touche(s) pour ${swings} attaque(s), état ${w.stage.state}, déplacé de ${Math.round(a.x - x0)} px`,
   );
 }
 {

@@ -173,7 +173,7 @@ export class Predictor {
     this.lastCorrectionPx = Math.sqrt(dx * dx + dy * dy);
     const sx = old.x - state.x + this.offX;
     const sy = old.y - state.y + this.offY;
-    // Recalage net : changement d'étape, aspiration dans l'arène, mort ou renaissance, grand écart.
+    // Recalage net : changement d'étape, fermeture de l'arène, mort ou renaissance, grand écart.
     const snap =
       stageChanged || pulled || lifeChanged(old, state) ||
       (old.state === 'dead' && state.state === 'dead' && old.respawnT !== state.respawnT) ||
@@ -266,7 +266,8 @@ function simulate(p: Player, b: number, enemies: Enemy[], ctx: PredictionContext
     attackTokens: 0,
     totalKills: 0,
     wave: { ...ctx.wave },
-    stage: { ...ctx.stage },
+    // Sans les statistiques par joueur : la prédiction ne doit pas modifier celles du serveur.
+    stage: { ...ctx.stage, byPlayer: undefined },
     difficulty: 'normal',
     mode: 'coop',
     shrine: ctx.shrine,

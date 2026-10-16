@@ -8,8 +8,12 @@ import { INTEREST_PX, type Snapshot } from './protocol';
 
 const near = (x: number, cx: number) => Math.abs(x - cx) <= INTEREST_PX;
 
+/** Événements situés mais qui concernent toute la salle (sanctuaire commun, arène, porte). */
+const ROOM_WIDE: ReadonlySet<GameEvent['type']> = new Set<GameEvent['type']>(['checkpoint', 'arenaLock', 'gateOpen']);
+
 /** Un événement est-il visible depuis `cx` ? (les événements sans position concernent toute la salle) */
 function eventVisible(ev: GameEvent, cx: number): boolean {
+  if (ROOM_WIDE.has(ev.type)) return true;
   if ('x' in ev && typeof ev.x === 'number') return near(ev.x, cx);
   if (ev.type === 'iai') return near(ev.x0, cx) || near(ev.x1, cx);
   return true;

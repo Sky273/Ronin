@@ -3,7 +3,7 @@ import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from '.
 import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
 import { meleeStrike } from './lagcomp';
-import { type Level, T_EMPTY, tileAt } from './level';
+import { arenaInside, type Level, T_EMPTY, tileAt } from './level';
 import { approach, clamp, overlaps, type Rect } from './math';
 import { fitsAt, groundAhead, moveBody, touchingWall } from './physics';
 import type { Enemy, EnemyMove, EnemyState, EnemyType, Player, World } from './types';
@@ -47,11 +47,18 @@ function setState(e: Enemy, s: EnemyState, move: EnemyMove = e.move): void {
   e.move = move;
 }
 
-function nearestPlayer(w: World, e: Enemy): Player | null {
+/**
+ * Joueur visé par l'ennemi `e` : le plus proche des vivants. En coop pendant l'arène, seulement ceux
+ * du même côté du kekkai (le gardien ne charge pas la barrière vers un joueur resté dehors).
+ */
+export function targetPlayer(w: World, e: Enemy): Player | null {
+  const split = w.mode === 'coop' && w.stage.state === 'arena';
+  const side = split && arenaInside(w.level, e.x);
   let best: Player | null = null;
   let bd = Infinity;
   for (const p of w.players) {
     if (p.state === 'dead') continue;
+    if (split && arenaInside(w.level, p.x) !== side) continue;
     const d = Math.abs(p.x - e.x) + Math.abs(p.y - e.y) * 1.5;
     if (d < bd) {
       bd = d;
@@ -89,7 +96,7 @@ export function stepEnemy(w: World, e: Enemy): void {
   if (e.cd > 0) e.cd--;
   if (e.dodgeCd > 0) e.dodgeCd--;
 
-  const t = nearestPlayer(w, e);
+  const t = targetPlayer(w, e);
   const c: Ctx = {
     w, e, t,
     dx: t ? t.x - e.x : 0,

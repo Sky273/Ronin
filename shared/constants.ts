@@ -187,7 +187,11 @@ export const COOP = {
   POP_CAP: 32,
   // Tentatives de placement d'un renfort (plus de contraintes qu'en solo).
   SPAWN_ATTEMPTS: 10,
-  // Invulnérabilité d'un nouvel arrivant et d'un joueur amené dans l'arène.
+  // Invulnérabilité d'un nouvel arrivant.
   JOIN_IFRAMES: 120,
-  ARENA_PULL_IFRAMES: 60,
+  // Points de vie du gardien : × (1 + GUARDIAN_HP_PER_PLAYER × (joueurs présents − 1)), fixés à la fermeture.
+  GUARDIAN_HP_PER_PLAYER: 0.5,
 } as const;
+
+/** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */
+export const COOP_READY_AFTER = 90;

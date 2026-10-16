@@ -1,5 +1,5 @@
 import { TILE } from './constants';
-import { type Level, T_EMPTY, T_ONEWAY, T_SOLID, tileAt } from './level';
+import { type Level, T_EMPTY, T_KEKKAI, T_ONEWAY, T_SOLID, tileAt } from './level';
 import type { Body } from './types';
 
 // Physique AABB maison, résolue axe par axe sur la grille de tuiles.
@@ -10,7 +10,12 @@ export interface MoveResult {
   ceil: boolean;
 }
 
-export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean): MoveResult {
+/**
+ * Déplace `b` axe par axe. `kekkaiIn` (joueurs en coop) : le kekkai se traverse vers la droite,
+ * et ne bloque vers la gauche qu'un corps déjà entièrement de l'autre côté (à l'intérieur de l'arène).
+ * Pour tous les autres corps il est solide. Sur l'axe vertical il est ignoré (barrière pleine hauteur).
+ */
+export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean, kekkaiIn = false): MoveResult {
   const res: MoveResult = { wall: 0, ceil: false };
   const hw = b.w / 2;
 
@@ -23,7 +28,8 @@ export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean): M
     if (dx > 0) {
       const c = Math.floor((nx + hw) / TILE);
       for (let r = r0; r <= r1; r++) {
-        if (tileAt(l, c, r) === T_SOLID) {
+        const t = tileAt(l, c, r);
+        if (t === T_SOLID || (t === T_KEKKAI && !kekkaiIn)) {
           nx = c * TILE - hw - 0.001;
           b.vx = 0;
           res.wall = 1;
@@ -33,7 +39,8 @@ export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean): M
     } else {
       const c = Math.floor((nx - hw) / TILE);
       for (let r = r0; r <= r1; r++) {
-        if (tileAt(l, c, r) === T_SOLID) {
+        const t = tileAt(l, c, r);
+        if (t === T_SOLID || (t === T_KEKKAI && (!kekkaiIn || insideOf(b.x - hw, c)))) {
           nx = (c + 1) * TILE + hw + 0.001;
           b.vx = 0;
           res.wall = -1;
@@ -80,21 +87,40 @@ export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean): M
   return res;
 }
 
+/** Bord gauche `left` entièrement à droite de la colonne `c` (côté intérieur du kekkai) ? */
+const insideOf = (left: number, c: number): boolean => left >= (c + 1) * TILE - 0.01;
+
+/** Tuile pleine pour un projectile (le kekkai arrête les flèches dans les deux sens). */
 export function solidAt(l: Level, x: number, y: number): boolean {
-  return tileAt(l, Math.floor(x / TILE), Math.floor(y / TILE)) === T_SOLID;
+  const t = tileAt(l, Math.floor(x / TILE), Math.floor(y / TILE));
+  return t === T_SOLID || t === T_KEKKAI;
 }
 
 export function groundAt(l: Level, x: number, y: number): boolean {
-  return tileAt(l, Math.floor(x / TILE), Math.floor(y / TILE)) !== T_EMPTY;
+  const t = tileAt(l, Math.floor(x / TILE), Math.floor(y / TILE));
+  return t !== T_EMPTY && t !== T_KEKKAI;
 }
 
-export function touchingWall(b: Body, l: Level, dir: number): boolean {
+/** Mur au contact du côté `dir` ? Le kekkai en est un, sauf pour un joueur (`kekkaiIn`) qui va vers l'intérieur. */
+export function touchingWall(b: Body, l: Level, dir: number, kekkaiIn = false): boolean {
   const x = dir > 0 ? b.x + b.w / 2 + 1 : b.x - b.w / 2 - 1;
   const c = Math.floor(x / TILE);
-  return (
-    tileAt(l, c, Math.floor((b.y - b.h * 0.75) / TILE)) === T_SOLID ||
-    tileAt(l, c, Math.floor((b.y - b.h * 0.35) / TILE)) === T_SOLID
-  );
+  const wall = (t: number) => t === T_SOLID || (t === T_KEKKAI && !(kekkaiIn && dir > 0));
+  return wall(tileAt(l, c, Math.floor((b.y - b.h * 0.75) / TILE))) || wall(tileAt(l, c, Math.floor((b.y - b.h * 0.35) / TILE)));
+}
+
+/**
+ * Un déplacement direct (sans moveBody, ex. l'iai) de `x` vers `nx` ferait-il ressortir du kekkai
+ * un corps (`hw` : demi-largeur, pieds en `y`, hauteur `h`) déjà entièrement à l'intérieur ?
+ */
+export function crossesKekkaiOut(l: Level, x: number, nx: number, y: number, hw: number, h: number): boolean {
+  if (nx >= x) return false;
+  const c = Math.floor((nx - hw) / TILE);
+  if (!insideOf(x - hw, c)) return false;
+  const r0 = Math.floor((y - h + 0.01) / TILE);
+  const r1 = Math.floor((y - 0.01) / TILE);
+  for (let r = r0; r <= r1; r++) if (tileAt(l, c, r) === T_KEKKAI) return true;
+  return false;
 }
 
 /** Le rectangle (x, y=pieds, w, h) est-il libre de tuiles solides ? */

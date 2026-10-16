@@ -3,7 +3,7 @@
 import { pack, unpack } from 'msgpackr';
 import { TILE } from '../shared/constants';
 import { BTN } from '../shared/input';
-import { T_SOLID } from '../shared/level';
+import { T_KEKKAI } from '../shared/level';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
 import { INTEREST_PX, sanitizePlayerName, type Snapshot } from '../shared/net/protocol';
 import { applySnapshot, makeSnapshot } from '../shared/net/snapshot';
@@ -95,8 +95,8 @@ function run(w: World, ticks: number, input: (t: number, id: number) => number):
   const r2 = applySnapshot(client, wire(makeSnapshot(server, p.id, [], 0)));
   const col = client.level.arena.col;
   check(
-    'arène verrouillée : barrière posée côté client, même référence de niveau',
-    server.stage.state === 'arena' && !r2.stageChanged && client.level === levelRef && client.level.tiles[10 * client.level.w + col] === T_SOLID,
+    'arène verrouillée : kekkai posé côté client, même référence de niveau',
+    server.stage.state === 'arena' && !r2.stageChanged && client.level === levelRef && client.level.tiles[10 * client.level.w + col] === T_KEKKAI,
     server.stage.state,
   );
 }
@@ -106,6 +106,29 @@ check(
   'pseudos nettoyés',
   sanitizePlayerName('  Musashi<b>  ') === 'Musashib' && sanitizePlayerName('') === 'Ronin' && sanitizePlayerName(42) === 'Ronin' && Array.from(sanitizePlayerName('x'.repeat(40))).length === 12,
 );
+
+// 5. M3 : statistiques par joueur transmises au bilan seulement ; événements de salle reçus de loin.
+{
+  const w = createWorld(12, { mode: 'coop' });
+  const a = addPlayer(w, 'a');
+  const b = addPlayer(w, 'b');
+  b.x = a.x + 5000;
+  const stats = (k: number, ready: boolean) => ({ kills: k, parries: 2, deaths: 1, honor: 40 + k, bestCombo: 7, grade: 1, bonus: 25, ready });
+  w.stage.byPlayer = { [a.id]: stats(3, true), [b.id]: stats(9, false) };
+  const playing = wire(makeSnapshot(w, a.id, [], 0));
+  check('statistiques par joueur absentes hors bilan', playing.stageInfo.byPlayer === undefined);
+  w.stage.state = 'cleared';
+  const cleared = wire(makeSnapshot(w, a.id, [], 0));
+  const got = cleared.stageInfo.byPlayer;
+  check('bilan : statistiques par joueur transmises à l’identique', !!got && JSON.stringify(got) === JSON.stringify(w.stage.byPlayer), JSON.stringify(got));
+  const far: GameEvent[] = [
+    { type: 'checkpoint', x: b.x, y: 500, index: 1, pid: b.id },
+    { type: 'gateOpen', x: b.x, y: 500 },
+    { type: 'spawn', x: b.x, y: 500, enemyType: 'ashigaru' },
+  ];
+  const evs = wire(makeSnapshot(w, a.id, far, 0)).events.map((e) => e.type);
+  check('événements de salle (sanctuaire, porte) reçus de loin ; les autres filtrés', evs.includes('checkpoint') && evs.includes('gateOpen') && !evs.includes('spawn'), evs.join());
+}
 
 if (failures) {
   console.log(`\n${failures} échec(s)`);

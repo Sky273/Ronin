@@ -24,7 +24,7 @@ export const MAX_NAME = 12;
 export const BUTTON_MASK = 0xfff;
 
 /** Version du protocole : client et serveur doivent être identiques (vérifiée à l'accueil). */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 /** Recul d'affichage des entités distantes (ticks) : ~100 ms, ajusté de 5 à 12 selon la gigue. */
 export const INTERP_TICKS = 6;
 export const INTERP_MIN_TICKS = 5;

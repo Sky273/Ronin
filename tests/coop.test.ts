@@ -1,12 +1,13 @@
 // Tests des règles du mode coopératif (simulation, sans réseau).
 // Lancer : npm run test:coop
 import { COOP, COOP_CLEARED_TICKS, ENEMY, TILE } from '../shared/constants';
-import { findGround, spawnEnemy } from '../shared/enemy';
+import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
 import { BTN } from '../shared/input';
 import { damagePlayer, doomEnemy, killEnemy, takeToken } from '../shared/interactions';
 import { Rng } from '../shared/math';
 import type { GameEvent, Player, World } from '../shared/types';
 import type { DifficultyId } from '../shared/difficulty';
+import { T_KEKKAI } from '../shared/level';
 import { addPlayer, createWorld, nextStage, removePlayer, stepWorld, warpToArena } from '../shared/world';
 
 export {}; // module isolé (déclarations locales au fichier)
@@ -193,7 +194,7 @@ function nonFinite(w: World): string[] {
   check('jetons d\'attaque cohérents', w.attackTokens === w.enemies.filter((e) => e.token).length && w.attackTokens >= 0, `${w.attackTokens}`);
 }
 
-// ─── 4. Arène : tout le monde est amené, renaissance à l'entrée pendant le combat ─
+// ─── 4. Arène : kekkai à sens unique, renaissance à l'entrée pendant le combat ─
 {
   const w = createWorld(808, { mode: 'coop' });
   const a = addPlayer(w, 'A');
@@ -206,11 +207,30 @@ function nonFinite(w: World): string[] {
   warpToArena(w, a.id);
   const evs = run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
   check('arène fermée', stateOf(w) === 'arena', stateOf(w));
-  check('arène : B (vivant, resté au départ) est amené dans l\'arène', b.x > limit && b.vx === 0 && b.onGround, `x=${(b.x / TILE).toFixed(1)} col=${w.level.arena.col}`);
+  const bx0 = b.x;
+  check('arène : B (vivant, resté dehors) n\'est pas déplacé', b.x === bx0 && b.x < limit, `x=${(b.x / TILE).toFixed(1)} col=${w.level.arena.col}`);
+  check('arène : la barrière est un kekkai (tuile à sens unique)', w.level.tiles[10 * w.level.w + w.level.arena.col] === T_KEKKAI);
   check('arène : C (mort) reste là où il est tombé', c.x < limit && pState(c) === 'dead');
   const rsp = run(w, 200).concat(evs).find((ev) => ev.type === 'respawn' && ev.pid === c.id);
   check('arène : C renaît à l\'entrée de l\'arène', !!rsp && rsp.type === 'respawn' && rsp.x > limit && rsp.x < limit + 3 * TILE && stateOf(w) === 'arena', rsp && 'x' in rsp ? `x=${(rsp.x / TILE).toFixed(1)}` : 'pas de renaissance');
   check('arène : le point de renaissance (sanctuaire) n\'est pas modifié', c.spawnX < limit);
+  // B rejoint le combat quand il veut : il traverse le kekkai vers l'intérieur…
+  b.x = limit - 2 * TILE;
+  b.y = findGround(w.level, b.x, b.y) ?? b.y;
+  b.vx = b.vy = 0;
+  let entered = -1;
+  for (let i = 0; i < 60 && entered < 0; i++) {
+    run(w, 1, (_t, id) => (id === b.id ? BTN.RIGHT : 0));
+    if (b.x - b.w / 2 > limit) entered = i;
+  }
+  check('arène : B entre en traversant le kekkai', entered >= 0, `${entered} ticks`);
+  // … mais n'en ressort plus.
+  let minLeft = Infinity;
+  for (let i = 0; i < 120; i++) {
+    run(w, 1, (_t, id) => (id === b.id ? (i % 30 < 20 ? BTN.LEFT : BTN.LEFT | BTN.DASH) : 0));
+    minLeft = Math.min(minLeft, b.x - b.w / 2);
+  }
+  check('arène : impossible d\'en ressortir (course et dash vers la gauche)', minLeft >= limit - 0.5, `bord gauche ${(minLeft - limit).toFixed(2)} px du kekkai`);
 
   // Salle vide pendant le combat : l'arène reste fermée ; un arrivant entre directement dans l'arène.
   for (const p of [...w.players]) removePlayer(w, p.id);
@@ -288,7 +308,8 @@ function nonFinite(w: World): string[] {
       if (near.length) bad.push(`t=${w.tick} ${e.type}#${e.id} à ${Math.abs(near[0].x - e.x).toFixed(0)} px de p#${near[0].id}`);
     }
   });
-  check('renforts apparus pendant la simulation', spawned > 10, `${spawned}`);
+  // Des renforts apparaissent (l'arène, où il n'y en a pas, peut occuper une partie de la simulation).
+  check('renforts apparus pendant la simulation', spawned > 5, `${spawned}`);
   check('aucun renfort à moins de 700 px d\'un joueur vivant', bad.length === 0, bad.slice(0, 3).join(' ; '));
   check('population plafonnée', peak <= COOP.POP_CAP + 8, `pic=${peak}`);
   // Jetons : plafond proportionnel aux joueurs vivants.
@@ -604,6 +625,97 @@ function nonFinite(w: World): string[] {
     `${coop.out.length} événements`,
   );
   check('solo : aucun événement de combat ne porte de clé pid', solo.out.length > 0 && solo.out.every((ev) => !('pid' in ev)), `${solo.out.length} événements`);
+}
+
+// ─── 15. Kekkai à sens unique (coop) ─────────────────────────────────────────
+{
+  /** Monde coop avec l'arène fermée par `a` (gardien figé loin), renforts coupés. */
+  const sealed = (seed: number) => {
+    const w = createWorld(seed, { mode: 'coop' });
+    w.spawnTimer = 1e9;
+    w.wave.t = -1e9;
+    const a = addPlayer(w, 'A');
+    const b = addPlayer(w, 'B');
+    a.iframes = b.iframes = 1e9;
+    warpToArena(w, a.id);
+    run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+    const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+    if (g) g.freeze = 1e9; // le gardien ne gêne pas les mesures
+    return { w, a, b, g, limit: (w.level.arena.col + 1) * TILE };
+  };
+
+  // K1. Entrées aléatoires (course, dash, saut, iai, glissade…) depuis l'intérieur : jamais dehors.
+  {
+    let worst = Infinity;
+    let sealedOk = true;
+    for (let seed = 1; seed <= 20; seed++) {
+      const { w, a, limit } = sealed(500 + seed);
+      sealedOk &&= stateOf(w) === 'arena';
+      const input = scripted(seed);
+      const moves = [BTN.LEFT, BTN.LEFT | BTN.DASH, BTN.LEFT | BTN.JUMP, BTN.IAI, BTN.LEFT | BTN.DOWN, BTN.LEFT | BTN.ATTACK];
+      run(w, 3000, (t, id) => (id === a.id ? (t % 90 < 45 ? moves[(t / 90) % moves.length | 0] : input(t, id)) : 0), (w) => {
+        if (stateOf(w) === 'arena') worst = Math.min(worst, a.x - a.w / 2 - limit);
+      });
+    }
+    check('kekkai : arène fermée dans les 20 parties', sealedOk);
+    check('kekkai : 20 × 3000 ticks d’entrées aléatoires depuis l’intérieur, jamais ressorti', worst >= -0.5, `marge minimale ${worst.toFixed(2)} px`);
+  }
+
+  // K3. Un ennemi resté dehors ne franchit pas le kekkai, même en poursuivant quelqu'un à l'intérieur.
+  {
+    const { w, a, b, limit } = sealed(77);
+    removePlayer(w, b.id);
+    a.x = limit + 2 * TILE;
+    const e = spawnEnemy(w, 'ashigaru', limit - 3 * TILE, a.y, false);
+    let maxRight = -Infinity;
+    run(w, 600, () => 0, () => (maxRight = Math.max(maxRight, e.x + e.w / 2)));
+    check('kekkai : un ennemi resté dehors ne le franchit pas', maxRight <= limit - TILE + 0.5, `bord droit ${(maxRight - (limit - TILE)).toFixed(1)} px de la barrière`);
+  }
+
+  // K4. Une flèche tirée sur la barrière s'y brise, des deux côtés.
+  {
+    for (const side of [-1, 1] as const) {
+      const { w, limit } = sealed(91);
+      const col = w.level.arena.col;
+      const x = side < 0 ? (col - 2) * TILE : (col + 3) * TILE;
+      w.projectiles.push({ id: w.nextId++, kind: 'arrow', x, y: 10 * TILE, vx: -side * 600, vy: 0, owner: 'enemy', ownerId: 0, damage: 10, life: 200, hits: [], dead: false });
+      const evs = run(w, 30);
+      const a0 = w.projectiles.find((q) => q.kind === 'arrow');
+      check(`kekkai : flèche venue ${side < 0 ? 'de dehors' : 'de dedans'} brisée sur la barrière`, !a0 && evs.some((ev) => ev.type === 'arrowBreak' && Math.abs(ev.x - (col + 0.5) * TILE) < TILE * 1.5), `${limit}`);
+    }
+  }
+
+  // K5 et A2. Plus personne vivant dedans alors que B attend dehors : l'arène se rouvre, tuiles d'origine.
+  {
+    const { w, a, b } = sealed(123);
+    const col = w.level.arena.col;
+    const backup = w.level.arena.backup;
+    kill(w, a);
+    const evs = run(w, 2);
+    check('arène : plus personne vivant dedans → elle se rouvre (B dehors n’est pas touché)', stateOf(w) === 'playing' && evs.some((ev) => ev.type === 'arenaReset') && pState(b) !== 'dead');
+    check('arène : le gardien est retiré', !w.enemies.some((e) => e.type === 'boss'));
+    let same = true;
+    for (let r = 0; r < w.level.arena.rows; r++) same &&= w.level.tiles[r * w.level.w + col] === backup[r];
+    check('kekkai : tuiles d’origine restaurées à la réouverture', same);
+  }
+
+  // A4. Le gardien ne vise jamais un joueur resté dehors.
+  {
+    const { w, a, b, g } = sealed(321);
+    check('gardien : vise le joueur de l’arène', !!g && targetPlayer(w, g)?.id === a.id);
+    kill(w, a);
+    // Avant la réouverture (même pas) : avec a mort, personne dedans à viser.
+    check('gardien : ne vise pas B resté dehors', !!g && targetPlayer(w, g) === null && b.x < (w.level.arena.col + 1) * TILE);
+  }
+
+  // Solo : la barrière reste un mur plein.
+  {
+    const w = createWorld(808);
+    const p = addPlayer(w, 'solo');
+    warpToArena(w, p.id);
+    run(w, 30, () => BTN.RIGHT);
+    check('solo : barrière pleine (T_SOLID), pas de kekkai', stateOf(w) === 'arena' && w.level.tiles[10 * w.level.w + w.level.arena.col] !== T_KEKKAI);
+  }
 }
 
 if (failures) {
