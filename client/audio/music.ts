@@ -1,4 +1,4 @@
-q// Musique procédurale et adaptative, gamme In (Miyako-bushi), sans aucun fichier audio.
+// Musique procédurale et adaptative, gamme In (Miyako-bushi), sans aucun fichier audio.
 // Un séquenceur à anticipation (lookahead) planifie des doubles-croches ; chaque
 // ambiance active des pistes différentes, avec des fondus calés sur les mesures.
 //
