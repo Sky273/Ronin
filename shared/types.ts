@@ -279,6 +279,8 @@ export interface World {
   difficulty: DifficultyId;
   /** 'solo' : partie locale historique ; 'coop' : salle en ligne (règles multijoueur). */
   mode: GameMode;
+  /** Coop : index du sanctuaire le plus avancé activé par la salle (point de renaissance commun). */
+  shrine: number;
   /** Partie terminée (tous les joueurs sans vie) : la simulation est figée. */
   over: boolean;
   overT: number; // ticks écoulés depuis que tous les joueurs sont sortis

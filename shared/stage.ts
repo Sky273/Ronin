@@ -1,10 +1,10 @@
-import { TICK_RATE, TILE } from './constants';
+import { COOP, COOP_CLEARED_TICKS, PLAYER, TICK_RATE, TILE } from './constants';
 import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { spawnEnemy } from './enemy';
 import { addScore, gainHonor } from './interactions';
 import { BTN } from './input';
 import { T_SOLID } from './level';
-import { handlePicks, resetForStage } from './player';
+import { arenaEntrance, handlePicks, resetForStage } from './player';
 import { buildStage } from './stagebuild';
 import type { StageState, World } from './types';
 
@@ -45,7 +45,8 @@ export function stepStage(w: World): void {
       break;
     }
     case 'arena': {
-      if (w.players.every((p) => p.state === 'dead')) {
+      // Salle vide (coop) : every() serait vrai, mais personne n'a perdu — l'arène reste fermée.
+      if (w.players.length > 0 && w.players.every((p) => p.state === 'dead')) {
         resetArena(w);
         break;
       }
@@ -82,8 +83,28 @@ function lockArena(w: World): void {
   g.state = 'intro';
   g.facing = -1;
   st.guardianId = g.id;
+  if (w.mode === 'coop') pullIntoArena(w);
   w.events.push({ type: 'arenaLock', x: (a.col + 0.5) * TILE });
   w.events.push({ type: 'bossSpawn', id: g.id, x: g.x, y: g.y });
+}
+
+/** Coop : la salle affronte le gardien ensemble — les joueurs vivants restés dehors sont amenés à l'entrée. */
+function pullIntoArena(w: World): void {
+  const at = arenaEntrance(w);
+  for (const p of w.players) {
+    if (p.state === 'dead' || inArena(w, p.x)) continue;
+    p.x = at.x;
+    p.y = at.y;
+    p.vx = 0;
+    p.vy = 0;
+    p.onGround = true;
+    p.state = 'normal';
+    p.stateT = 0;
+    p.attack = null;
+    p.h = PLAYER.H;
+    p.crouch = false;
+    p.iframes = Math.max(p.iframes, COOP.ARENA_PULL_IFRAMES);
+  }
 }
 
 /** Tous les joueurs sont morts dans l'arène : elle se rouvre, le gardien attendra. */
@@ -124,6 +145,8 @@ export function stepCleared(w: World, inputs: Map<number, number>): void {
     handlePicks(w, p, pressed);
     if (st.t > 90 && pressed & (BTN.JUMP | BTN.ATTACK)) proceed = true;
   }
+  // Coop : personne ne bloque la salle, la route reprend d'elle-même.
+  if (w.mode === 'coop' && st.t >= COOP_CLEARED_TICKS) proceed = true;
   if (proceed) nextStage(w);
 }
 
@@ -138,6 +161,7 @@ export function nextStage(w: World): void {
   w.spawnTimer = 240;
   w.wave = { n: 0, phase: 'calm', t: 0, kills: 0, quota: 0 };
   w.stage = newStageState(loop, w.tick);
+  w.shrine = 0;
   for (const p of w.players) resetForStage(p, w.level.spawn.x, w.level.spawn.y);
   populateStage(w);
   w.events.push({ type: 'stageStart', loop });
