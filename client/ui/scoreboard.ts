@@ -86,7 +86,7 @@ export class Scoreboard {
       scene.add.text(cx - 330, hy, 'Rank', hs).setOrigin(0.5),
       scene.add.text(cx - 280, hy, 'Name', hs).setOrigin(0, 0.5),
       scene.add.text(cx + 110, hy, 'Score', hs).setOrigin(1, 0.5),
-      scene.add.text(cx + 200, hy, 'Loop', hs).setOrigin(0.5),
+      scene.add.text(cx + 200, hy, 'Stage', hs).setOrigin(0.5),
       scene.add.text(cx + 310, hy, 'Kills', hs).setOrigin(1, 0.5),
     ];
 
@@ -219,7 +219,7 @@ export class Scoreboard {
       row.rank.setColor(on ? RED : e ? INK : WASH);
       row.name.setText(e ? e.name : '—').setColor(e ? col : WASH);
       row.score.setText(e ? fmtScore(e.score) : '—').setColor(e ? col : WASH);
-      row.loop.setText(e ? `周 ${e.loop + 1}` : '—').setColor(on ? RED : e ? SOFT : WASH);
+      row.loop.setText(e ? `${e.loop + 1}` : '—').setColor(on ? RED : e ? SOFT : WASH);
       row.kills.setText(e ? String(e.kills) : '—').setColor(on ? RED : e ? SOFT : WASH);
       row.hanko.setVisible(on);
       // Entrée en défilant : chaque ligne glisse depuis la droite, décalée de la précédente.
