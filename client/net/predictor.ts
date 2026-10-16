@@ -8,7 +8,7 @@
 import { CORRECTION_SNAP_PX, CORRECTION_TAU_MS } from '../../shared/net/protocol';
 import { Rng } from '../../shared/math';
 import { stepPlayer } from '../../shared/player';
-import type { Enemy, GameEvent, Player, StageState, WaveState, World } from '../../shared/types';
+import type { Duel, DuelInvite, Enemy, GameEvent, Player, StageState, WaveState, World } from '../../shared/types';
 
 /** Ce que la prédiction sait du monde, d'après le dernier instantané appliqué. */
 export interface PredictionContext {
@@ -18,6 +18,10 @@ export interface PredictionContext {
   shrine: number;
   /** Tick serveur du dernier instantané. */
   serverTick: number;
+  /** Duels en cours (coop), d'après l'instantané : le duelliste local est prédit. Copiés à chaque pas. */
+  duels?: Duel[];
+  /** Défis en attente (coop), d'après l'instantané. Copiés à chaque pas. */
+  duelInvites?: DuelInvite[];
 }
 
 /** Entrée envoyée, en attente d'accusé de réception. */
@@ -46,6 +50,11 @@ const SERVER_FIELDS = [
 /** Copie profonde d'un joueur (tableaux et améliorations compris). */
 export function clonePlayer(p: Player): Player {
   return { ...p, hitList: p.hitList.slice(), offer: p.offer.slice(), up: { ...p.up } };
+}
+
+/** Copie profonde d'un duel (les deux duellistes compris). */
+export function cloneDuel(d: Duel): Duel {
+  return { ...d, a: { ...d.a }, b: { ...d.b } };
 }
 
 /** Recopie les champs d'interface de `src` dans `dst`. */
@@ -270,6 +279,10 @@ function simulate(p: Player, b: number, enemies: Enemy[], ctx: PredictionContext
     over: false,
     overT: 0,
   };
+  // Duels et défis copiés en profondeur : les mutations de la prédiction sont jetées avec le monde.
+  // Absents du contexte (solo, anciens appels) : le monde jetable n'en a pas, comportement inchangé.
+  if (ctx.duels) w.duels = ctx.duels.map(cloneDuel);
+  if (ctx.duelInvites) w.duelInvites = ctx.duelInvites.map((i) => ({ ...i }));
   stepPlayer(w, p, b);
   return w.events;
 }
