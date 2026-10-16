@@ -9,7 +9,7 @@ const INPUT_GUARD_MS = 300;
 const COL_ON = '#15120e';
 const COL_OFF = '#6b6359';
 
-/** Écran titre (浪人) avec un petit menu : jouer ou consulter le tableau d'honneur. */
+/** Écran titre (浪人) avec un petit menu : jouer, jouer en ligne (si proposé) ou consulter le tableau d'honneur. */
 export class TitleScreen {
   private root: Phaser.GameObjects.Container;
   private entries: Phaser.GameObjects.Text[] = [];
@@ -19,8 +19,12 @@ export class TitleScreen {
   private readyAt = 0;
   private actions: (() => void)[];
 
-  constructor(private scene: Phaser.Scene, put: Put, cb: { onPlay(): void; onScores(): void }) {
-    this.actions = [() => cb.onPlay(), () => cb.onScores()];
+  constructor(private scene: Phaser.Scene, put: Put, cb: { onPlay(): void; onScores(): void; onOnline?(): void }) {
+    // L'entrée « Online » n'apparaît que si la scène fournit le rappel correspondant.
+    const items: { label: string; act: () => void }[] = [{ label: 'Draw your blade', act: () => cb.onPlay() }];
+    if (cb.onOnline) items.push({ label: 'Online', act: () => cb.onOnline?.() });
+    items.push({ label: 'Hall of Honor', act: () => cb.onScores() });
+    this.actions = items.map((it) => it.act);
     const W = scene.scale.width;
     const H = scene.scale.height;
     const r = seeded(9);
@@ -39,9 +43,11 @@ export class TitleScreen {
     // Trait de pinceau rouge sous l'entrée sélectionnée (dessiné en coordonnées locales,
     // pour pouvoir le « tracer » de gauche à droite via scaleX).
     this.mark = scene.add.graphics();
-    const labels = ['Draw your blade', 'Hall of Honor'];
-    labels.forEach((label, i) => {
-      const t = scene.add.text(W / 2, 548 + i * 50, label, { fontFamily: FONT_TEXT, fontSize: '27px', color: COL_OFF }).setOrigin(0.5);
+    // Deux entrées : disposition d'origine ; trois : un peu resserrées pour garder l'aide à l'écran.
+    const top = items.length > 2 ? 538 : 548;
+    const gap = items.length > 2 ? 42 : 50;
+    items.forEach(({ label }, i) => {
+      const t = scene.add.text(W / 2, top + i * gap, label, { fontFamily: FONT_TEXT, fontSize: '27px', color: COL_OFF }).setOrigin(0.5);
       t.setInteractive({ useHandCursor: true });
       t.on('pointerover', () => {
         if (this.shown) this.select(i);
@@ -53,7 +59,7 @@ export class TitleScreen {
       });
       this.entries.push(t);
     });
-    const help = scene.add.text(W / 2, 676, '↑↓ choose  ·  Enter confirm', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#6b6359' }).setOrigin(0.5).setAlpha(0.8);
+    const help = scene.add.text(W / 2, items.length > 2 ? 680 : 676, '↑↓ choose  ·  Enter confirm', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#6b6359' }).setOrigin(0.5).setAlpha(0.8);
 
     // Tous les enfants sont créés avant `put` : la caméra ignore le conteneur entier.
     this.root = put(
