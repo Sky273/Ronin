@@ -11,8 +11,8 @@ function check(name: string, ok: boolean, info = ''): void {
   console.log(`${ok ? '✔' : '✘'} ${name}${info ? `  (${info})` : ''}`);
   if (!ok) failures++;
 }
-/** Seuils de M2 actifs ? (faux tant que prédiction, interpolation et codec compact ne sont pas intégrés) */
-const ENFORCE = false;
+/** Seuils de M2 actifs (prédiction, interpolation, codec compact et compensation de latence intégrés). */
+const ENFORCE = true;
 const gate = (name: string, ok: boolean, info: string): void => {
   if (ENFORCE) check(name, ok, info);
   else console.log(`· ${name} — mesure : ${info}${ok ? '' : ' (seuil M2 non atteint)'}`);

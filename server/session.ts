@@ -166,7 +166,10 @@ export class CoopSession {
         slot.held = next.b;
         slot.ack = next.s;
         slot.starved = 0;
-        slot.lag = next.v === undefined ? 0 : Math.min(MAX_REWIND_TICKS, Math.max(0, w.tick - next.v));
+        const raw = next.v === undefined ? 0 : Math.min(MAX_REWIND_TICKS, Math.max(0, w.tick - next.v));
+        // Hausse immédiate, baisse d'au plus un tick par pas : un client ne peut pas faire alterner
+        // son retard pour que des frappes différées soient jugées en bloc contre un état plus tardif.
+        slot.lag = Math.max(raw, slot.lag - 1);
         this.lagStats.add(slot.lag);
       } else if (++slot.starved > IDLE_RELEASE_TICKS) {
         // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.

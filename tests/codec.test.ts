@@ -5,8 +5,14 @@ import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
 import {
   AGE_MAX,
+  ATTACK_IDS,
   decodeSnapshot,
+  ENEMY_MOVES,
+  ENEMY_TYPES,
   encodeSnapshot,
+  EVENT_KEYS,
+  EVENT_TYPES,
+  UPGRADE_TABLE,
   SELF_KEYS,
   type SnapshotWire,
 } from '../shared/net/codec';
@@ -283,6 +289,37 @@ function viewDiff<T extends object>(got: T, ref: T, keys: readonly (keyof T)[], 
   const oddEnemy = { ...createEnemy(77, 'ninja', 100, 200), type: 'tengu' as EnemyType, move: 'fly' as Enemy['move'], state: 'dance' as Enemy['state'] };
   const oe = roundTrip(encodeSnapshot({ ...base, enemies: [oddEnemy] })).enemies[0];
   check('repli : ennemi de type, état et mouvement inconnus', !!oe && diff([oe.type, oe.move, oe.state], ['tengu', 'fly', 'dance']) === '');
+
+  // QA : chaque type d'événement, toutes clés remplies (valeurs nulles, négatives, fausses, toutes
+  // les valeurs d'énumération), puis sans sa dernière clé (tuple raccourci) et sans pid.
+  const ENUMS: Record<string, readonly string[]> = { attack: ATTACK_IDS, enemyType: ENEMY_TYPES, move: ENEMY_MOVES, upgrade: UPGRADE_TABLE };
+  const POSK = new Set(['x', 'y', 'x0', 'x1']);
+  const samples: GameEvent[] = [];
+  const VALUES: unknown[] = [0, -3, 7.25, 123456, true, false];
+  for (const type of EVENT_TYPES) {
+    const keys = EVENT_KEYS[type] as readonly string[];
+    const nVar = Math.max(VALUES.length, ...keys.map((k) => ENUMS[k]?.length ?? 0));
+    for (let v = 0; v < nVar; v++) {
+      const ev: Record<string, unknown> = { type };
+      keys.forEach((k, i) => {
+        ev[k] = POSK.has(k) ? -40.5 + 1234.5 * v + i : ENUMS[k] ? ENUMS[k][v % ENUMS[k].length] : VALUES[(v + i) % VALUES.length];
+      });
+      samples.push(ev as unknown as GameEvent);
+      if (keys.length) {
+        const short = { ...ev };
+        delete short[keys[keys.length - 1]];
+        samples.push(short as unknown as GameEvent);
+      }
+      if ('pid' in ev) {
+        const nopid = { ...ev };
+        delete nopid.pid;
+        samples.push(nopid as unknown as GameEvent);
+      }
+    }
+  }
+  const back2 = roundTrip(encodeSnapshot({ ...base, events: samples })).events;
+  const d = back2.length === samples.length ? diff(back2, samples) : `${back2.length} / ${samples.length}`;
+  check(`tous les types d’événements (${EVENT_TYPES.length}), toutes les énumérations : aller-retour exact`, d === '', d);
 }
 
 if (failures) {

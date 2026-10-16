@@ -359,10 +359,12 @@ export function encodeEvent(ev: GameEvent): unknown {
   return r;
 }
 
-function decodeEvent(x: unknown): GameEvent {
-  if (!Array.isArray(x)) return { ...(x as GameEvent) };
+/** Décode un événement ; null si son type est inconnu (serveur d'une autre version) : il est ignoré. */
+function decodeEvent(x: unknown): GameEvent | null {
+  if (!Array.isArray(x)) return x && typeof x === 'object' ? { ...(x as GameEvent) } : null;
   const type = EVENT_TYPES[x[0] as number];
-  const keys = EVENT_KEYS[type] as readonly string[];
+  const keys = type === undefined ? undefined : (EVENT_KEYS[type] as readonly string[] | undefined);
+  if (!keys) return null;
   const ev: Record<string, unknown> = { type };
   for (let i = 0; i < keys.length; i++) {
     const v = x[i + 1];
@@ -455,7 +457,7 @@ export function decodeSnapshot(wire: SnapshotWire): Snapshot {
     enemies: w[8].map((a) => enemyFromView(decodeEnemyView(a as unknown[]))),
     projectiles: w[9].map((a) => decodeProjectile(a as unknown[])),
     orbs: w[10].map((a) => decodeOrb(a as unknown[])),
-    events: w[11].map(decodeEvent),
+    events: (w[11] as unknown[]).map(decodeEvent).filter((ev): ev is GameEvent => ev !== null),
   };
 }
 

@@ -71,7 +71,7 @@ npm run dev          # then choose "Online" on the title screen
 - `npm run bots -- 12` fills a room with 12 bots and prints traffic statistics.
 - `npm run build:server` and `npm run start:server` build and run the production server.
 
-This first milestone sends inputs and renders server snapshots as they arrive. Client-side prediction, iaidō duels between players and a 1v1 tournament dojo come next.
+Your own samurai is predicted locally and reconciled with the server, so it reacts on the very frame you press a key; other players and enemies are interpolated about 100 ms behind. The server judges your strikes and parries against what you saw on screen (lag compensation, up to 333 ms), and snapshots are compact (well under 1 KB with 12 players). Iaidō duels between players and a 1v1 tournament dojo come next.
 
 ## Controls
 

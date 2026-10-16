@@ -137,9 +137,10 @@ function feedFoes(w: World, p: Player, n: { spawned: number }, types: readonly E
 }
 const isHit = (ev: GameEvent): boolean => ev.type === 'hit' || ev.type === 'block' || ev.type === 'guardBreak';
 
-// 3a. Banc réseau (75 ms + gigue 20 ms) avec l'interpolateur actuel et sans compensation de latence
-// côté serveur : le client frappe des ennemis vus ~150 ms plus tôt que ceux que juge le serveur.
-// Mesure seulement (les seuils sont vérifiés en 3b, avec les ennemis du tick de vue).
+// 3a. Banc réseau complet (75 ms + gigue 20 ms) : interpolation au tick de vue et compensation de
+// latence côté serveur. Tous les types d'ennemis : les projectiles renvoyés ne sont pas prédits et
+// l'interpolation linéaire entre instantanés diffère un peu des positions exactes jugées par le
+// serveur (coups en limite de portée) ; d'où des seuils un peu plus larges qu'en 3b.
 {
   const bench = new NetBench({ seed: 11, lagMs: 75, jitterMs: 20 });
   const c = bench.addClient('a');
@@ -162,7 +163,11 @@ const isHit = (ev: GameEvent): boolean => ev.type === 'hit' || ev.type === 'bloc
   const px = log.px.filter((_, i) => !log.snapped[i]);
   const nz = px.filter((x) => x > 0).length;
   check('banc + combat : des coups prédits', hits > 20, `${hits} coups prédits`);
-  console.log(`· banc + combat (sans compensation de latence) — mesure : p99 ${percentile(px, 99).toFixed(2)} px, max ${Math.max(...px).toFixed(2)} px, ${nz}/${px.length} corrections non nulles`);
+  check(
+    'banc + combat : corrections p99 ≤ 6 px, max < 48 px, rares',
+    percentile(px, 99) <= 6 && Math.max(...px) < 48 && nz / px.length < 0.05,
+    `p99 ${percentile(px, 99).toFixed(2)} px, max ${Math.max(...px).toFixed(2)} px, ${nz}/${px.length} non nulles`,
+  );
 }
 
 // 3b. Même combat, prédicteur alimenté avec les ennemis tels que le serveur les juge pour chaque

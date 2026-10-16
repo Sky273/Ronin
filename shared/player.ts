@@ -3,7 +3,7 @@ import { DT, PLAYER as P, TILE } from './constants';
 import { findGround } from './enemy';
 import { BTN } from './input';
 import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
-import { hurtRect, projectileSeenBy } from './lagcomp';
+import { claimGhost, hurtRect, isGhost, projectileSeenBy, sliceableProjectiles } from './lagcomp';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
 import { canFit, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
@@ -410,11 +410,12 @@ function doHits(w: World, p: Player, d: AttackDef): void {
       if (res !== 'blocked' && p.freeze < d.hitstop) p.freeze = d.hitstop;
     }
   }
-  // Flèches et shurikens peuvent être tranchés et renvoyés.
-  for (const a of w.projectiles) {
-    if (a.dead || a.owner !== 'enemy') continue;
+  // Flèches et shurikens peuvent être tranchés et renvoyés (y compris, en retard, ceux encore en vol à l'écran).
+  for (const a of sliceableProjectiles(w, p)) {
+    if (a.owner !== 'enemy' || (a.dead && !isGhost(w, a))) continue;
     const at = projectileSeenBy(w, p, a);
     if (at.x > box.x && at.x < box.x + box.w && at.y > box.y && at.y < box.y + box.h) {
+      claimGhost(w, a, true);
       // Renvoyé depuis l'endroit où le joueur l'a tranché (identique sans compensation).
       a.x = at.x;
       a.y = at.y;
@@ -557,10 +558,11 @@ function iaiStrike(w: World, p: Player): void {
     if (e.type !== 'boss' && e.hp - dmg * mult <= 0) doomEnemy(w, p, e);
     else hitEnemy(w, p, e, { dmg, kbx: p.facing * 350, kby: -200, hitstop: 10, cut: 0, heavy: true, fromX: x0, fromY: p.y - p.h * 0.5 });
   }
-  for (const a of w.projectiles) {
-    if (a.dead || a.owner !== 'enemy') continue;
+  for (const a of sliceableProjectiles(w, p)) {
+    if (a.owner !== 'enemy' || (a.dead && !isGhost(w, a))) continue;
     const at = projectileSeenBy(w, p, a);
     if (at.x > rect.x && at.x < rect.x + rect.w && at.y > rect.y && at.y < rect.y + rect.h) {
+      claimGhost(w, a, false);
       a.dead = true;
       w.events.push({ type: 'arrowBreak', x: a.x, y: a.y });
     }

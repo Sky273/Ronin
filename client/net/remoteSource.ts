@@ -7,6 +7,7 @@ import { applySnapshot } from '../../shared/net/snapshot';
 import type { GameEvent, World } from '../../shared/types';
 import { createWorld } from '../../shared/world';
 import type { WorldSource } from '../world/source';
+import { EventGate } from './eventGate';
 import { Interpolator } from './interpolator';
 import { type PredictionContext, Predictor } from './predictor';
 import type { Transport } from './transport';
@@ -22,6 +23,8 @@ const PING_EVERY = 2;
 const MAX_QUEUED = 20;
 /** Événements conservés des instantanés abandonnés. */
 const MAX_CARRIED_EVENTS = 200;
+/** Durée (ticks) du clignotement immédiat d'un ennemi touché par un coup prédit. */
+const PREDICTED_FLASH_TICKS = 5;
 
 export interface RemoteSourceOptions {
   /** Horloge en ms (injectable pour les tests). */
@@ -33,7 +36,8 @@ export class RemoteSource implements WorldSource {
   private w: World;
   private pid = -1;
   private welcomed = false;
-  private queue: Snapshot[] = [];
+  /** Instantanés reçus, avec leur heure de réception (horloge du serveur estimée). */
+  private queue: { snap: Snapshot; at: number }[] = [];
   private lastT = -1;
   private snapsApplied = 0;
   private stageDirty = false;
@@ -46,11 +50,17 @@ export class RemoteSource implements WorldSource {
   private readyCbs: (() => void)[] = [];
   private lastAck = 0;
   private ctx: PredictionContext | null = null;
+  /** Ennemis touchés par un coup prédit : id → tick de fin du clignotement. */
+  private flashUntil = new Map<number, number>();
+  /** Dernier tick affiché : le monde d'affichage ne recule jamais (pending vidé, changement d'étape). */
+  private shownTick = 0;
   private readonly now: () => number;
   /** Prédiction du joueur local (créée à l'accueil, quand son id est connu). */
   predictor: Predictor = new Predictor(-1);
   /** Interpolation des entités distantes. */
   readonly interp: Interpolator;
+  /** Aiguillage des événements (doublons prédits, effets différés). */
+  gate = new EventGate(-1);
 
   constructor(private transport: Transport, opts: RemoteSourceOptions = {}) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -59,11 +69,14 @@ export class RemoteSource implements WorldSource {
     this.w = createWorld(0, { mode: 'coop' });
     transport.onWelcome((m) => this.welcome(m));
     transport.onSnapshot((m) => this.receive(m));
-    transport.onClose((reason) => {
-      if (this.disposed || this.closeReason !== null) return;
-      this.closeReason = reason;
-      for (const cb of this.closeCbs) cb(reason);
-    });
+    transport.onClose((reason) => this.fail(reason));
+  }
+
+  /** Connexion perdue ou inutilisable : signalée une seule fois. */
+  private fail(reason: string): void {
+    if (this.disposed || this.closeReason !== null) return;
+    this.closeReason = reason;
+    for (const cb of this.closeCbs) cb(reason);
   }
 
   /** Monde d'affichage : joueur local prédit, autres entités interpolées. */
@@ -131,6 +144,7 @@ export class RemoteSource implements WorldSource {
     this.w = createWorld(msg.seed, { mode: 'coop' });
     this.w.tick = msg.tick;
     this.predictor = new Predictor(msg.pid);
+    this.gate = new EventGate(msg.pid);
     this.stageDirty = true;
     this.transport.ping();
   }
@@ -138,16 +152,23 @@ export class RemoteSource implements WorldSource {
   /** Instantané reçu (forme filaire) : décodé et mis en file, appliqué au prochain `advance` (public pour les tests). */
   receive(wire: SnapshotWire): void {
     if (!this.welcomed || this.disposed) return; // avant l'accueil, rien à quoi l'appliquer
-    const msg = decodeSnapshot(wire);
+    let msg: Snapshot;
+    try {
+      msg = decodeSnapshot(wire);
+    } catch {
+      // Instantané illisible (serveur incompatible ou défaillant) : on ferme proprement.
+      this.fail('The server sent data this game cannot read — please reload the page.');
+      return;
+    }
     // Doublon ou retardataire : ignoré dès la réception, pour que la file reste strictement
     // croissante (sinon des événements reportés sur lui seraient écartés avec lui).
-    const newest = this.queue.length ? this.queue[this.queue.length - 1].t : this.lastT;
+    const newest = this.queue.length ? this.queue[this.queue.length - 1].snap.t : this.lastT;
     if (msg.t <= newest) return;
-    this.queue.push(msg);
+    this.queue.push({ snap: msg, at: this.now() });
     if (this.queue.length > MAX_QUEUED) {
       // Seul l'état le plus récent compte ; les événements des instantanés abandonnés sont reportés (bornés).
-      const dropped = this.queue.shift()!;
-      const next = this.queue[0];
+      const dropped = this.queue.shift()!.snap;
+      const next = this.queue[0].snap;
       next.events = dropped.events.concat(next.events).slice(-MAX_CARRIED_EVENTS);
     }
   }
@@ -167,7 +188,13 @@ export class RemoteSource implements WorldSource {
         const v = Math.max(0, Math.floor(this.interp.renderTick(now)));
         const s = ++this.seq;
         this.transport.sendInput({ s, b, v });
-        if (this.ctx) for (const ev of this.predictor.step(s, b, v, this.interp.enemiesAt(v), this.ctx)) events.push(ev);
+        // Avant le premier instantané, le prédicteur se contente de mémoriser l'entrée (rejouée ensuite).
+        const ctx = this.ctx ?? { level: this.w.level, stage: this.w.stage, wave: this.w.wave, shrine: this.w.shrine, serverTick: this.w.tick };
+        const tick = this.predictor.tick;
+        for (const ev of this.gate.predicted(this.predictor.step(s, b, v, this.interp.enemiesAt(v), ctx), tick)) {
+          events.push(ev);
+          if (ev.type === 'hit') this.flashUntil.set(ev.targetId, tick + PREDICTED_FLASH_TICKS);
+        }
         sent++;
       }
     }
@@ -184,20 +211,24 @@ export class RemoteSource implements WorldSource {
     const queued = this.queue;
     this.queue = [];
     const wasReady = this.ready;
-    for (const snap of queued) {
+    for (const { snap, at } of queued) {
       this.lastT = snap.t;
       // Le niveau, l'étape et la barrière suivent le serveur (les entités sont remplacées plus bas).
       if (applySnapshot(this.w, snap).stageChanged) this.stageDirty = true;
       this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t };
-      this.interp.push(snap, now);
+      this.interp.push(snap, at);
       this.predictor.reconcile(snap.self, snap.ack, this.ctx, (v) => this.interp.enemiesAt(v));
       this.lastAck = snap.ack;
       this.snapsApplied++;
-      for (const ev of snap.events) events.push(ev);
+      for (const ev of this.gate.server(snap.events, snap.t)) events.push(ev);
     }
 
     // Monde d'affichage : soi prédit, les autres au tick de rendu.
-    if (this.snapsApplied > 0) this.compose(now, dt);
+    if (this.snapsApplied > 0) {
+      this.compose(now, dt);
+      // Effets situés dans le monde : quand leurs entités sont affichées.
+      for (const ev of this.gate.release(this.interp.renderTick(now))) events.push(ev);
+    }
     if (!wasReady && this.ready) {
       const cbs = this.readyCbs;
       this.readyCbs = [];
@@ -212,7 +243,21 @@ export class RemoteSource implements WorldSource {
     const r = this.interp.renderTick(now);
     const s = this.interp.sample(r, this.pid);
     const me = this.predictor.display(this.acc / INPUT_DT, dt * 1000);
-    w.tick = Math.max(w.tick, this.predictor.tick);
+    this.shownTick = Math.max(this.shownTick, w.tick, this.predictor.tick);
+    w.tick = this.shownTick;
+    // Les autres joueurs sont affichés au tick r, le monde au tick prédit : leurs ticks d'effets
+    // (double saut, parade) sont décalés d'autant pour que le rendu les compare à world.tick.
+    const shift = w.tick - r;
+    for (const p of s.players) {
+      p.doubleJumpTick += shift;
+      p.parryTick += shift;
+    }
+    // Coup prédit : l'ennemi visé clignote tout de suite, sans attendre la confirmation du serveur.
+    for (const e of s.enemies) {
+      const until = this.flashUntil.get(e.id);
+      if (until !== undefined && until > w.tick) e.flash = Math.max(e.flash, until - w.tick);
+    }
+    for (const [id, until] of this.flashUntil) if (until <= w.tick) this.flashUntil.delete(id);
     w.players = me ? [me, ...s.players] : s.players;
     w.enemies = s.enemies;
     w.projectiles = s.projectiles;

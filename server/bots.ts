@@ -3,7 +3,7 @@
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
-import { MSG, NET_TICK, type WelcomeMsg } from '../shared/net/protocol';
+import { INTERP_TICKS, MSG, NET_TICK, type WelcomeMsg } from '../shared/net/protocol';
 
 interface Args {
   count: number;
@@ -32,6 +32,8 @@ class Bot {
   snaps = 0;
   bytes = 0;
   lastAck = -1;
+  /** Tick du dernier instantané reçu (tick de vue envoyé avec les entrées). */
+  lastT = -1;
   rtt: number[] = [];
   private mode: 'right' | 'left' | 'idle' = 'right';
   private modeT = 0;
@@ -56,6 +58,7 @@ class Bot {
       const s = decodeSnapshot(wire);
       this.snaps++;
       this.lastAck = s.ack;
+      this.lastT = s.t;
     });
     room.onMessage(MSG.ping, (m: { t: number }) => {
       this.rtt.push(performance.now() - m.t);
@@ -83,7 +86,9 @@ class Bot {
   }
 
   sendInput(): void {
-    this.room?.send(MSG.input, { s: this.seq++, b: this.buttons() });
+    // Tick de vue comme un vrai client : dernier instantané moins le recul d'interpolation.
+    const v = this.lastT >= 0 ? Math.max(0, this.lastT - INTERP_TICKS) : undefined;
+    this.room?.send(MSG.input, { s: this.seq++, b: this.buttons(), ...(v === undefined ? {} : { v }) });
   }
 }
 

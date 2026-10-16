@@ -32,7 +32,7 @@ export interface PendingInput {
 export const MAX_PENDING = 120;
 
 /** Événements du joueur local prédits (effets immédiats) ; les autres viennent du serveur. */
-const PREDICTED_EVENTS: ReadonlySet<GameEvent['type']> = new Set<GameEvent['type']>([
+export const PREDICTED_EVENTS: ReadonlySet<GameEvent['type']> = new Set<GameEvent['type']>([
   'swing', 'jump', 'wallJump', 'land', 'dash', 'slide', 'iaiStart', 'iaiReady', 'iai', 'plungeLand',
   'hit', 'block', 'deflect', 'guardBreak', 'windSlash',
 ]);

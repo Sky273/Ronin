@@ -60,13 +60,15 @@ export interface NetCompensation {
   ghosts: { a: Projectile; tick: number }[];
   /** Retard courant du joueur (0 si inconnu) ; équivaut à lagOf(net, pid). */
   lagOf(pid: number): number;
+  /** Étape de l'historique : à chaque nouvelle étape, frappes et fantômes de l'ancienne sont oubliés. */
+  stage: number;
 }
 
 export function createLagComp(): NetCompensation {
   const ring: HistorySlot[] = [];
   for (let i = 0; i < RING; i++) ring.push({ tick: -1, enemyIdx: new Map(), enemyRects: [], projIdx: new Map(), projPos: [] });
   const lag = new Map<number, number>();
-  return { lag, judged: new Map(), ring, strikes: [], swings: new WeakMap(), ghosts: [], lagOf: (pid) => lag.get(pid) ?? 0 };
+  return { lag, judged: new Map(), ring, strikes: [], swings: new WeakMap(), ghosts: [], lagOf: (pid) => lag.get(pid) ?? 0, stage: -1 };
 }
 
 const clampLag = (l: number): number => (l > 0 ? Math.min(MAX_REWIND_TICKS, Math.floor(l)) : 0);
@@ -117,6 +119,13 @@ export function projPosAt(net: NetCompensation, id: number, tick: number): { x: 
 export function recordHistory(w: World): void {
   const net = w.net;
   if (!net) return;
+  if (net.stage !== w.level.stage) {
+    // Nouvelle étape : rien de l'ancien niveau ne doit plus être jugé (coordonnées d'un autre décor).
+    net.stage = w.level.stage;
+    net.strikes.length = 0;
+    net.ghosts.length = 0;
+    for (const slot of net.ring) slot.tick = -1;
+  }
   const s = net.ring[w.tick % RING];
   s.tick = w.tick;
   s.enemyIdx.clear();
@@ -139,6 +148,40 @@ export function recordHistory(w: World): void {
   while (n < net.strikes.length && net.strikes[n].tick < oldest) n++;
   if (n) net.strikes.splice(0, n);
   if (net.ghosts.length) net.ghosts = net.ghosts.filter((g) => g.tick >= oldest);
+}
+
+/**
+ * Projectiles ennemis que `p` peut trancher : ceux du monde et, s'il est en retard, les fantômes
+ * encore en vol à son tick de vue (éteints sur le serveur, mais visibles sur son écran).
+ * Sans `w.net` : exactement `w.projectiles`.
+ */
+export function sliceableProjectiles(w: World, p: Player): Projectile[] {
+  const net = w.net;
+  if (!net || !net.ghosts.length) return w.projectiles;
+  const l = lagOf(net, p.id);
+  if (l <= 0) return w.projectiles;
+  const seen = w.tick - l;
+  const extra = net.ghosts.filter((g) => g.tick >= seen && g.a.owner === 'enemy').map((g) => g.a);
+  return extra.length ? w.projectiles.concat(extra) : w.projectiles;
+}
+
+/** `a` est-il un fantôme (projectile éteint encore jugeable) ? Toujours faux sans `w.net`. */
+export function isGhost(w: World, a: Projectile): boolean {
+  return !!w.net && w.net.ghosts.some((g) => g.a === a);
+}
+
+/** Un fantôme a été tranché (`revive` : renvoyé, il reprend vie) : il quitte la liste des fantômes. */
+export function claimGhost(w: World, a: Projectile, revive: boolean): void {
+  const net = w.net;
+  if (!net) return;
+  const i = net.ghosts.findIndex((g) => g.a === a);
+  if (i < 0) return;
+  net.ghosts.splice(i, 1);
+  if (revive) {
+    a.dead = false;
+    // Il peut être encore dans w.projectiles (éteint ce pas-ci, pas encore filtré) : jamais en double.
+    if (!w.projectiles.includes(a)) w.projectiles.push(a);
+  }
 }
 
 /** Projectile ennemi éteint par le décor (mur, fin de vie) : gardé pour les joueurs en retard. */
@@ -222,15 +265,16 @@ export function resolveDeferred(w: World): void {
   const S = w.tick;
   for (const p of w.players) {
     const l = lagOf(net, p.id);
-    if (l === 0) {
-      // Jugé immédiatement à chaque pas (meleeStrike, stepProjectiles).
-      net.judged.set(p.id, S);
-      continue;
-    }
-    const to = S - l;
-    const from = net.judged.get(p.id) ?? to - 1;
+    // L = 0 : le tick S est jugé immédiatement (meleeStrike, stepProjectiles) ; les ticks encore
+    // en attente d'un retard précédent (from, S − 1] sont jugés ici, sans jamais être sautés.
+    const to = l === 0 ? S - 1 : S - l;
+    const prev = net.judged.get(p.id);
+    // Jamais plus loin que l'historique (au retour d'un bilan ou d'une salle vide).
+    // Premier passage : rien d'antérieur à juger (à L = 0, le tick courant l'est déjà immédiatement).
+    const from = prev === undefined ? (l === 0 ? to : to - 1) : Math.max(prev, to - MAX_REWIND_TICKS - 1);
+    if (l === 0) net.judged.set(p.id, S);
     if (to <= from) continue; // retard en hausse : ces ticks ont déjà été jugés
-    net.judged.set(p.id, to);
+    if (l !== 0) net.judged.set(p.id, to);
     if (p.state === 'dead') continue;
     judgeStrikes(w, net, p, from, to);
     judgeProjectiles(w, net, p, from, to);
@@ -264,8 +308,9 @@ function judgeProjectiles(w: World, net: NetCompensation, p: Player, from: numbe
     if (res === 'none') continue;
     net.ghosts.splice(i--, 1);
     if (res === 'parried') {
-      g.a.dead = false; // renvoyé : il reprend vie devant le joueur
-      w.projectiles.push(g.a);
+      // Renvoyé : il reprend vie devant le joueur (jamais en double dans w.projectiles).
+      g.a.dead = false;
+      if (!w.projectiles.includes(g.a)) w.projectiles.push(g.a);
     }
     if (p.state === 'dead') return;
   }

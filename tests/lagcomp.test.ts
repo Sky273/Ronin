@@ -2,11 +2,12 @@
 // Lancer : npm run test:lagcomp
 import { findGround, spawnEnemy } from '../shared/enemy';
 import { BTN } from '../shared/input';
-import { createLagComp, lagOf, setLag } from '../shared/lagcomp';
+import { killEnemy } from '../shared/interactions';
+import { createLagComp, forgetPlayer, lagOf, setLag } from '../shared/lagcomp';
 import { Rng } from '../shared/math';
 import { MAX_REWIND_TICKS } from '../shared/net/protocol';
 import type { Enemy, EnemyType, GameEvent, Player, World } from '../shared/types';
-import { addPlayer, createWorld, stepWorld } from '../shared/world';
+import { addPlayer, createWorld, nextStage, removePlayer, stepWorld, warpToArena } from '../shared/world';
 
 export {};
 let failures = 0;
@@ -318,6 +319,346 @@ function coopGame(withNet: boolean, lagFor: (t: number, pid: number) => number, 
     const gc = g.counts;
     check('… la partie compensée reste jouable (coups, touches, parades)', (gc.hit ?? 0) > 20 && (gc.playerHit ?? 0) > 0, `${gc.hit ?? 0} hit, ${gc.playerHit ?? 0} playerHit, ${gc.parry ?? 0} parry`);
   }
+}
+
+// ─── 7. Cas limites (QA) ────────────────────────────────────────────────────
+/**
+ * Un ennemi de mêlée attaque en boucle un joueur immobile, maintenu dans sa zone de frappe.
+ * `lagAt(S)` donne le retard du joueur à chaque pas. Compte les attaques (passages en 'attack', shurikens lancés),
+ * les playerHit, et le maximum de touches attribuées à une même attaque.
+ */
+function meleeLoop(type: EnemyType, lagAt: (S: number) => number, ticks: number, dx = 50): { attacks: number; hits: number; maxPerAttack: number; err: string } {
+  const { w, ps } = arena(1, true);
+  const p = ps[0];
+  p.facing = 1;
+  const e = spawnEnemy(w, type, p.x + dx, p.y, false);
+  e.hp = e.maxHp = 1e7;
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  let attacks = 0;
+  let hits = 0;
+  let maxPerAttack = 0;
+  let cur = 0;
+  let prevState = '';
+  let err = '';
+  const x0 = p.x;
+  try {
+    for (let i = 0; i < ticks; i++) {
+      setLag(w.net!, p.id, lagAt(w.tick));
+      p.hp = p.maxHp;
+      if (p.state !== 'dead') {
+        p.x = x0; // le joueur ne recule pas : chaque attaque peut toucher
+        p.vx = 0;
+      }
+      stepWorld(w, new Map([[p.id, 0]]));
+      const st = eState(e);
+      if (st === 'attack' && prevState !== 'attack') {
+        attacks++;
+        cur = 0;
+      }
+      prevState = st;
+      for (const ev of w.events) {
+        // Ninja : chaque shuriken lancé est une attaque.
+        if (ev.type === 'throw') {
+          attacks++;
+          cur = 0;
+        }
+        if (ev.type !== 'playerHit') continue;
+        hits++;
+        cur++;
+        maxPerAttack = Math.max(maxPerAttack, cur);
+      }
+      w.events.length = 0;
+    }
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  return { attacks, hits, maxPerAttack, err };
+}
+{
+  // 7a. Retard qui chute brutalement après une frappe différée : pas de trou.
+  // Le lancier frappe pendant que L = 17 ; L passe à 0 dès la fin de sa fenêtre active.
+  const { w, ps } = arena(1, true);
+  const p = ps[0];
+  p.facing = 1;
+  const e = spawnEnemy(w, 'ashigaru', p.x + 60, p.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  setLag(w.net!, p.id, 17);
+  let dropped = -1;
+  let once = false;
+  const evs = step(w, 200, () => 0, (S) => {
+    if (eState(e) === 'recover' || eState(e) === 'stunned') once = true;
+    if (once) e.cd = 1e9;
+    if (eState(e) === 'recover' && dropped < 0) {
+      dropped = S;
+      setLag(w.net!, p.id, 0);
+    }
+  });
+  const n = evs.filter((ev) => ev.type === 'playerHit').length;
+  check('L 17 → 0 juste après la frappe : la frappe différée est quand même jugée (pas de trou)', dropped > 0 && n === 1, `${n} playerHit, chute au tick ${dropped}`);
+}
+{
+  // 7b. Retard qui oscille (0 → 20 → 0…) : jamais deux touches pour une attaque, aucune perdue.
+  const scheds: [string, (S: number) => number][] = [
+    ['constant 20', () => 20],
+    ['0/20 tous les 7 ticks', (S) => (((S / 7) | 0) % 2 ? 20 : 0)],
+    ['0/20 tous les 3 ticks', (S) => (((S / 3) | 0) % 2 ? 20 : 0)],
+    ['dents de scie 20→0', (S) => 20 - (S % 21)],
+    ['pseudo-aléatoire 0..20', (S) => (Math.imul(S, 2654435761) >>> 27) % 21],
+  ];
+  for (const type of ['ashigaru', 'oni', 'ninja'] as EnemyType[]) {
+    const ref = meleeLoop(type, () => 0, 3000);
+    check(`${type}, L = 0 (référence) : une touche par attaque`, !ref.err && ref.attacks > 5 && ref.maxPerAttack <= 1, ref.err || `${ref.hits}/${ref.attacks}`);
+    for (const [name, f] of scheds) {
+      const r = meleeLoop(type, f, 3000);
+      check(
+        `${type}, retard ${name} : ≤ 1 touche par attaque, aucune perdue`,
+        !r.err && r.attacks > 5 && r.maxPerAttack <= 1 && r.hits <= r.attacks && r.hits >= ref.hits - 1,
+        r.err || `${r.attacks} attaques, ${r.hits} touches (réf. L = 0 : ${ref.hits}/${ref.attacks}), max ${r.maxPerAttack}/attaque`,
+      );
+    }
+  }
+}
+{
+  // 7c. Ennemi tué entre l'enregistrement de sa frappe et son jugement : la frappe n'a plus d'effet.
+  const { w, ps } = arena(1, true);
+  const p = ps[0];
+  p.facing = 1;
+  setLag(w.net!, p.id, 15);
+  const e = spawnEnemy(w, 'ashigaru', p.x + 60, p.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  let killedAt = -1;
+  const evs = step(w, 150, () => 0, (S) => {
+    if (killedAt < 0 && w.net!.strikes.length > 0) {
+      killedAt = S;
+      killEnemy(w, e, p, 0, false);
+    }
+  });
+  const n = evs.filter((ev) => ev.type === 'playerHit').length;
+  check('ennemi tué avant le jugement différé : aucune touche', killedAt > 0 && n === 0, `${n} playerHit, tué au tick ${killedAt}`);
+}
+{
+  // 7d. Joueur parti avec des frappes en attente : aucune exception, l'autre joueur reste jugé.
+  const { w, ps } = arena(2, true);
+  ps[1].x = ps[0].x + 4;
+  ps[1].y = ps[0].y;
+  setLag(w.net!, ps[0].id, 18);
+  setLag(w.net!, ps[1].id, 6);
+  const e = spawnEnemy(w, 'ashigaru', ps[0].x + 60, ps[0].y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  let left = -1;
+  let err = '';
+  let evs: GameEvent[] = [];
+  let once = false;
+  try {
+    evs = step(w, 150, () => 0, (S) => {
+      if (eState(e) === 'recover') once = true;
+      if (once) e.cd = 1e9;
+      if (left < 0 && w.net!.strikes.length > 0) {
+        left = S;
+        removePlayer(w, ps[0].id);
+        forgetPlayer(w.net!, ps[0].id);
+      }
+    });
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  const on0 = evs.filter((ev) => ev.type === 'playerHit' && ev.pid === ps[0].id).length;
+  const on1 = evs.filter((ev) => ev.type === 'playerHit' && ev.pid === ps[1].id).length;
+  check('joueur parti avec des frappes différées : aucune exception', !err && left > 0, err);
+  check('… aucune touche sur le joueur parti, l’autre (L = 6) touché une fois', on0 === 0 && on1 === 1, `parti ${on0}, resté ${on1}`);
+}
+{
+  // 7e. Fantôme paré le pas même où il s'éteint (fin de vie) : jamais en double dans w.projectiles.
+  // Balayage : durée de vie × instant de la parade. Le joueur est éloigné du bord gauche du niveau
+  // pour que le shuriken s'éteigne en fin de vie et non contre le mur derrière lui.
+  let dup = 0;
+  let parried = 0;
+  let sameStep = 0;
+  for (let life = 2; life <= 50; life++) {
+    for (let pa = 0; pa <= 60; pa++) {
+      const { w, ps } = arena(1, true);
+      const p = ps[0];
+      p.x += 480;
+      step(w, 40);
+      p.iframes = 0;
+      setLag(w.net!, p.id, 17);
+      p.facing = 1;
+      w.projectiles.push({ id: w.nextId++, kind: 'shuriken', x: p.x + 160, y: p.y - 14, vx: -600, vy: 0, owner: 'enemy', ownerId: 0, damage: 8, life, hits: [], dead: false });
+      const P0 = w.tick;
+      for (let i = 0; i < 70; i++) {
+        const ghosts = w.net!.ghosts.length;
+        stepWorld(w, new Map([[p.id, w.tick - P0 === pa ? BTN.PARRY : 0]]));
+        if (w.events.some((ev) => ev.type === 'parry')) {
+          parried++;
+          if (ghosts === 0 && w.events.some((ev) => ev.type === 'arrowBreak') === false && w.projectiles.length > 0 && life === i + 1) sameStep++;
+        }
+        w.events.length = 0;
+        if (new Set(w.projectiles).size !== w.projectiles.length || new Set(w.projectiles.map((a) => a.id)).size !== w.projectiles.length) {
+          dup++;
+          break;
+        }
+      }
+    }
+  }
+  check('fantôme renvoyé le pas même de son extinction : jamais deux fois dans w.projectiles', dup === 0 && sameStep > 0, `${dup} doublon(s), ${parried} parade(s), ${sameStep} le pas de l’extinction`);
+}
+{
+  // 7f. Changement d'étape avec un historique rempli : rien de l'ancien niveau n'est jugé.
+  // Un shuriken s'éteint à l'endroit du départ de l'étape suivante, puis nextStage ; le joueur
+  // en retard pare juste après : rien ne doit être renvoyé ni subi de l'ancien niveau.
+  const probe = createWorld(31, { mode: 'coop' });
+  nextStage(probe);
+  const spawn = { ...probe.level.spawn };
+  let revived = 0;
+  let touched = 0;
+  for (let pa = 0; pa <= 24; pa++) {
+    const { w, ps } = arena(1, true);
+    const p = ps[0];
+    setLag(w.net!, p.id, 20);
+    const id = w.nextId++;
+    w.projectiles.push({ id, kind: 'shuriken', x: spawn.x + 4, y: spawn.y - 14, vx: 0, vy: 0, owner: 'enemy', ownerId: 0, damage: 8, life: 3, hits: [], dead: false });
+    step(w, 4);
+    nextStage(w);
+    p.iframes = 0;
+    p.facing = 1;
+    const P0 = w.tick;
+    const evs = step(w, 30, (S) => (S - P0 === pa ? BTN.PARRY : 0));
+    if (w.projectiles.some((a) => a.id === id)) revived++;
+    if (evs.some((ev) => ev.type === 'playerHit' || ev.type === 'parry')) touched++;
+  }
+  check('nextStage : aucun projectile de l’ancien niveau renvoyé ni jugé dans le nouveau', revived === 0 && touched === 0, `${revived} ressuscité(s), ${touched} touche/parade`);
+  // Frappes différées de l'ancien niveau : oubliées au changement d'étape.
+  const { w, ps } = arena(1, true);
+  const p = ps[0];
+  setLag(w.net!, p.id, 20);
+  const e = spawnEnemy(w, 'ashigaru', p.x + 60, p.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  for (let i = 0; i < 200 && !w.net!.strikes.length; i++) step(w, 1);
+  const had = w.net!.strikes.length;
+  nextStage(w);
+  const after = step(w, 25);
+  check(
+    'nextStage : frappes différées de l’ancien niveau oubliées',
+    had > 0 && w.net!.strikes.length === 0 && !after.some((ev) => ev.type === 'playerHit'),
+    `${had} → ${w.net!.strikes.length} frappe(s)`,
+  );
+}
+{
+  // 7g. Boss : balayage au contact, charge et saut (slam) à distance, avec retard : ≤ 1 touche par attaque.
+  for (const lag of [0, 9, 20]) {
+    const near = meleeLoop('boss', () => lag, 4000, 70);
+    const far = meleeLoop('boss', () => lag, 4000, 320);
+    check(`boss, L = ${lag}, au contact : ≤ 1 touche par attaque`, !near.err && near.attacks > 3 && near.maxPerAttack <= 1 && near.hits > 0, near.err || `${near.attacks} attaques, ${near.hits} touches`);
+    check(`boss, L = ${lag}, à distance (charge, saut) : ≤ 1 touche par attaque`, !far.err && far.attacks > 3 && far.maxPerAttack <= 1 && far.hits > 0, far.err || `${far.attacks} attaques, ${far.hits} touches`);
+  }
+}
+{
+  // 7h. Mort puis renaissance pendant le délai : la frappe d'avant la mort touche au plus une fois.
+  const { w, ps } = arena(2, true);
+  const [a, b] = ps;
+  b.x = a.x + 4;
+  b.y = a.y;
+  setLag(w.net!, a.id, 20);
+  setLag(w.net!, b.id, 20);
+  const e = spawnEnemy(w, 'ashigaru', a.x + 60, a.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  let deathAt = -1;
+  let once = false;
+  let err = '';
+  let evs: GameEvent[] = [];
+  try {
+    evs = step(w, 400, () => 0, (S) => {
+      if (eState(e) === 'recover') once = true;
+      if (once) e.cd = 1e9;
+      if (deathAt < 0 && w.net!.strikes.length) {
+        deathAt = S;
+        a.hp = 0;
+        a.state = 'dead';
+        a.respawnT = 1; // renaissance immédiate (cas le plus défavorable)
+      }
+    });
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  const all = evs.filter((ev) => ev.type === 'playerHit').length;
+  check('mort et renaissance pendant le délai : aucune exception, au plus une touche pour la frappe', !err && deathAt > 0 && all <= 1, err || `${all} touche(s)`);
+}
+{
+  // 7i. Aspiration dans l'arène avec une frappe différée en attente : pas de touche fantôme à l'entrée.
+  const { w, ps } = arena(2, true);
+  const [a, b] = ps;
+  setLag(w.net!, a.id, 20);
+  a.facing = 1;
+  const e = spawnEnemy(w, 'ashigaru', a.x + 60, a.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  let pulledAt = -1;
+  let err = '';
+  let evs: GameEvent[] = [];
+  const x0 = a.x;
+  try {
+    evs = step(w, 300, (_S, q) => (q === b && pulledAt >= 0 ? BTN.RIGHT : 0), (S) => {
+      if (pulledAt < 0 && w.net!.strikes.some((st) => st.enemy === e)) {
+        pulledAt = S;
+        warpToArena(w, b.id); // b entre dans l'arène : a est aspiré à l'entrée
+      }
+      if (eState(e) === 'recover') e.cd = 1e9;
+    });
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  const onA = evs.filter((ev) => (ev.type === 'playerHit' || ev.type === 'parry') && ev.pid === a.id).length;
+  check(
+    'aspiration dans l’arène avec une frappe en attente : aucune exception, aucune touche à l’entrée',
+    !err && pulledAt > 0 && w.stage.state === 'arena' && Math.abs(a.x - x0) > 300 && onA === 0,
+    err || `${onA} touche(s), état ${w.stage.state}, déplacé de ${Math.round(a.x - x0)} px`,
+  );
+}
+{
+  // 7j. Fantôme tranché par un coup (joueur en retard) : renvoyé une seule fois, jamais en double,
+  // et jamais à la fois tranché et encaissé.
+  let deflects = 0;
+  let both = 0;
+  let dup = 0;
+  let err = '';
+  try {
+    for (let life = 8; life <= 30; life++) {
+      for (let at = 0; at <= 30; at++) {
+        const { w, ps } = arena(1, true);
+        const p = ps[0];
+        p.x += 480;
+        step(w, 40);
+        p.iframes = 0;
+        p.facing = 1;
+        setLag(w.net!, p.id, 17);
+        const id = w.nextId++;
+        w.projectiles.push({ id, kind: 'shuriken', x: p.x + 200, y: p.y - 30, vx: -600, vy: 0, owner: 'enemy', ownerId: 0, damage: 8, life, hits: [], dead: false });
+        const P0 = w.tick;
+        const evs = step(w, 80, (S) => (S - P0 === at ? BTN.ATTACK : 0));
+        const d = evs.some((ev) => ev.type === 'deflect');
+        const h = evs.some((ev) => ev.type === 'playerHit');
+        if (d) deflects++;
+        if (d && h) both++;
+        if (new Set(w.projectiles).size !== w.projectiles.length || w.projectiles.filter((a) => a.id === id).length > 1) dup++;
+      }
+    }
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  check('fantôme tranché (L = 17) : renvoyé sans doublon, jamais tranché et encaissé', !err && deflects > 0 && both === 0 && dup === 0, err || `${deflects} renvoi(s), ${both} double(s) effet(s), ${dup} doublon(s)`);
 }
 
 if (failures) {

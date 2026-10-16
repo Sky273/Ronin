@@ -278,18 +278,23 @@ const view = (w: SnapshotWire): TestSnap => {
   check(`L borné à ${MAX_REWIND_TICKS} (S − v = ${s.world.tick - 1})`, s.lagFor(a) === MAX_REWIND_TICKS);
   s.pushInput(a, { s: 3, b: 0, v: s.world.tick + 50 });
   s.update(STEP_MS + 0.001);
-  check('v dans le futur : L = 0', s.lagFor(a) === 0);
-  s.pushInput(a, { s: 4, b: 0, v: S });
+  check('v dans le futur : le retard ne baisse que d’un tick par pas', s.lagFor(a) === MAX_REWIND_TICKS - 1, `L=${s.lagFor(a)}`);
+  let seqF = 100;
+  for (let i = 0; i < MAX_REWIND_TICKS; i++) {
+    s.pushInput(a, { s: seqF++, b: 0, v: s.world.tick + 50 });
+    s.update(STEP_MS + 0.001);
+  }
+  check('v dans le futur : L finit à 0', s.lagFor(a) === 0, `L=${s.lagFor(a)}`);
   let ignored = true;
   for (const [i, v] of [-1, 2.5, NaN, Infinity, 2 ** 53].entries()) {
     s.update(STEP_MS + 0.001);
-    ignored &&= s.pushInput(a, { s: 5 + i, b: 0, v });
+    ignored &&= s.pushInput(a, { s: 200 + i, b: 0, v });
     s.update(STEP_MS + 0.001);
-    ignored &&= s.ackFor(a) === 5 + i && s.lagFor(a) === 0;
+    ignored &&= s.ackFor(a) === 200 + i && s.lagFor(a) === 0;
   }
   check('v invalide ignoré : entrée acceptée, jugée sans retard', ignored, `L=${s.lagFor(a)}`);
   // File saturée : la fusion garde le v de l'entrée la plus récente.
-  for (let i = 0; i <= MAX_INPUT_QUEUE; i++) s.pushInput(a, { s: 20 + i, b: 0, v: s.world.tick - 3 });
+  for (let i = 0; i <= MAX_INPUT_QUEUE; i++) s.pushInput(a, { s: 300 + i, b: 0, v: s.world.tick - 3 });
   s.update(STEP_MS + 0.001);
   check('fusion de la file : v le plus récent conservé', s.queueLength(a) === 0 && s.lagFor(a) === 3, `L=${s.lagFor(a)}`);
   check('statistiques de L alimentées', s.lagStats.count > 0 && s.lagStats.percentile(95) <= MAX_REWIND_TICKS);
@@ -476,8 +481,15 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     let vIgnored = true;
     for (const [i, v] of ([-3, 1.5, 'x', NaN, null, 2 ** 53] as unknown[]).entries()) {
       bad.room.send(MSG.input, { s: 1002 + i, b: 0, v } as never);
-      vIgnored &&= (await waitFor(() => room?.coop.ackFor(pidBad) === 1002 + i, 1000)) && room?.coop.lagFor(pidBad) === 0;
+      vIgnored &&= await waitFor(() => room?.coop.ackFor(pidBad) === 1002 + i, 1000);
     }
+    // Sans v valide, L = 0 demandé : le retard redescend d'un tick par entrée consommée jusqu'à 0.
+    // Espacées : au-delà de 8 entrées en file, le serveur les fusionne.
+    for (let i = 0; i < MAX_REWIND_TICKS + 4; i++) {
+      bad.room.send(MSG.input, { s: 1100 + i, b: 0 });
+      await sleep(STEP_MS * 2);
+    }
+    vIgnored &&= await waitFor(() => room?.coop.lagFor(pidBad) === 0, 2000);
     check('salle : v invalide ignoré (entrée acceptée, L = 0)', vIgnored, `L=${room?.coop.lagFor(pidBad)}`);
 
     // Octets bruts : msgpack invalide, tronqué, imbrication profonde, message vide, code de protocole inconnu.
