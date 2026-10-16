@@ -1,8 +1,9 @@
-import { ATTACKS, type AttackDef, type AttackId, activeAttackBox, bodyRect } from './combat';
+import { ATTACKS, type AttackDef, type AttackId, activeAttackBox } from './combat';
 import { DT, PLAYER as P, TILE } from './constants';
 import { findGround } from './enemy';
 import { BTN } from './input';
 import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
+import { hurtRect, projectileSeenBy } from './lagcomp';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
 import { canFit, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
@@ -399,7 +400,8 @@ function doHits(w: World, p: Player, d: AttackDef): void {
   const before = p.hitList.length;
   for (const e of w.enemies) {
     if (e.state === 'dead' || e.state === 'doomed' || p.hitList.includes(e.id)) continue;
-    if (overlaps(box, bodyRect(e))) {
+    // En ligne : corps de l'ennemi tel que le joueur le voyait (rembobiné de son retard).
+    if (overlaps(box, hurtRect(w, p, e))) {
       p.hitList.push(e.id);
       const res = hitEnemy(w, p, e, {
         dmg: d.damage * dmgMult(p), kbx: d.kbx * p.facing, kby: d.kby, hitstop: d.hitstop,
@@ -411,7 +413,11 @@ function doHits(w: World, p: Player, d: AttackDef): void {
   // Flèches et shurikens peuvent être tranchés et renvoyés.
   for (const a of w.projectiles) {
     if (a.dead || a.owner !== 'enemy') continue;
-    if (a.x > box.x && a.x < box.x + box.w && a.y > box.y && a.y < box.y + box.h) {
+    const at = projectileSeenBy(w, p, a);
+    if (at.x > box.x && at.x < box.x + box.w && at.y > box.y && at.y < box.y + box.h) {
+      // Renvoyé depuis l'endroit où le joueur l'a tranché (identique sans compensation).
+      a.x = at.x;
+      a.y = at.y;
       a.owner = 'player';
       a.ownerId = p.id;
       a.vx = p.facing * 720;
@@ -464,7 +470,7 @@ function stepPlunge(w: World, p: Player, d: AttackDef): void {
     const shock: Rect = { x: p.x - 50, y: p.y - 28, w: 100, h: 30 };
     for (const e of w.enemies) {
       if (e.state === 'dead' || e.state === 'doomed' || p.hitList.includes(e.id)) continue;
-      if (overlaps(shock, bodyRect(e))) {
+      if (overlaps(shock, hurtRect(w, p, e))) {
         p.hitList.push(e.id);
         hitEnemy(w, p, e, {
           dmg: 14 * dmgMult(p), kbx: (e.x >= p.x ? 1 : -1) * 240, kby: -320, hitstop: 5,
@@ -545,14 +551,16 @@ function iaiStrike(w: World, p: Player): void {
   let count = 0;
   for (const e of w.enemies) {
     if (e.state === 'dead' || e.state === 'doomed' || e.state === 'hidden' || e.state === 'intro') continue;
-    if (!overlaps(rect, bodyRect(e))) continue;
+    if (!overlaps(rect, hurtRect(w, p, e))) continue;
     count++;
     const mult = e.state === 'stunned' ? 1.5 : 1;
     if (e.type !== 'boss' && e.hp - dmg * mult <= 0) doomEnemy(w, p, e);
     else hitEnemy(w, p, e, { dmg, kbx: p.facing * 350, kby: -200, hitstop: 10, cut: 0, heavy: true, fromX: x0, fromY: p.y - p.h * 0.5 });
   }
   for (const a of w.projectiles) {
-    if (!a.dead && a.owner === 'enemy' && a.x > rect.x && a.x < rect.x + rect.w && a.y > rect.y && a.y < rect.y + rect.h) {
+    if (a.dead || a.owner !== 'enemy') continue;
+    const at = projectileSeenBy(w, p, a);
+    if (at.x > rect.x && at.x < rect.x + rect.w && at.y > rect.y && at.y < rect.y + rect.h) {
       a.dead = true;
       w.events.push({ type: 'arrowBreak', x: a.x, y: a.y });
     }

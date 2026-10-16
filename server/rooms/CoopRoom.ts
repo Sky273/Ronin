@@ -53,9 +53,11 @@ export class CoopRoom extends Room {
     this.onMessage(MSG.input, (client: Client, msg: unknown) => {
       if (!this.allow(client)) return;
       if (!msg || typeof msg !== 'object') return;
-      const { s, b } = msg as Partial<InputMsg>;
+      const { s, b, v } = msg as Partial<InputMsg>;
       if (!isInt(s) || !isInt(b) || s < 0) return;
       const input: InputMsg = { s, b };
+      // Tick de vue (compensation de latence) : entier ≥ 0, sinon ignoré (l'entrée reste valide, L = 0).
+      if (isInt(v) && v >= 0) input.v = v;
       this.lag.run(`in:${client.sessionId}`, () => {
         const pid = this.pids.get(client.sessionId);
         if (pid !== undefined) this.session.pushInput(pid, input);
@@ -183,14 +185,17 @@ export class CoopRoom extends Room {
   private report(): void {
     const now = performance.now();
     const secs = Math.max(0.001, (now - this.statsSince) / 1000);
+    const lag = this.session.lagStats;
     if (this.tickMs.count) {
       const f = (v: number) => v.toFixed(3);
       console.log(
         `[coop ${this.roomId}] ${this.session.playerCount} joueur(s) | ${(this.tickMs.count / secs).toFixed(1)} pas/s | tick p50 ${f(this.tickMs.percentile(50))} ms, p99 ${f(this.tickMs.percentile(99))} ms, max ${f(this.tickMs.max)} ms` +
           ` | envoi p50 ${f(this.sendMs.percentile(50))} ms, p99 ${f(this.sendMs.percentile(99))} ms` +
-          ` | instantané moy. ${Math.round(this.snapBytes.mean)} o, ${(this.bytesOut / secs / 1024).toFixed(1)} Kio/s sortants`,
+          ` | instantané moy. ${Math.round(this.snapBytes.mean)} o, ${(this.bytesOut / secs / 1024).toFixed(1)} Kio/s sortants` +
+          ` | retard L p50 ${lag.percentile(50)}, p95 ${lag.percentile(95)} ticks`,
       );
     }
+    lag.reset();
     this.tickMs.reset();
     this.sendMs.reset();
     this.snapBytes.reset();

@@ -2,6 +2,7 @@
 // La salle Colyseus ne fait que relayer les messages ; toute la logique testable est ici.
 import {
   BUTTON_MASK,
+  MAX_REWIND_TICKS,
   NET_TICK,
   PLAYER_COLORS,
   PROTOCOL_VERSION,
@@ -11,8 +12,10 @@ import {
 } from '../shared/net/protocol';
 import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
+import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
+import { Samples } from './stats';
 
 /** Taille maximale de la file d'entrées d'un joueur (au-delà : fusion). */
 export const MAX_INPUT_QUEUE = 8;
@@ -38,7 +41,12 @@ interface PlayerSlot {
   held: number;
   /** Pas consécutifs sans entrée reçue. */
   starved: number;
+  /** Retard de l'entrée consommée (ticks, 0..MAX_REWIND_TICKS) : compensation de latence. */
+  lag: number;
 }
+
+/** Tick de vue valide : entier ≥ 0 (sinon ignoré). */
+const validView = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
 export class CoopSession {
   readonly world: World;
@@ -48,9 +56,13 @@ export class CoopSession {
   /** Événements accumulés depuis le dernier envoi d'instantanés. */
   private events: GameEvent[] = [];
   private acc = 0;
+  /** Retards L des entrées consommées (statistiques p50/p95 des journaux). */
+  readonly lagStats = new Samples();
 
   constructor(seed: number) {
     this.world = createWorld(seed, { mode: 'coop', difficulty: 'normal' });
+    // Compensation de latence : posée uniquement ici (jamais en solo ni côté client).
+    this.world.net = createLagComp();
   }
 
   get playerCount(): number {
@@ -64,7 +76,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0 });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0 });
     return { pid: p.id, color };
   }
 
@@ -75,6 +87,7 @@ export class CoopSession {
     this.slots.delete(pid);
     this.usedColors.delete(slot.color);
     removePlayer(this.world, pid);
+    if (this.world.net) forgetPlayer(this.world.net, pid);
   }
 
   has(pid: number): boolean {
@@ -83,6 +96,7 @@ export class CoopSession {
 
   /**
    * Reçoit une entrée. Les séquences doivent être strictement croissantes (les autres sont ignorées).
+   * `v` (tick de vue) est facultatif : absent ou invalide, l'entrée est jugée sans retard (L = 0).
    * Renvoie false si l'entrée est ignorée.
    */
   pushInput(pid: number, msg: InputMsg): boolean {
@@ -90,13 +104,15 @@ export class CoopSession {
     if (!slot || !Number.isSafeInteger(msg.s) || !Number.isSafeInteger(msg.b)) return false;
     if (msg.s <= slot.lastSeq) return false;
     slot.lastSeq = msg.s;
-    slot.queue.push({ s: msg.s, b: msg.b & BUTTON_MASK });
+    const input: InputMsg = { s: msg.s, b: msg.b & BUTTON_MASK };
+    if (validView(msg.v)) input.v = msg.v;
+    slot.queue.push(input);
     if (slot.queue.length > MAX_INPUT_QUEUE) {
       // File saturée (rafale réseau) : on ne garde que la plus récente, en conservant
       // les appuis des entrées abandonnées pour ne pas perdre un saut ou une attaque.
       let b = 0;
       for (const q of slot.queue) b |= q.b;
-      slot.queue = [{ s: msg.s, b }];
+      slot.queue = [{ ...input, b }];
     }
     return true;
   }
@@ -104,6 +120,11 @@ export class CoopSession {
   /** Taille actuelle de la file d'un joueur (tests, diagnostics). */
   queueLength(pid: number): number {
     return this.slots.get(pid)?.queue.length ?? 0;
+  }
+
+  /** Retard courant du joueur (ticks) retenu pour la compensation de latence (0 si inconnu). */
+  lagFor(pid: number): number {
+    return this.slots.get(pid)?.lag ?? 0;
   }
 
   /** Dernière séquence consommée pour ce joueur (-1 si aucune). */
@@ -131,8 +152,13 @@ export class CoopSession {
     return steps;
   }
 
-  /** Un pas de simulation : au plus une entrée consommée par joueur. */
+  /**
+   * Un pas de simulation : au plus une entrée consommée par joueur.
+   * Retard de l'entrée consommée au tick S : L = clamp(S − v, 0, MAX_REWIND_TICKS) ; sans `v`,
+   * L = 0 ; file vide : le dernier L est conservé.
+   */
   private step(): void {
+    const w = this.world;
     this.inputs.clear();
     for (const slot of this.slots.values()) {
       const next = slot.queue.shift();
@@ -140,13 +166,15 @@ export class CoopSession {
         slot.held = next.b;
         slot.ack = next.s;
         slot.starved = 0;
+        slot.lag = next.v === undefined ? 0 : Math.min(MAX_REWIND_TICKS, Math.max(0, w.tick - next.v));
+        this.lagStats.add(slot.lag);
       } else if (++slot.starved > IDLE_RELEASE_TICKS) {
         // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.
         slot.held = 0;
       }
       this.inputs.set(slot.pid, slot.held);
+      if (w.net) setLag(w.net, slot.pid, slot.lag);
     }
-    const w = this.world;
     stepWorld(w, this.inputs);
     if (w.events.length) {
       for (const ev of w.events) this.events.push(ev);

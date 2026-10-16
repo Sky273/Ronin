@@ -1,5 +1,6 @@
 import type { AttackId } from './combat';
 import type { DifficultyId } from './difficulty';
+import type { NetCompensation } from './lagcomp';
 import type { Level } from './level';
 import type { Rng } from './math';
 import type { UpgradeId, Upgrades } from './upgrades';
@@ -285,4 +286,9 @@ export interface World {
   /** Partie terminée (tous les joueurs sans vie) : la simulation est figée. */
   over: boolean;
   overT: number; // ticks écoulés depuis que tous les joueurs sont sortis
+  /**
+   * Compensation de latence (serveur en ligne seulement, posée par CoopSession).
+   * Absente en solo, dans les tests coop purs et côté client : la clé n'apparaît pas dans le JSON.
+   */
+  net?: NetCompensation;
 }
