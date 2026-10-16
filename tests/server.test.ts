@@ -3,7 +3,7 @@
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
-import { BUTTON_MASK, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
+import { BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
 import type { Player } from '../shared/types';
 import { matchMaker } from '@colyseus/core';
 import { MAX_PAYLOAD, startServer } from '../server/app';
@@ -259,6 +259,44 @@ const view = (w: SnapshotWire): TestSnap => {
   check('… et la simulation avance', s.world.tick === 1 && s.ackFor(b) === 1);
 }
 
+// 8. Tick de vue (v) : retard L = clamp(S − v, 0, MAX_REWIND_TICKS) de l'entrée consommée.
+{
+  const s = new CoopSession(8);
+  const a = s.join('a').pid;
+  const b = s.join('b').pid;
+  check('compensation de latence posée par la session', !!s.world.net && s.lagFor(a) === 0);
+  for (let i = 0; i < 40; i++) s.update(STEP_MS + 0.001);
+  const S = s.world.tick;
+  check('v valide accepté', s.pushInput(a, { s: 1, b: 0, v: S - 12 }) && s.pushInput(b, { s: 1, b: 0 }));
+  s.update(STEP_MS + 0.001);
+  check('L = S − v pour l’entrée consommée au tick S', s.lagFor(a) === 12 && s.world.net!.lagOf(a) === 12, `L=${s.lagFor(a)}`);
+  check('sans v : L = 0', s.lagFor(b) === 0 && s.world.net!.lagOf(b) === 0);
+  s.update(STEP_MS * 3 + 0.001);
+  check('file vide : le dernier L est conservé', s.lagFor(a) === 12 && s.world.net!.lagOf(a) === 12);
+  s.pushInput(a, { s: 2, b: 0, v: 0 });
+  s.update(STEP_MS + 0.001);
+  check(`L borné à ${MAX_REWIND_TICKS} (S − v = ${s.world.tick - 1})`, s.lagFor(a) === MAX_REWIND_TICKS);
+  s.pushInput(a, { s: 3, b: 0, v: s.world.tick + 50 });
+  s.update(STEP_MS + 0.001);
+  check('v dans le futur : L = 0', s.lagFor(a) === 0);
+  s.pushInput(a, { s: 4, b: 0, v: S });
+  let ignored = true;
+  for (const [i, v] of [-1, 2.5, NaN, Infinity, 2 ** 53].entries()) {
+    s.update(STEP_MS + 0.001);
+    ignored &&= s.pushInput(a, { s: 5 + i, b: 0, v });
+    s.update(STEP_MS + 0.001);
+    ignored &&= s.ackFor(a) === 5 + i && s.lagFor(a) === 0;
+  }
+  check('v invalide ignoré : entrée acceptée, jugée sans retard', ignored, `L=${s.lagFor(a)}`);
+  // File saturée : la fusion garde le v de l'entrée la plus récente.
+  for (let i = 0; i <= MAX_INPUT_QUEUE; i++) s.pushInput(a, { s: 20 + i, b: 0, v: s.world.tick - 3 });
+  s.update(STEP_MS + 0.001);
+  check('fusion de la file : v le plus récent conservé', s.queueLength(a) === 0 && s.lagFor(a) === 3, `L=${s.lagFor(a)}`);
+  check('statistiques de L alimentées', s.lagStats.count > 0 && s.lagStats.percentile(95) <= MAX_REWIND_TICKS);
+  s.leave(a);
+  check('départ : retard oublié', s.world.net!.lagOf(a) === 0);
+}
+
 // ─── (b) Serveur réel + clients SDK ─────────────────────────────────────────
 
 interface TestClient {
@@ -430,6 +468,17 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     // Après les entrées malformées, une entrée valide est toujours acceptée.
     bad.room.send(MSG.input, { s: 1000, b: BTN.RIGHT });
     check('après les entrées malformées, une entrée valide est acceptée', await waitFor(() => room?.coop.ackFor(pidBad) === 1000, 1000));
+    // Tick de vue : entier ≥ 0, sinon ignoré (l'entrée reste acceptée, sans retard).
+    await waitFor(() => (room?.coop.world.tick ?? 0) > MAX_REWIND_TICKS + 5, 3000);
+    bad.room.send(MSG.input, { s: 1001, b: 0, v: 0 });
+    const lagMax = await waitFor(() => room?.coop.ackFor(pidBad) === 1001, 1000) && room?.coop.lagFor(pidBad) === MAX_REWIND_TICKS;
+    check(`salle : v = 0 accepté, L borné à ${MAX_REWIND_TICKS}`, lagMax, `L=${room?.coop.lagFor(pidBad)} tick=${room?.coop.world.tick}`);
+    let vIgnored = true;
+    for (const [i, v] of ([-3, 1.5, 'x', NaN, null, 2 ** 53] as unknown[]).entries()) {
+      bad.room.send(MSG.input, { s: 1002 + i, b: 0, v } as never);
+      vIgnored &&= (await waitFor(() => room?.coop.ackFor(pidBad) === 1002 + i, 1000)) && room?.coop.lagFor(pidBad) === 0;
+    }
+    check('salle : v invalide ignoré (entrée acceptée, L = 0)', vIgnored, `L=${room?.coop.lagFor(pidBad)}`);
 
     // Octets bruts : msgpack invalide, tronqué, imbrication profonde, message vide, code de protocole inconnu.
     const raw = [

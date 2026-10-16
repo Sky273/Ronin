@@ -2,6 +2,7 @@ import { bodyRect, boxFromFacing } from './combat';
 import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from './constants';
 import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
+import { meleeStrike } from './lagcomp';
 import { type Level, T_EMPTY, tileAt } from './level';
 import { approach, clamp, overlaps, type Rect } from './math';
 import { fitsAt, groundAhead, moveBody, touchingWall } from './physics';
@@ -166,6 +167,8 @@ function separate(c: Ctx): void {
 /** Frappe de mêlée : une seule touche par attaque, parade = étourdissement. */
 function meleeHit(c: Ctx, box: Rect, dmg: number): void {
   const { w, e } = c;
+  // En ligne : jugement compensé (immédiat pour les joueurs sans retard, différé pour les autres).
+  if (w.net) return meleeStrike(w, w.net, e, box, dmg, e.type === 'oni' ? 90 : undefined);
   if (e.hitDone) return;
   for (const p of w.players) {
     if (p.state === 'dead' || !overlaps(box, bodyRect(p))) continue;

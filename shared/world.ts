@@ -2,6 +2,7 @@ import { bodyRect } from './combat';
 import { COOP, DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { addScore, damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
+import { keepGhost, lagOf, recordHistory, resolveDeferred } from './lagcomp';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
@@ -96,16 +97,20 @@ export function stepWorld(w: World, inputs: Map<number, number>): void {
   // Partie terminée : le monde est figé.
   if (w.over) {
     w.tick++;
+    recordHistory(w);
     return;
   }
   if (w.stage.state === 'cleared') {
     stepCleared(w, inputs);
     w.tick++;
+    recordHistory(w);
     return;
   }
   for (const p of w.players) stepPlayer(w, p, inputs.get(p.id) ?? 0);
   for (const e of w.enemies) stepEnemy(w, e);
   stepProjectiles(w);
+  // En ligne : frappes et projectiles ennemis jugés avec le retard de chaque joueur.
+  if (w.net) resolveDeferred(w);
   stepOrbs(w);
   w.enemies = w.enemies.filter((e) => e.state !== 'dead');
   w.projectiles = w.projectiles.filter((a) => !a.dead);
@@ -116,6 +121,7 @@ export function stepWorld(w: World, inputs: Map<number, number>): void {
   }
   stepGameOver(w);
   w.tick++;
+  recordHistory(w); // sans effet sans w.net
 }
 
 /** Tous les joueurs sont sortis : la simulation continue un instant, puis la partie se termine. */
@@ -139,6 +145,7 @@ function stepProjectiles(w: World): void {
     if (a.dead) continue;
     if (--a.life <= 0) {
       a.dead = true;
+      keepGhost(w, a); // sans effet sans w.net
       continue;
     }
     if (a.kind === 'arrow') a.vy += ENEMY.ARROW_GRAVITY * DT;
@@ -147,12 +154,15 @@ function stepProjectiles(w: World): void {
     if (solidAt(w.level, a.x, a.y)) {
       a.dead = true;
       w.events.push({ type: 'arrowBreak', x: a.x, y: a.y });
+      keepGhost(w, a); // sans effet sans w.net
       continue;
     }
     const r = a.kind === 'wave' ? { x: a.x - 14, y: a.y - 26, w: 28, h: 52 } : { x: a.x - 6, y: a.y - 3, w: 12, h: 6 };
     if (a.owner === 'enemy') {
       for (const p of w.players) {
         if (p.state === 'dead' || !overlaps(r, bodyRect(p))) continue;
+        // En ligne : un joueur en retard est jugé plus tard, à la position vue (resolveDeferred).
+        if (w.net && lagOf(w.net, p.id) > 0) continue;
         const res = damagePlayer(w, p, a.damage, a.x - Math.sign(a.vx) * 40);
         if (res === 'parried') {
           a.owner = 'player';
