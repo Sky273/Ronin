@@ -14,6 +14,7 @@ import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
 import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
+import { COOP_AWAY_TICKS, COOP_KICK_TICKS } from '../shared/constants';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
 import { Samples } from './stats';
 
@@ -25,6 +26,8 @@ export const MAX_STEPS_PER_UPDATE = 5;
 // L'accumulateur compte en « millisecondes × NET_TICK » : un pas vaut exactement 1000 unités,
 // ce qui évite les erreurs d'arrondi de 1000/60 (10 × 10 ms donnent bien 6 pas).
 const STEP_UNITS = 1000;
+/** Liste vide partagée (aucune allocation quand personne n'est absent). */
+const NO_ONE: number[] = [];
 /** Au-delà de ce nombre de pas sans entrée (0,5 s), les boutons d'un joueur sont relâchés. */
 export const IDLE_RELEASE_TICKS = 30;
 
@@ -43,6 +46,8 @@ interface PlayerSlot {
   starved: number;
   /** Retard de l'entrée consommée (ticks, 0..MAX_REWIND_TICKS) : compensation de latence. */
   lag: number;
+  /** Dernier tick où le joueur a appuyé sur un bouton (un onglet laissé ouvert envoie des entrées vides). */
+  lastActive: number;
 }
 
 /** Tick de vue valide : entier ≥ 0 (sinon ignoré). */
@@ -76,7 +81,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0 });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick });
     return { pid: p.id, color };
   }
 
@@ -166,6 +171,7 @@ export class CoopSession {
         slot.held = next.b;
         slot.ack = next.s;
         slot.starved = 0;
+        if (next.b !== 0) slot.lastActive = w.tick;
         const raw = next.v === undefined ? 0 : Math.min(MAX_REWIND_TICKS, Math.max(0, w.tick - next.v));
         // Hausse immédiate, baisse d'au plus un tick par pas : un client ne peut pas faire alterner
         // son retard pour que des frappes différées soient jugées en bloc contre un état plus tardif.
@@ -178,11 +184,29 @@ export class CoopSession {
       this.inputs.set(slot.pid, slot.held);
       if (w.net) setLag(w.net, slot.pid, slot.lag);
     }
+    // Absents : aucun bouton depuis COOP_AWAY_TICKS (ni vote ni force du gardien).
+    const away: number[] = [];
+    for (const slot of this.slots.values()) if (w.tick - slot.lastActive > COOP_AWAY_TICKS) away.push(slot.pid);
+    if (away.length || (w.away && w.away.length)) w.away = away;
     stepWorld(w, this.inputs);
     if (w.events.length) {
       for (const ev of w.events) this.events.push(ev);
       w.events.length = 0;
     }
+  }
+
+  /** Joueurs absents depuis assez longtemps pour être renvoyés de la salle (COOP_KICK_TICKS). */
+  idleOut(): number[] {
+    if (!this.world.away || !this.world.away.length) return NO_ONE;
+    const out: number[] = [];
+    for (const slot of this.slots.values()) if (this.world.tick - slot.lastActive > COOP_KICK_TICKS) out.push(slot.pid);
+    return out;
+  }
+
+  /** Le joueur est-il absent (aucun bouton depuis COOP_AWAY_TICKS) ? */
+  isAway(pid: number): boolean {
+    const slot = this.slots.get(pid);
+    return !!slot && this.world.tick - slot.lastActive > COOP_AWAY_TICKS;
   }
 
   /** Instantané pour un joueur : événements depuis le dernier envoi et accusé de réception. */

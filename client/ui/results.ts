@@ -197,10 +197,11 @@ export class Results {
       this.coop.setVisible(true);
       this.footer.setY(COOP_BOTTOM - 18).setFontSize(17);
       // Premier pied de page d'après le tableau ; update() prend le relais à chaque image.
+      const active = room.filter((row) => !row.away);
       this.update(room, {
-        ready: room.filter((row) => row.ready).length,
-        needed: Math.floor(room.length / 2) + 1,
-        present: room.length,
+        ready: active.filter((row) => row.ready).length,
+        needed: Math.floor(active.length / 2) + 1,
+        present: active.length,
         secondsLeft: Math.max(0, Math.ceil((COOP_CLEARED_TICKS - st.t) / TICK_RATE)),
       });
       this.footer.setAlpha(0);
@@ -236,11 +237,12 @@ export class Results {
       const t = this.table[i];
       const row = i < room.length ? room[i] : undefined;
       if (row?.me && row.ready) meReady = true;
-      const sig = row ? `${row.id}|${row.name}|${row.color}|${row.kills}|${row.deaths}|${row.parries}|${row.grade}|${row.me ? 1 : 0}` : '';
+      const sig = row ? `${row.id}|${row.name}|${row.color}|${row.kills}|${row.deaths}|${row.parries}|${row.grade}|${row.me ? 1 : 0}|${row.away ? 1 : 0}` : '';
       if (sig !== t.sig) {
         t.sig = sig;
         dirty = true;
-        t.name.setText(row ? shortName(row.name) : '').setColor(row?.me ? '#15120e' : '#3a342d');
+        // Absent : nom en lavis, il ne compte pas dans le vote.
+        t.name.setText(row ? shortName(row.name) + (row.away ? ' · away' : '') : '').setColor(row?.me ? '#15120e' : row?.away ? '#9a9086' : '#3a342d');
         t.kills.setText(row ? String(row.kills) : '');
         t.deaths.setText(row ? String(row.deaths) : '');
         t.parries.setText(row ? String(row.parries) : '');

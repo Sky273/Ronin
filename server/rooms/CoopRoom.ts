@@ -1,7 +1,7 @@
 // Salle coopérative « la route partagée » : 12 joueurs, serveur autoritaire.
 // Aucun état Schema : le serveur envoie des instantanés msgpack explicites (MSG.snap).
 import { CloseCode, getMessageBytes, matchMaker, Protocol, Room, type Client, type RoomException, type RoomMethodName } from '@colyseus/core';
-import { MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg, type PingMsg } from '../../shared/net/protocol';
+import { AWAY_CLOSE_CODE, MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg, type PingMsg } from '../../shared/net/protocol';
 import { LagLine, lagFromEnv } from '../lag';
 import { CoopSession } from '../session';
 import { Samples } from '../stats';
@@ -156,6 +156,20 @@ export class CoopRoom extends Room {
     return bytes.byteLength;
   }
 
+  /** Renvoie les joueurs absents depuis trop longtemps : leur place revient à d'autres. */
+  private kickIdle(): void {
+    const idle = this.session.idleOut();
+    if (!idle.length) return;
+    for (const client of this.clients) {
+      const pid = this.pids.get(client.sessionId);
+      if (pid === undefined || !idle.includes(pid)) continue;
+      console.log(`[coop ${this.roomId}] pid ${pid} renvoyé (absent)`);
+      this.pids.delete(client.sessionId);
+      this.session.leave(pid);
+      client.leave(AWAY_CLOSE_CODE, 'away');
+    }
+  }
+
   private tick(): void {
     const t0 = performance.now();
     const elapsed = t0 - this.lastTickAt;
@@ -164,6 +178,7 @@ export class CoopRoom extends Room {
     if (this.session.playerCount === 0) return;
     const steps = this.session.update(elapsed);
     if (!steps) return;
+    this.kickIdle();
     const t1 = performance.now();
     const perStep = (t1 - t0) / steps;
     for (let i = 0; i < steps; i++) this.tickMs.add(perStep);

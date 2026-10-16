@@ -17,6 +17,8 @@ export interface RosterRow {
   grade: number; // 0 = 優, 1 = 良, 2 = 可
   ready: boolean;
   me: boolean;
+  /** Absent (aucun bouton depuis 30 s) : ne compte pas dans le vote. */
+  away: boolean;
 }
 
 /**
@@ -39,6 +41,7 @@ export function buildRoster(w: World, meId: number): RosterRow[] {
       grade: s?.grade ?? 2,
       ready: s?.ready ?? false,
       me: p.id === meId,
+      away: !!w.away?.includes(p.id),
     };
   });
   rows.sort((a, b) => a.grade - b.grade || b.kills - a.kills || (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id - b.id));
@@ -52,9 +55,11 @@ export function buildRoster(w: World, meId: number): RosterRow[] {
 /** État du vote « prêt » et temps restant avant le passage automatique. */
 export function readyInfo(w: World): { ready: number; needed: number; present: number; secondsLeft: number } {
   const by = w.stage.byPlayer;
-  const present = w.players.length;
+  // Les absents ne comptent pas (ni dans le seuil, ni dans les votes), comme côté serveur.
+  const active = w.players.filter((p) => !w.away?.includes(p.id));
+  const present = active.length;
   let ready = 0;
-  for (const p of w.players) if (by?.[p.id]?.ready) ready++;
+  for (const p of active) if (by?.[p.id]?.ready) ready++;
   const needed = Math.floor(present / 2) + 1;
   const secondsLeft = Math.max(0, Math.ceil((COOP_CLEARED_TICKS - w.stage.t) / TICK_RATE));
   return { ready, needed, present, secondsLeft };

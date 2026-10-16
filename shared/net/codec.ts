@@ -431,8 +431,8 @@ export const DIRECT_ENCODER: ViewEncoder = {
   event: encodeEvent,
 };
 
-/** Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events]. */
-type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[]];
+/** Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events, away]. */
+type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[], number[]];
 
 /** Encode avec des encodeurs de vues donnés (snapshot.ts les met en cache par tick). */
 export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire {
@@ -450,6 +450,7 @@ export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire 
     s.projectiles.map((a) => enc.projectile(a)),
     s.orbs.map((o) => enc.orb(o)),
     s.events.map((ev) => enc.event(ev)),
+    s.away,
   ];
   return wire as unknown as SnapshotWire;
 }
@@ -540,6 +541,7 @@ export function decodeSnapshot(wire: SnapshotWire): Snapshot {
     projectiles: tuples(w[9]).map(safe(decodeProjectile)).filter(kept),
     orbs: tuples(w[10]).map(safe(decodeOrb)).filter(kept),
     events: (Array.isArray(w[11]) ? (w[11] as unknown[]) : []).map(decodeEvent).filter((ev): ev is GameEvent => ev !== null),
+    away: Array.isArray(w[12]) ? (w[12] as unknown[]).filter((id): id is number => Number.isFinite(id)) : [],
   };
 }
 

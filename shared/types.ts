@@ -308,4 +308,15 @@ export interface World {
    * Absente en solo, dans les tests coop purs et côté client : la clé n'apparaît pas dans le JSON.
    */
   net?: NetCompensation;
+  /**
+   * Coop en ligne : ids des joueurs absents (aucun bouton depuis un moment), posés par la session.
+   * Ils ne comptent ni pour la force du gardien ni pour le vote du bilan. Absent en solo.
+   */
+  away?: number[];
+  /**
+   * Coop, pendant l'arène : joueurs présents à la fermeture (seuls eux peuvent encore renforcer le
+   * gardien en revenant d'absence ; un arrivant ne change rien) et nombre d'actifs retenu (ne fait que monter).
+   */
+  guardianPool?: number[];
+  guardianFor?: number;
 }

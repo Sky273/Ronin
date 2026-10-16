@@ -193,5 +193,10 @@ export const COOP = {
   GUARDIAN_HP_PER_PLAYER: 0.5,
 } as const;
 
+/** Coop en ligne : sans aucun bouton pendant ce temps, un joueur est « absent » (ticks, 30 s). */
+export const COOP_AWAY_TICKS = 30 * 60;
+/** Coop en ligne : absent depuis ce temps, il est renvoyé de la salle pour libérer sa place (ticks, 3 min). */
+export const COOP_KICK_TICKS = 3 * 60 * 60;
+
 /** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */
 export const COOP_READY_AFTER = 90;

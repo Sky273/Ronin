@@ -24,7 +24,9 @@ export const MAX_NAME = 12;
 export const BUTTON_MASK = 0xfff;
 
 /** Version du protocole : client et serveur doivent être identiques (vérifiée à l'accueil). */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
+/** Fermeture d'un joueur renvoyé pour absence prolongée (hors des codes réservés par Colyseus, 4000–4099). */
+export const AWAY_CLOSE_CODE = 4100;
 /** Recul d'affichage des entités distantes (ticks) : ~100 ms, ajusté de 5 à 12 selon la gigue. */
 export const INTERP_TICKS = 6;
 export const INTERP_MIN_TICKS = 5;
@@ -100,6 +102,7 @@ export interface Snapshot {
   projectiles: Projectile[];
   orbs: Orb[];
   events: GameEvent[]; // depuis le précédent instantané, filtrés par distance quand ils ont une position
+  away: number[]; // coop : ids des joueurs absents (ni vote ni force du gardien)
 }
 
 /** Pseudo affichable : lettres, chiffres, espace, . _ - ; 12 caractères ; « Ronin » si vide. */

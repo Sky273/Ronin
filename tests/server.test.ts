@@ -3,13 +3,17 @@
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
-import { BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
+import { AWAY_CLOSE_CODE, BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
 import type { Player } from '../shared/types';
-import { matchMaker } from '@colyseus/core';
+import { CloseCode, matchMaker } from '@colyseus/core';
 import { MAX_PAYLOAD, startServer } from '../server/app';
 import type { CoopRoom } from '../server/rooms/CoopRoom';
 import { LagLine } from '../server/lag';
 import { IDLE_RELEASE_TICKS, MAX_INPUT_QUEUE, MAX_STEPS_PER_UPDATE, CoopSession } from '../server/session';
+import { COOP_AWAY_TICKS, COOP_CLEARED_TICKS, COOP_KICK_TICKS, COOP_READY_AFTER } from '../shared/constants';
+import { pack as packWire, unpack as unpackRaw } from 'msgpackr';
+/** Passe un instantané par msgpack (comme sur le fil). */
+const unpackWire = (w: SnapshotWire): SnapshotWire => unpackRaw(packWire(w)) as SnapshotWire;
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -615,6 +619,272 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
   }
   await srv2.stop();
   check('aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
+  process.off('uncaughtException', onCrash);
+  process.off('unhandledRejection', onCrash);
+}
+
+// 9. Joueurs absents : aucun bouton depuis 30 s → ni vote ni force du gardien ; renvoyés après 3 min.
+{
+  const s = new CoopSession(77);
+  const a = s.join('active').pid;
+  const b = s.join('idle').pid;
+  let seqA = 1;
+  let seqB = 1;
+  const stepBoth = (n: number, bButtons = 0) => {
+    for (let i = 0; i < n; i++) {
+      s.pushInput(a, { s: seqA++, b: i % 2 ? BTN.RIGHT : 0 });
+      s.pushInput(b, { s: seqB++, b: bButtons }); // onglet ouvert, personne au clavier : entrées vides
+      s.update(STEP_MS + 0.001);
+    }
+  };
+  stepBoth(COOP_AWAY_TICKS - 60);
+  check('absent : pas encore avant 30 s', !s.isAway(b) && !(s.world.away ?? []).includes(b));
+  stepBoth(120);
+  check('absent : entrées vides depuis 30 s → absent (l’actif ne l’est pas)', s.isAway(b) && !s.isAway(a) && (s.world.away ?? []).includes(b) && !(s.world.away ?? []).includes(a), JSON.stringify(s.world.away));
+  const snap = decodeSnapshot(unpackWire(s.snapshotFor(a)));
+  check('absent : transmis aux clients dans l’instantané', snap.away.includes(b) && !snap.away.includes(a));
+  stepBoth(1, BTN.JUMP);
+  stepBoth(1);
+  check('absent : un appui le rend de nouveau actif', !s.isAway(b) && !(s.world.away ?? []).includes(b));
+  check('absent : personne à renvoyer tant qu’il est revenu', s.idleOut().length === 0);
+  // Onglet en arrière-plan : plus aucune entrée du tout.
+  for (let i = 0; i < COOP_KICK_TICKS + 30; i++) {
+    s.pushInput(a, { s: seqA++, b: BTN.RIGHT });
+    s.update(STEP_MS + 0.001);
+  }
+  check('absent depuis 3 min : désigné pour être renvoyé', s.idleOut().includes(b) && !s.idleOut().includes(a), JSON.stringify(s.idleOut()));
+}
+
+// 10. Absents : cas limites de la session (boutons tenus, file fusionnée, bits invalides, bilan).
+{
+  /** Session à n joueurs ; `step(k, f)` : f(pid, i) donne les boutons (null = aucune entrée envoyée). */
+  const rig = (n: number, seed = 91) => {
+    const s = new CoopSession(seed);
+    const pids = Array.from({ length: n }, (_, i) => s.join(`p${i}`).pid);
+    const seq = new Map<number, number>();
+    const push = (pid: number, b: number) => {
+      const q = (seq.get(pid) ?? 0) + 1;
+      seq.set(pid, q);
+      return s.pushInput(pid, { s: q, b });
+    };
+    const step = (k: number, f: (pid: number, i: number) => number | null = () => 0) => {
+      for (let i = 0; i < k; i++) {
+        for (const pid of [...pids, ...extra]) {
+          if (!s.has(pid)) continue;
+          const b = f(pid, i);
+          if (b !== null) push(pid, b);
+        }
+        s.update(STEP_MS + 0.001);
+      }
+    };
+    const extra: number[] = [];
+    return { s, pids, push, step, extra };
+  };
+  const away = (s: CoopSession) => [...(s.world.away ?? [])].sort((x, y) => x - y);
+  /** Passe la session au bilan (comme les tests coop), votes remis à zéro. */
+  const toCleared = (s: CoopSession) => {
+    const w = s.world;
+    w.stage.state = 'cleared';
+    w.stage.t = 0;
+    for (const p of w.players) w.stage.byPlayer![p.id] = { ...w.stage.byPlayer![p.id], ready: false };
+  };
+  const wiggle = (i: number) => (i % 60 < 30 ? BTN.LEFT : BTN.RIGHT);
+
+  // Bouton tenu sans relâcher (RIGHT, ou DOWN qui ne déplace pas) : actif.
+  {
+    const { s, pids, step } = rig(3);
+    const [a, b, c] = pids;
+    step(COOP_AWAY_TICKS + 300, (pid) => (pid === a ? BTN.RIGHT : pid === b ? BTN.DOWN : 0));
+    check('absents : RIGHT tenu 35 s sans relâcher → actif', !s.isAway(a));
+    check('absents : DOWN tenu 35 s → actif (tout bit du masque compte)', !s.isAway(b));
+    check('absents : entrées vides 35 s → absent, w.away = [c] seulement', s.isAway(c) && JSON.stringify(away(s)) === JSON.stringify([c]), JSON.stringify(away(s)));
+  }
+
+  // File saturée : l'appui d'une entrée fusionnée réveille l'absent ; bits hors masque ignorés.
+  {
+    const { s, pids, push, step } = rig(2);
+    const [a, b] = pids;
+    step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === a ? wiggle(i) : 0));
+    check('absents (préalable) : b absent', s.isAway(b));
+    push(b, BTN.JUMP);
+    for (let i = 0; i < MAX_INPUT_QUEUE; i++) push(b, 0);
+    check('absents : rafale > MAX_INPUT_QUEUE fusionnée en une entrée', s.queueLength(b) === 1, `${s.queueLength(b)}`);
+    step(1, (pid, i) => (pid === a ? wiggle(i) : null));
+    check('absents : appui conservé par la fusion de file → de nouveau actif', !s.isAway(b) && !away(s).includes(b), JSON.stringify(away(s)));
+
+    const { s: s2, pids: p2, push: push2, step: step2 } = rig(2);
+    step2(COOP_AWAY_TICKS + 10, (pid, i) => (pid === p2[0] ? wiggle(i) : 0));
+    for (const bad of [0x1000, 0x10000, 2 ** 40, -4096, 0x7fff000]) {
+      push2(p2[1], bad);
+      step2(1, (pid, i) => (pid === p2[0] ? wiggle(i) : null));
+    }
+    check('absents : bits hors BUTTON_MASK (0x1000, 2^40, -4096…) ne rendent pas actif', s2.isAway(p2[1]) && away(s2).includes(p2[1]));
+    push2(p2[1], BTN.PICK3);
+    step2(1, (pid, i) => (pid === p2[0] ? wiggle(i) : null));
+    check('absents : PICK3 seul (sans effet hors bilan) suffit à rester actif — tout bit du masque compte', !s2.isAway(p2[1]));
+  }
+
+  // Arrivée pendant le bilan : actif, compte dans le seuil.
+  {
+    const r = rig(2);
+    const [a, b] = r.pids;
+    r.step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === a ? wiggle(i) : 0));
+    toCleared(r.s);
+    const c = r.s.join('late').pid;
+    r.extra.push(c);
+    r.step(COOP_READY_AFTER + 5, () => 0);
+    check('absents : arrivée pendant le bilan → actif, fiche de bilan créée', !r.s.isAway(c) && !!r.s.world.stage.byPlayer?.[c] && r.s.isAway(b));
+    r.step(1, (pid) => (pid === a ? BTN.JUMP : 0));
+    r.step(1, () => 0);
+    check('absents : arrivée pendant le bilan → 1 vote sur 2 actifs (a, nouveau) ne suffit pas', r.s.world.stage.state === 'cleared', r.s.world.stage.state);
+    r.step(1, (pid) => (pid === c ? BTN.JUMP : 0));
+    check('absents : 2 votes sur 2 actifs → étape suivante', r.s.world.stage.state === 'playing', r.s.world.stage.state);
+  }
+
+  // Tous absents sauf un : son vote suffit.
+  {
+    const r = rig(4);
+    const [a] = r.pids;
+    r.step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === a ? wiggle(i) : 0));
+    toCleared(r.s);
+    r.step(COOP_READY_AFTER + 5, (pid) => (pid === a ? BTN.DOWN : 0));
+    check('absents : 3 absents sur 4, bilan en attente avant le vote', r.s.world.stage.state === 'cleared' && away(r.s).length === 3);
+    r.step(1, (pid) => (pid === a ? BTN.JUMP : 0));
+    check('absents : 3 absents sur 4 → le vote du seul actif fait repartir', r.s.world.stage.state === 'playing', r.s.world.stage.state);
+  }
+
+  // Tous absents : seul le délai fait repartir.
+  {
+    const r = rig(3);
+    r.step(COOP_AWAY_TICKS + 10, () => 0);
+    toCleared(r.s);
+    r.step(COOP_CLEARED_TICKS - 1, () => 0);
+    const before = r.s.world.stage.state;
+    r.step(1, () => 0);
+    check('absents : tous absents → bilan tenu jusqu’à COOP_CLEARED_TICKS, puis étape suivante', before === 'cleared' && r.s.world.stage.state === 'playing' && away(r.s).length === 3, `${before} → ${r.s.world.stage.state}`);
+  }
+
+  // Absent qui revient pendant le bilan : par JUMP (il vote aussitôt) ou par RIGHT (sans voter).
+  {
+    const r = rig(4);
+    const [a, b, c, d] = r.pids;
+    r.step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === a || pid === b ? wiggle(i) : 0));
+    toCleared(r.s);
+    r.step(COOP_READY_AFTER + 5, (pid) => (pid === a || pid === b ? BTN.DOWN : 0));
+    r.step(1, (pid) => (pid === a ? BTN.JUMP : pid === b ? BTN.DOWN : 0));
+    r.step(1, (pid) => (pid === b ? BTN.DOWN : 0));
+    check('absents : 1 vote sur 2 actifs (c, d absents) → bilan', r.s.world.stage.state === 'cleared');
+    r.step(1, (pid) => (pid === c ? BTN.JUMP : pid === b ? BTN.DOWN : 0));
+    check('absents : c revient par JUMP pendant le bilan → actif et vote (2 sur 3) → étape suivante', !r.s.isAway(c) && r.s.isAway(d) && r.s.world.stage.state === 'playing', r.s.world.stage.state);
+
+    const q = rig(3);
+    const [qa, qb, qc] = q.pids;
+    q.step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === qa ? wiggle(i) : 0));
+    toCleared(q.s);
+    q.step(COOP_READY_AFTER + 5, (pid) => (pid === qa ? BTN.DOWN : 0));
+    q.step(1, (pid) => (pid === qb ? BTN.RIGHT : pid === qa ? BTN.DOWN : 0)); // b revient sans voter
+    q.step(1, (pid) => (pid === qa ? BTN.JUMP : pid === qb ? BTN.RIGHT : 0));
+    check('absents : b revient par RIGHT (sans voter) → 1 vote sur 2 actifs ne suffit pas', !q.s.isAway(qb) && q.s.isAway(qc) && q.s.world.stage.state === 'cleared', q.s.world.stage.state);
+  }
+
+  // Vote posé puis absence (forcée : en vrai le bilan dure moins de 30 s) : le vote ne compte plus.
+  {
+    const r = rig(3);
+    const [a, b] = r.pids;
+    toCleared(r.s);
+    r.step(COOP_READY_AFTER + 5, (pid) => (pid === a || pid === b ? BTN.DOWN : 0));
+    r.step(1, (pid) => (pid === b ? BTN.JUMP : pid === a ? BTN.DOWN : 0));
+    check('absents (préalable) : vote de b enregistré', r.s.world.stage.byPlayer?.[b]?.ready === true && r.s.world.stage.state === 'cleared');
+    const slots = (r.s as unknown as { slots: Map<number, { lastActive: number }> }).slots;
+    slots.get(b)!.lastActive = r.s.world.tick - COOP_AWAY_TICKS - 5;
+    r.step(1, (pid) => (pid === a ? BTN.JUMP : 0));
+    check('absents : le vote d’un joueur devenu absent ne compte plus (1 sur 2 actifs)', r.s.isAway(b) && r.s.world.stage.state === 'cleared', r.s.world.stage.state);
+  }
+
+  // Départ d'un absent : retiré de w.away et de idleOut au pas suivant.
+  {
+    const r = rig(2);
+    const [a, b] = r.pids;
+    r.step(COOP_AWAY_TICKS + 10, (pid, i) => (pid === a ? wiggle(i) : 0));
+    r.s.leave(b);
+    r.step(1, (pid, i) => (pid === a ? wiggle(i) : null));
+    check('absents : un absent parti disparaît de w.away', !away(r.s).includes(b) && !r.s.isAway(b) && r.s.idleOut().length === 0);
+  }
+}
+
+// 11. Renvoi des absents sur un vrai serveur (délai raccourci en vieillissant lastActive).
+{
+  const crashes: string[] = [];
+  const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
+  process.on('uncaughtException', onCrash);
+  process.on('unhandledRejection', onCrash);
+  const srv = await startServer({ port: 0 });
+  const url = `ws://localhost:${srv.port}`;
+  const timers: ReturnType<typeof setInterval>[] = [];
+  try {
+    const codes = new Map<string, number>();
+    const reasons = new Map<string, string>();
+    const join = async (name: string) => {
+      const c = await connect(url, name);
+      c.room.onLeave((code: number, reason?: string) => {
+        codes.set(name, code);
+        reasons.set(name, String(reason));
+      });
+      await waitFor(() => !!c.welcome, 3000);
+      return c;
+    };
+    const a = await join('Ayame');
+    const b = await join('Benkei');
+    const c = await join('Chiyo');
+    const room = matchMaker.getLocalRoomById(a.room.roomId) as unknown as CoopRoom | undefined;
+    check('renvoi : 3 clients dans la même salle', !!room && b.room.roomId === a.room.roomId && c.room.roomId === a.room.roomId && room.coop.playerCount === 3);
+    // a joue, b et c laissent l'onglet ouvert (entrées vides à 60 Hz).
+    let sa = 1;
+    let sb = 1;
+    let sc = 1;
+    timers.push(setInterval(() => {
+      if (!a.left) a.room.send(MSG.input, { s: sa, b: sa % 60 < 30 ? BTN.LEFT : BTN.RIGHT });
+      sa++;
+      if (!b.left) b.room.send(MSG.input, { s: sb++, b: 0 });
+      if (!c.left) c.room.send(MSG.input, { s: sc++, b: 0 });
+    }, STEP_MS));
+    const pa = a.welcome!.pid;
+    const pb = b.welcome!.pid;
+    const pc = c.welcome!.pid;
+    const colorB = b.welcome!.color;
+    const slots = (room!.coop as unknown as { slots: Map<number, { lastActive: number }> }).slots;
+    // Absent (pas encore renvoyé) : vu par les autres dans les instantanés.
+    slots.get(pb)!.lastActive = room!.coop.world.tick - COOP_AWAY_TICKS - 30;
+    const n0 = a.snaps.length;
+    const seen = await waitFor(() => a.snaps.length > n0 && !!last(a.snaps)?.away.includes(pb) && !last(a.snaps)!.away.includes(pa), 2000);
+    check('renvoi : absent signalé aux autres clients (instantané msgpack réel)', seen, JSON.stringify(last(a.snaps)?.away));
+    check('renvoi : absent mais pas encore renvoyé', !b.left && room!.coop.has(pb));
+    // Deux absents renvoyés au même tick.
+    const t = room!.coop.world.tick;
+    slots.get(pb)!.lastActive = t - COOP_KICK_TICKS - 30;
+    slots.get(pc)!.lastActive = t - COOP_KICK_TICKS - 30;
+    const gone = await waitFor(() => b.left && c.left, 3000);
+    check('renvoi : les deux absents renvoyés au même tick', gone, `b ${b.left}, c ${c.left}`);
+    check('renvoi : code AWAY_CLOSE_CODE distinct des codes de fermeture Colyseus (FAILED_TO_RECONNECT = 4003…)', !(Object.values(CloseCode) as number[]).includes(AWAY_CLOSE_CODE), `${AWAY_CLOSE_CODE} / ${JSON.stringify(CloseCode)}`);
+    check(`renvoi : code de fermeture AWAY_CLOSE_CODE (${AWAY_CLOSE_CODE}) reçu par le client (onLeave, pas de reconnexion)`, codes.get('Benkei') === AWAY_CLOSE_CODE && codes.get('Chiyo') === AWAY_CLOSE_CODE, `${codes.get('Benkei')} « ${reasons.get('Benkei')} » / ${codes.get('Chiyo')} « ${reasons.get('Chiyo')} »`);
+    await sleep(200);
+    check('renvoi : joueurs retirés de la session et du monde', !room!.coop.has(pb) && !room!.coop.has(pc) && room!.coop.playerCount === 1 && room!.coop.world.players.length === 1);
+    const internals = room as unknown as { pids: Map<string, number>; rates: Map<string, unknown>; clients: unknown[] };
+    check('renvoi : onLeave a nettoyé la salle (pids, limite de débit, clients)', internals.pids.size === 1 && internals.rates.size === 1 && internals.clients.length === 1, `pids ${internals.pids.size}, rates ${internals.rates.size}, clients ${internals.clients.length}`);
+    check('renvoi : le joueur actif reste connecté et reçoit des instantanés', !a.left && (await waitFor(() => a.snaps.length > n0 + 10, 2000)));
+    await waitFor(() => !last(a.snaps)?.away.includes(pb), 1000);
+    check('renvoi : les renvoyés ne figurent plus dans away', !last(a.snaps)?.away.includes(pb) && !last(a.snaps)?.away.includes(pc), JSON.stringify(last(a.snaps)?.away));
+    const d = await join('Daigo');
+    check('renvoi : place libérée, la couleur du renvoyé est réutilisée', d.room.roomId === a.room.roomId && d.welcome?.color === colorB && room!.coop.playerCount === 2, `couleur ${d.welcome?.color}, attendu ${colorB}`);
+    check('renvoi : le nouvel arrivant n’est pas absent', !room!.coop.isAway(d.welcome!.pid));
+    await d.room.leave();
+    await a.room.leave();
+  } catch (err) {
+    check('scénario de renvoi sans exception', false, String((err as Error)?.stack ?? err).slice(0, 400));
+  }
+  for (const t of timers) clearInterval(t);
+  await srv.stop();
+  check('renvoi : aucune exception non rattrapée (double leave sans dommage)', crashes.length === 0, crashes.slice(0, 2).join(' | '));
   process.off('uncaughtException', onCrash);
   process.off('unhandledRejection', onCrash);
 }

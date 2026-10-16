@@ -884,8 +884,11 @@ export class GameScene extends Phaser.Scene {
     // Nom : masqué pendant la mort et une fois sorti de la partie.
     const show = p.state !== 'dead' && !p.out && p.name !== '';
     const t = label ?? this.makeLabel(p);
-    if (t.text !== p.name) t.setText(p.name);
-    t.setPosition(pos.x, pos.y - 64).setVisible(show);
+    // Coop en ligne : un joueur absent (aucun bouton depuis 30 s) est signalé et estompé.
+    const away = !!this.world.away?.includes(p.id);
+    const text = away ? `${p.name} · away` : p.name;
+    if (t.text !== text) t.setText(text);
+    t.setPosition(pos.x, pos.y - 64).setVisible(show).setAlpha(away ? 0.5 : 1);
   }
 
   private makeLabel(p: Player): Phaser.GameObjects.Text {

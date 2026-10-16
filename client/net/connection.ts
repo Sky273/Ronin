@@ -2,7 +2,7 @@
 // Aucune logique de jeu ici. La scène charge ce module par import() dynamique (le solo ne le télécharge pas).
 import { Client, MatchMakeError, ServerError, type Room } from '@colyseus/sdk';
 import type { SnapshotWire } from '../../shared/net/codec';
-import { MSG, PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
+import { AWAY_CLOSE_CODE, MSG, PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
 import type { Transport } from './transport';
 
 /** Nom de la salle coopérative côté serveur. */
@@ -27,6 +27,7 @@ const now = (): number => (typeof performance !== 'undefined' ? performance.now(
 /** Message lisible pour une fermeture de salle (codes de fermeture Colyseus / WebSocket). */
 function closeReason(code: number, reason?: string): string {
   if (code === 4001) return 'The server is shutting down.';
+  if (code === AWAY_CLOSE_CODE) return 'You were away too long — the road went on without you.';
   if (code === 4002) return reason ? `Disconnected: ${reason}` : 'Disconnected after a server error.';
   if (code === 1000 || code === 4000) return reason || 'The room was closed.';
   return reason ? `Connection lost: ${reason}` : 'Connection lost.';

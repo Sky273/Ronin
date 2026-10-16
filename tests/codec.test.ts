@@ -322,6 +322,55 @@ function viewDiff<T extends object>(got: T, ref: T, keys: readonly (keyof T)[], 
   check(`tous les types d’événements (${EVENT_TYPES.length}), toutes les énumérations : aller-retour exact`, d === '', d);
 }
 
+// 5. Absents (coop) : aller-retour et valeurs mal formées ignorées sans plantage.
+{
+  const w = createWorld(12, { mode: 'coop' });
+  const a = addPlayer(w, 'A');
+  const b = addPlayer(w, 'B');
+  const c = addPlayer(w, 'C');
+  check('away : monde coop sans absent → instantané away = []', JSON.stringify(roundTrip(encodeSnapshot(snapshotFor(w, a.id, [], 0))).away) === '[]');
+  w.away = [b.id, c.id];
+  const back = roundTrip(makeSnapshot(w, a.id, [], 0));
+  check('away : aller-retour exact (makeSnapshot + msgpack)', JSON.stringify(back.away) === JSON.stringify([b.id, c.id]), JSON.stringify(back.away));
+  // Le tableau envoyé n'est pas lié au monde : une mutation ultérieure ne le change pas.
+  const wire = makeSnapshot(w, a.id, [], 0);
+  const packed = pack(wire);
+  w.away.push(a.id);
+  check('away : encodage figé au moment de l’envoi', JSON.stringify(decodeSnapshot(unpack(packed) as SnapshotWire).away) === JSON.stringify([b.id, c.id]));
+  w.away = [b.id, c.id];
+  const base = unpack(pack(makeSnapshot(w, a.id, [], 0))) as unknown[];
+  const variants: [string, unknown, number[]][] = [
+    ['absent (ancien tuple à 12 éléments)', undefined, []],
+    ['null', null, []],
+    ['chaîne', 'abc', []],
+    ['objet', { 0: 1, length: 1 }, []],
+    ['nombre', 7, []],
+    ['NaN, Infinity, chaînes, null mêlés', [NaN, b.id, 'x', null, Infinity, -Infinity, c.id, [1], {}], [b.id, c.id]],
+  ];
+  for (const [name, v, want] of variants) {
+    const t = [...base];
+    if (v === undefined) t.length = 12;
+    else t[12] = v;
+    let got: number[] | string;
+    try {
+      got = decodeSnapshot(unpack(pack(t)) as SnapshotWire).away;
+    } catch (x) {
+      got = `exception ${String(x)}`;
+    }
+    check(`away mal formé (${name}) : ignoré sans plantage`, JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
+  }
+  // Solo : jamais de clé away dans le monde, instantané away = [].
+  const solo = createWorld(5);
+  const sp = addPlayer(solo, 'S');
+  const m = new Map<number, number>();
+  for (let t = 0; t < 600; t++) {
+    m.set(sp.id, t % 40 < 30 ? BTN.RIGHT : 0);
+    stepWorld(solo, m);
+  }
+  check('away : jamais posé en solo (clé absente du monde)', !('away' in solo) && !JSON.stringify(solo).includes('"away"'));
+  check('away : instantané solo away = []', JSON.stringify(roundTrip(encodeSnapshot(snapshotFor(solo, sp.id, [], 0))).away) === '[]');
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

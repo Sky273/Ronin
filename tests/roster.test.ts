@@ -116,6 +116,19 @@ for (const [n, needed] of [[1, 1], [2, 2], [4, 3], [12, 7]] as const) {
   check('roomGrade = stage.grade', roomGrade(w) === 1);
 }
 
+// Absents : marqués, et exclus du vote (seuil et votes).
+{
+  const w = createWorld(9, { mode: 'coop' });
+  const ps = [addPlayer(w, 'A'), addPlayer(w, 'B'), addPlayer(w, 'C'), addPlayer(w, 'D')];
+  const stat = (ready: boolean): PlayerStageStats => ({ kills: 0, parries: 0, deaths: 0, honor: 0, bestCombo: 0, grade: 1, bonus: 0, ready });
+  w.stage.byPlayer = { [ps[0].id]: stat(true), [ps[1].id]: stat(false), [ps[2].id]: stat(true), [ps[3].id]: stat(false) };
+  w.away = [ps[2].id, ps[3].id];
+  const info = readyInfo(w);
+  check('absents exclus : 2 actifs, 2 nécessaires, 1 vote (celui de l’absent ne compte pas)', info.present === 2 && info.needed === 2 && info.ready === 1, JSON.stringify(info));
+  const rows = buildRoster(w, ps[0].id);
+  check('absents marqués dans le récapitulatif', rows.filter((r) => r.away).length === 2 && rows.find((r) => r.id === ps[0].id)?.away === false);
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   process.exit(1);

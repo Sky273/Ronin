@@ -1,6 +1,6 @@
 // Tests des règles du mode coopératif (simulation, sans réseau).
 // Lancer : npm run test:coop
-import { COOP, COOP_CLEARED_TICKS, ENEMY, PLAYER, TICK_RATE, TILE } from '../shared/constants';
+import { COOP, COOP_CLEARED_TICKS, COOP_READY_AFTER, ENEMY, PLAYER, TICK_RATE, TILE } from '../shared/constants';
 import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
 import { BTN } from '../shared/input';
 import { damagePlayer, doomEnemy, killEnemy, takeToken } from '../shared/interactions';
@@ -1372,6 +1372,106 @@ function nonFinite(w: World): string[] {
   const ra = evs.find((ev) => ev.type === 'respawn' && ev.pid === a.id);
   check('arène rouverte avant la renaissance : B (mort dehors) renaît au sanctuaire', locked && reopened && !!rb && rb.type === 'respawn' && rb.x === b.spawnX && rb.x < limit, rb && rb.type === 'respawn' ? `x=${(rb.x / TILE).toFixed(1)}` : 'pas de renaissance');
   check('arène rouverte : A (mort dedans) renaît aussi au sanctuaire', !!ra && ra.type === 'respawn' && ra.x === a.spawnX && ra.x < limit);
+}
+
+// ─── 24. Joueurs absents : ni vote ni force du gardien ──────────────────────
+{
+  // Vote : 3 joueurs dont 1 absent → 2 actifs, il faut 2 votes.
+  const w = createWorld(4321, { mode: 'coop' });
+  const ps = [addPlayer(w, 'A'), addPlayer(w, 'B'), addPlayer(w, 'C')];
+  w.away = [ps[2].id];
+  w.stage.state = 'cleared';
+  w.stage.t = 0;
+  for (const p of ps) w.stage.byPlayer![p.id] = { ...w.stage.byPlayer![p.id], ready: false };
+  run(w, COOP_READY_AFTER + 5);
+  run(w, 1, (_t, id) => (id === ps[0].id ? BTN.JUMP : 0));
+  check('absents : 1 vote sur 2 actifs ne suffit pas', stateOf(w) === 'cleared');
+  run(w, 1, (_t, id) => (id === ps[1].id ? BTN.JUMP : 0));
+  check('absents : 2 votes sur 2 actifs font repartir (l’absent ne bloque pas)', stateOf(w) === 'playing');
+
+  // Gardien : seuls les actifs comptent dans sa force.
+  const hpWith = (away: boolean): number => {
+    const v = createWorld(77, { mode: 'coop' });
+    const qs = [addPlayer(v, 'A'), addPlayer(v, 'B'), addPlayer(v, 'C'), addPlayer(v, 'D')];
+    if (away) v.away = [qs[1].id, qs[2].id, qs[3].id];
+    warpToArena(v, qs[0].id);
+    run(v, 30, (_t, id) => (id === qs[0].id ? BTN.RIGHT : 0));
+    return v.enemies.find((e) => e.id === v.stage.guardianId)?.maxHp ?? 0;
+  };
+  const full = hpWith(false);
+  const alone = hpWith(true);
+  check('absents : gardien à la force d’un seul joueur actif (3 absents sur 4)', alone > 0 && Math.abs(full / alone - 2.5) < 1e-6, `${alone} contre ${full}`);
+
+  // Revenir après la fermeture ne garde pas le gardien affaibli : sa force monte, elle ne baisse jamais.
+  {
+    const v = createWorld(77, { mode: 'coop' });
+    const qs = [addPlayer(v, 'A'), addPlayer(v, 'B'), addPlayer(v, 'C'), addPlayer(v, 'D')];
+    v.away = [qs[1].id, qs[2].id, qs[3].id];
+    warpToArena(v, qs[0].id);
+    run(v, 30, (_t, id) => (id === qs[0].id ? BTN.RIGHT : 0));
+    const g = v.enemies.find((e) => e.id === v.stage.guardianId)!;
+    const hp0 = g.maxHp;
+    g.hp = g.maxHp * 0.8; // déjà entamé
+    v.away = [qs[3].id]; // B et C reviennent
+    run(v, 2);
+    const ratio = g.hp / g.maxHp;
+    check('absents revenus pendant le combat : gardien renforcé en proportion', Math.abs(g.maxHp / hp0 - 2) < 1e-6 && Math.abs(ratio - 0.8) < 0.01, `${hp0} → ${g.maxHp}, ${(ratio * 100).toFixed(0)} %`);
+    v.away = [qs[1].id, qs[2].id, qs[3].id]; // ils repartent : la force ne baisse pas
+    run(v, 2);
+    check('absents repartis : la force du gardien ne baisse pas', Math.abs(g.maxHp / hp0 - 2) < 1e-6);
+  }
+}
+
+// ─── 25. Absents : gardien (aucun actif, moitié absente, retour après fermeture), solo ──
+{
+  const guardianHp = (n: number, awayIdx: number[], after?: (v: World, ids: number[]) => void): number => {
+    const v = createWorld(77, { mode: 'coop' });
+    const qs = Array.from({ length: n }, (_, i) => addPlayer(v, 'p' + i));
+    if (awayIdx.length) v.away = awayIdx.map((i) => qs[i].id);
+    warpToArena(v, qs[0].id);
+    run(v, 30, (_t, id) => (id === qs[0].id ? BTN.RIGHT : 0));
+    after?.(v, qs.map((q) => q.id));
+    return v.enemies.find((e) => e.id === v.stage.guardianId)?.maxHp ?? 0;
+  };
+  const one = guardianHp(1, []);
+  const none = guardianHp(4, [0, 1, 2, 3]);
+  check('absents : aucun actif (4 absents) → gardien à la force d’un joueur (pas de multiplicateur < 1)', one > 0 && none === one, `${none} contre ${one}`);
+  const half = guardianHp(4, [2, 3]);
+  const two = guardianHp(2, []);
+  check('absents : 2 absents sur 4 → gardien à la force de 2 joueurs', half > 0 && half === two, `${half} contre ${two}`);
+  // Retour d'absents pendant l'arène : le gardien se renforce en proportion (PV courants compris),
+  // sans jamais faiblir ; un arrivant en cours de combat ne change rien.
+  const full = guardianHp(4, []);
+  const g = (v: World) => v.enemies.find((e) => e.id === v.stage.guardianId);
+  let back = -1;
+  let hpRatio = [-1, -1];
+  let again = -1;
+  const locked = guardianHp(4, [1, 2, 3], (v) => {
+    const gg = g(v)!;
+    gg.hp = gg.maxHp / 2; // gardien entamé de moitié
+    v.away = [];
+    run(v, 2, (_t, id) => (id === v.players[0].id ? BTN.RIGHT : 0));
+    back = g(v)?.maxHp ?? 0;
+    hpRatio = [g(v)?.hp ?? 0, back];
+    v.away = v.players.slice(1).map((p) => p.id);
+    run(v, 2, (_t, id) => (id === v.players[0].id ? BTN.RIGHT : 0));
+    again = g(v)?.maxHp ?? 0;
+  });
+  check('absents : retour des absents pendant l’arène → gardien porté à la force des 4', locked > 0 && Math.abs(back - full) < 1e-6, `${locked} → ${back}, attendu ${full}`);
+  check('absents : retour pendant l’arène → PV courants mis à l’échelle (moitié conservée)', Math.abs(hpRatio[0] / hpRatio[1] - 0.5) < 1e-6, `${hpRatio[0]} / ${hpRatio[1]}`);
+  check('absents : nouvelle absence pendant l’arène → la force ne baisse pas', Math.abs(again - back) < 1e-6, `${again} contre ${back}`);
+  let joined = -1;
+  const lone = guardianHp(1, [], (v) => {
+    addPlayer(v, 'late');
+    run(v, 2, (_t, id) => (id === v.players[0].id ? BTN.RIGHT : 0));
+    joined = g(v)?.maxHp ?? 0;
+  });
+  check('absents : arrivant pendant l’arène → force du gardien inchangée', lone > 0 && joined === lone, `${joined} contre ${lone}`);
+  // Solo : jamais d'absents.
+  const w = createWorld(3);
+  addPlayer(w, 'S');
+  run(w, 2000, scripted(9));
+  check('absents : solo, clé away jamais posée par la simulation', !('away' in w));
 }
 
 if (failures) {

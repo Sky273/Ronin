@@ -69,7 +69,7 @@ export class AllyMarkers {
       const color = hexCss(playerColor(p.color));
       if (t.text !== label) t.setText(label);
       if (t.style.color !== color) t.setColor(color);
-      t.setAlpha(p.state === 'dead' ? 0.35 : 0.95);
+      t.setAlpha(p.state === 'dead' || world.away?.includes(p.id) ? 0.35 : 0.95);
       slots.push({ key: p.id, t, right, y: toScreenY(y) });
       used.add(p.id);
     }

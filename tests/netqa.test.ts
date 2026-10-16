@@ -738,6 +738,57 @@ for (const lag of LATS) {
   check('bilan à 4 : instantané < 2 Ko (statistiques par joueur comprises)', bytes.cleared.length > 0 && Math.max(...bytes.cleared) < 2048, `max ${Math.max(0, ...bytes.cleared)} o`);
 }
 
+// ─── 6. Absents en ligne : 3 clients, l'un laisse l'onglet ouvert sans toucher au clavier ──
+{
+  const bench = new NetBench({ seed: 61, lagMs: 75, jitterMs: 20 });
+  const cs = [bench.addClient('Ayame'), bench.addClient('Benkei'), bench.addClient('Chiyo')];
+  const w = bench.session.world;
+  const calm = (): void => {
+    w.spawnTimer = 1e6;
+    for (const p of w.players) p.iframes = 1e6;
+  };
+  const wiggle = (f: number) => (f % 60 < 30 ? BTN.LEFT : BTN.RIGHT);
+  let err = '';
+  try {
+    // 35 s : A et B jouent (gauche/droite), C envoie des entrées vides.
+    bench.run(35_000, (i, f) => (i === 2 ? 0 : wiggle(f)), calm);
+    const cp = cs[2].pid;
+    check('banc : après 35 s sans bouton, C est absent côté serveur (A et B actifs)', bench.session.isAway(cp) && !bench.session.isAway(cs[0].pid) && !bench.session.isAway(cs[1].pid));
+    check('banc : chaque client voit C absent (w.away transmis)', cs.every((c) => !!c.src.world.away?.includes(cp) && c.src.world.away.length === 1), cs.map((c) => JSON.stringify(c.src.world.away)).join(' '));
+    // A ferme l'arène, le gardien tombe, A franchit la porte : bilan.
+    const a = bench.serverPlayer(cs[0].pid)!;
+    warpToArena(w, a.id);
+    bench.run(600, (i, f) => (i === 0 ? BTN.RIGHT : i === 1 ? wiggle(f) : 0), calm);
+    const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+    if (g) killEnemy(w, g, a, 0, false);
+    bench.run(200, (i, f) => (i === 2 ? 0 : wiggle(f)), calm);
+    a.x = w.level.gate.x - 40;
+    a.y = w.level.gate.y;
+    a.vx = a.vy = 0;
+    bench.run(1500, (i, f) => (i === 0 ? BTN.RIGHT : i === 1 ? wiggle(f) : 0), calm);
+    check('banc absents : bilan atteint', stateOf(w) === 'cleared', stateOf(w));
+    bench.run(((COOP_READY_AFTER + 20) * 1000) / 60, (i) => (i === 2 ? 0 : BTN.DOWN), calm);
+    const info = readyInfo(cs[0].src.world);
+    check('banc absents : readyInfo chez A → present 2, needed 2', info.present === 2 && info.needed === 2 && info.ready === 0, JSON.stringify(info));
+    const rowsA = buildRoster(cs[0].src.world, cs[0].pid);
+    const rowsC = buildRoster(cs[2].src.world, cs[2].pid);
+    check('banc absents : récapitulatif chez A — 3 lignes, seul C marqué absent', rowsA.length === 3 && rowsA.filter((r) => r.away).map((r) => r.id).join() === String(cp), JSON.stringify(rowsA.map((r) => [r.id, r.away])));
+    check('banc absents : chez C lui-même, sa ligne « moi » est marquée absente', rowsC.find((r) => r.me)?.away === true);
+    const level0 = w.level.stage;
+    bench.run(300, (i, f) => (i === 0 ? (f % 20 < 3 ? BTN.JUMP : 0) : i === 1 ? BTN.DOWN : 0), calm);
+    bench.run(400, (i) => (i === 1 ? BTN.DOWN : 0), calm);
+    const oneVote = stateOf(w);
+    const seen = readyInfo(cs[1].src.world);
+    bench.run(400, (i, f) => (i === 1 ? (f % 20 < 3 ? BTN.JUMP : 0) : 0), calm);
+    bench.run(600, () => 0, calm);
+    check('banc absents : 1 vote sur 2 actifs → bilan, vu par B (1/2)', oneVote === 'cleared' && seen.ready === 1 && seen.needed === 2, `${oneVote}, ${JSON.stringify(seen)}`);
+    check('banc absents : 2 votes sur 2 actifs → étape suivante (C ne bloque pas)', w.level.stage === level0 + 1 && stateOf(w) === 'playing', `${stateOf(w)} étape ${w.level.stage}`);
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 400);
+  }
+  check('banc absents : aucune exception', err === '', err);
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

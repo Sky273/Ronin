@@ -47,6 +47,43 @@ export function setBarrier(w: World, on: boolean): void {
 
 const inArena = (w: World, x: number) => arenaInside(w.level, x);
 
+/** Joueur absent (coop en ligne : aucun bouton depuis un moment) ? Toujours faux en solo. */
+export function isAway(w: World, id: number): boolean {
+  return !!w.away && w.away.includes(id);
+}
+
+/** Coop : multiplicateur de PV du gardien pour `n` joueurs actifs. */
+const guardianCoopMult = (n: number): number => 1 + COOP.GUARDIAN_HP_PER_PLAYER * Math.max(0, n - 1);
+
+/**
+ * Coop, pendant l'arène : un joueur absent à la fermeture qui revient renforce le gardien en proportion
+ * (un arrivant en cours de combat ne change rien).
+ * La force ne baisse jamais : rester absent juste avant la fermeture ne l'affaiblit pas pour de bon.
+ */
+function scaleGuardianUp(w: World): void {
+  const pool = w.guardianPool;
+  if (!pool) return;
+  // Joueurs présents à la fermeture, toujours là et actifs (un arrivant ne compte pas).
+  let n = 0;
+  for (const p of w.players) if (pool.includes(p.id) && !isAway(w, p.id)) n++;
+  const was = w.guardianFor ?? n;
+  if (n <= was) return;
+  w.guardianFor = n;
+  const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+  if (!g) return;
+  const k = guardianCoopMult(n) / guardianCoopMult(was);
+  g.maxHp *= k;
+  g.hp *= k;
+}
+
+/** Joueurs présents et actifs : ceux qui comptent pour la force du gardien et pour le vote. */
+export function activeCount(w: World): number {
+  if (!w.away || !w.away.length) return w.players.length;
+  let n = 0;
+  for (const p of w.players) if (!isAway(w, p.id)) n++;
+  return n;
+}
+
 export function stepStage(w: World): void {
   const st = w.stage;
   st.t++;
@@ -63,6 +100,7 @@ export function stepStage(w: World): void {
       break;
     }
     case 'arena': {
+      if (w.mode === 'coop') scaleGuardianUp(w);
       // Salle vide (coop) : every() serait vrai, mais personne n'a perdu — l'arène reste fermée.
       // Coop : l'arène se rouvre dès qu'aucun joueur vivant n'est plus à l'intérieur (ceux du dehors
       // ne sont pas touchés) ; solo : quand le joueur est mort.
@@ -105,10 +143,13 @@ function lockArena(w: World): void {
   w.projectiles = [];
   w.wave.phase = 'calm';
   w.wave.t = 0;
-  // Coop : le gardien est plus robuste selon les joueurs présents (morts compris), fixé à la fermeture.
-  const hpMult = w.mode === 'coop'
-    ? guardianHpScale(w) * (1 + COOP.GUARDIAN_HP_PER_PLAYER * Math.max(0, w.players.length - 1))
-    : guardianHpScale(w);
+  // Coop : le gardien est plus robuste selon les joueurs actifs (morts compris, absents exclus) ;
+  // si des absents reviennent pendant le combat, sa force monte (voir stepStage), elle ne baisse jamais.
+  if (w.mode === 'coop') {
+    w.guardianPool = w.players.map((p) => p.id);
+    w.guardianFor = Math.max(1, activeCount(w));
+  }
+  const hpMult = w.mode === 'coop' ? guardianHpScale(w) * guardianCoopMult(w.guardianFor ?? 1) : guardianHpScale(w);
   const g = spawnEnemy(w, 'boss', a.guardianX, a.guardianY, false, hpMult);
   g.state = 'intro';
   g.facing = -1;
@@ -191,12 +232,14 @@ export function stepCleared(w: World, inputs: Map<number, number>): void {
       const ps = stageStatsOf(w, p);
       if (!ps) continue;
       if (st.t > COOP_READY_AFTER && pressed & (BTN.JUMP | BTN.ATTACK)) ps.ready = true;
-      if (ps.ready) ready++;
+      if (ps.ready && !isAway(w, p.id)) ready++;
     } else if (st.t > 90 && pressed & (BTN.JUMP | BTN.ATTACK)) proceed = true;
   }
   if (coop) {
-    // Majorité stricte des joueurs présents ; sinon, personne ne bloque la salle : la route reprend d'elle-même.
-    if (ready * 2 > w.players.length || st.t >= COOP_CLEARED_TICKS) proceed = true;
+    // Majorité stricte des joueurs actifs (les absents ne comptent pas) ; sinon, personne ne bloque
+    // la salle : la route reprend d'elle-même.
+    const active = activeCount(w);
+    if ((active > 0 && ready * 2 > active) || st.t >= COOP_CLEARED_TICKS) proceed = true;
   }
   if (proceed) nextStage(w);
 }
