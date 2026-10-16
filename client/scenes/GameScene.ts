@@ -1,12 +1,13 @@
 import Phaser from 'phaser';
 import { ATTACKS, activeAttackBox, bodyRect, boxFromFacing } from '../../shared/combat';
-import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, PLAYER as P, SPEAR_HB, TILE } from '../../shared/constants';
+import { BOSS, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, PLAYER as P, SPEAR_HB, TILE } from '../../shared/constants';
 import { gainHonor } from '../../shared/interactions';
 import type { Rect } from '../../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../../shared/types';
 import { DIFFICULTIES, type DifficultyId } from '../../shared/difficulty';
 import { BIOMES, biomeForStage } from '../../shared/biomes';
-import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
+import { createPlayer } from '../../shared/player';
+import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
 import { Sfx } from '../audio/sfx';
 import { Fx } from '../fx/fx';
@@ -17,7 +18,7 @@ import {
   buildSkeleton, drawSamurai, headBackWorld, headWorld, makeXf, type Pose, SAMURAI, samuraiPose, slashTrail, star,
 } from '../render/characters';
 import { bossTrail, drawEnemy, enemyPose, enemySkeleton, isGuarding, SCALE, windupLength } from '../render/enemies';
-import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
+import { C, FONT_BRUSH, FONT_TEXT, hexCss, playerColor } from '../render/palette';
 import { Terrain } from '../render/terrain';
 import { insertScore, loadPrefs, loadScores, type Prefs, qualifies, sanitizeName, saveScores, savePrefs } from '../scores/highscores';
 import type { ScoreTable } from '../scores/types';
@@ -29,6 +30,8 @@ import { Results } from '../ui/results';
 import { Scoreboard } from '../ui/scoreboard';
 import { stageTitle, UPGRADE_TEXT } from '../ui/texts';
 import { TitleScreen } from '../ui/title';
+import { LocalSource } from '../world/localSource';
+import type { WorldSource } from '../world/source';
 
 type Layer = 'bg' | 'world' | 'ui';
 /** Écran courant : menus, partie, fin de partie, saisie du nom, tableau des scores. */
@@ -42,11 +45,17 @@ const GAME_OVER_SKIP = 1.2;
 type G = Phaser.GameObjects.Graphics;
 
 const ZOOM = 1.4;
+/** Marge (px monde) au-delà de laquelle un autre joueur hors de la vue n'est pas dessiné. */
+const OFFSCREEN_MARGIN = 160;
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
 export class GameScene extends Phaser.Scene {
-  private world!: World;
-  private me!: Player;
+  /** Monde simulé localement (solo) ; toujours présent, même quand une autre source est branchée. */
+  private local!: LocalSource;
+  /** Source du monde affiché : locale (solo) ou en ligne. */
+  private src!: WorldSource;
+  /** Dernier objet joueur local connu (en ligne, les objets joueur sont remplacés à chaque instantané). */
+  private meCache: Player | null = null;
   private controls!: Controls;
   private sfx = new Sfx();
   private music: Music | null = null;
@@ -70,8 +79,6 @@ export class GameScene extends Phaser.Scene {
   private deathText!: Phaser.GameObjects.Text;
   private deathSub!: Phaser.GameObjects.Text;
 
-  private inputs = new Map<number, number>();
-  private acc = 0;
   private timeScale = 1;
   private screen: Screen = 'title';
   private difficulty: DifficultyId = 'normal';
@@ -80,7 +87,6 @@ export class GameScene extends Phaser.Scene {
   private overInfo: GameOverInfo | null = null;
   private overT = 0;
   private debug = false;
-  private slowmo = 0;
   private flash = 0;
   private shake = 0;
   private zoomPunch = 0;
@@ -89,11 +95,14 @@ export class GameScene extends Phaser.Scene {
   private prev = new Map<number, Pt>();
   private phase = new Map<number, number>();
   private lastPose = new Map<number, Pose>();
-  private lastPlayerPose: Pose | null = null;
-  private scarf: Pt[] = [];
-  private parryTick = -999;
-  private hurtFlash = 0;
-  private ghostTimer = 0;
+  // État propre à chaque personnage joueur, par id.
+  private lastPlayerPose = new Map<number, Pose>();
+  private scarf = new Map<number, Pt[]>();
+  private parryTick = new Map<number, number>();
+  private hurtFlash = new Map<number, number>();
+  private ghostTimer = new Map<number, number>();
+  /** Noms affichés au-dessus des autres joueurs. */
+  private labels = new Map<number, Phaser.GameObjects.Text>();
   private petalTimer = 0;
   private best = 0;
   private orbStreak = 0;
@@ -103,6 +112,32 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super('game');
+  }
+
+  private get world(): World {
+    return this.src.world;
+  }
+
+  /** Joueur contrôlé par ce client, retrouvé par son id dans le monde courant. */
+  private get me(): Player {
+    const id = this.src.meId;
+    const c = this.meCache;
+    if (c && c.id === id && this.world.players.includes(c)) return c;
+    const p = this.world.players.find((q) => q.id === id);
+    if (p) return (this.meCache = p);
+    // En ligne, avant le premier instantané (ou juste après une déconnexion) : dernier état connu.
+    if (c && c.id === id) return c;
+    const l = this.world.level;
+    return (this.meCache = createPlayer(id, '', l.spawn.x, l.spawn.y));
+  }
+
+  private player(id: number): Player | undefined {
+    return this.world.players.find((q) => q.id === id);
+  }
+
+  /** Ralenti : n'existe qu'en local (en ligne, le temps du serveur ne se ralentit pas). */
+  private setSlowmo(v: number): void {
+    if (this.src === this.local) this.local.slowmo = v;
   }
 
   /** Chaque objet est rendu par une seule des trois caméras (fond, monde zoomé, interface). */
@@ -118,8 +153,9 @@ export class GameScene extends Phaser.Scene {
     const H = this.scale.height;
     this.prefs = loadPrefs();
     this.difficulty = this.prefs.difficulty;
-    this.world = createWorld((Date.now() & 0xffff) + 1, { difficulty: this.difficulty });
-    this.me = addPlayer(this.world, 'Ronin');
+    const world = createWorld((Date.now() & 0xffff) + 1, { difficulty: this.difficulty });
+    this.local = new LocalSource(world, addPlayer(world, 'Ronin').id);
+    this.src = this.local;
     const L = this.world.level;
 
     this.bgCam = this.cameras.main;
@@ -160,8 +196,13 @@ export class GameScene extends Phaser.Scene {
     if (import.meta.env.DEV) {
       // Raccourcis de test : F2 phase de Marée suivante, F3 arène du gardien, F4 +100 Honneur.
       this.controls.onKey('F2', () => this.screen === 'play' && skipWavePhase(this.world));
-      this.controls.onKey('F3', () => this.screen === 'play' && warpToArena(this.world));
+      this.controls.onKey('F3', () => this.screen === 'play' && warpToArena(this.world, this.me.id));
       this.controls.onKey('F4', () => this.screen === 'play' && gainHonor(this.world, this.me, 100));
+      // F8 : ajoute un « Kage », écho retardé du joueur local, pour tester le rendu de N joueurs.
+      this.controls.onKey('F8', () => {
+        if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
+        this.local.addEcho();
+      });
       // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
       this.controls.onKey('F7', () => {
         if (this.screen !== 'play' || this.world.over) return;
@@ -251,20 +292,20 @@ export class GameScene extends Phaser.Scene {
     this.prefs = { ...this.prefs, difficulty: d };
     savePrefs(this.prefs);
 
-    resetWorld(this.world, (Date.now() & 0xffff) + 1, { difficulty: d });
-    this.me = addPlayer(this.world, sanitizeName(this.prefs.name));
+    // Une partie solo se joue toujours sur la source locale.
+    if (this.src !== this.local) this.useSource(this.local);
+    const w = this.local.world;
+    resetWorld(w, (Date.now() & 0xffff) + 1, { difficulty: d });
+    this.local.reset(addPlayer(w, sanitizeName(this.prefs.name)).id);
+    this.meCache = null;
     this.applyLevel();
     this.prev.clear();
     this.phase.clear();
     this.lastPose.clear();
-    this.scarf = [];
-    this.lastPlayerPose = null;
-    this.acc = 0;
-    this.slowmo = this.flash = this.shake = this.zoomPunch = this.wipe = this.hurtFlash = 0;
+    this.clearCharacters();
+    this.flash = this.shake = this.zoomPunch = this.wipe = 0;
     this.orbStreak = this.orbStreakT = this.lastLost = 0;
-    this.parryTick = -999;
     this.best = 0; // « best » = meilleur nombre de kills d'une vie, pour cette partie
-    this.inputs.clear();
     this.overInfo = null;
     this.overT = 0;
     this.camX = this.me.x + 60;
@@ -281,6 +322,50 @@ export class GameScene extends Phaser.Scene {
     const t = DIFFICULTY_TEXT[d];
     this.sfx.taiko(false);
     this.hud.banner(t.kanji, `${t.name} — the journey begins`, `${livesLabel(DIFFICULTIES[d].lives)} · score ×${DIFFICULTIES[d].scoreMult}`, '#15120e', 2000);
+  }
+
+  /**
+   * Branche une autre source de monde (ex. salle en ligne). La source précédente est libérée,
+   * sauf la source locale, conservée pour les parties solo suivantes. À appeler une fois le
+   * premier état du monde connu (le joueur `src.meId` présent dans `src.world.players`).
+   */
+  useSource(src: WorldSource): void {
+    if (src === this.src) return;
+    if (this.src !== this.local) this.src.dispose();
+    this.src = src;
+    this.meCache = null;
+    this.timeScale = 1;
+    // Les effets tachent le terrain du niveau : ils suivent l'objet niveau de la nouvelle source.
+    this.fx.clear();
+    this.fx = new Fx(src.world.level, this.terrain);
+    this.resetView();
+  }
+
+  /**
+   * Le niveau du monde courant a été remplacé (nouvelle source, changement d'étape en ligne) :
+   * terrain, fond et caméra suivent, l'état de rendu des personnages repart de zéro.
+   */
+  resetView(): void {
+    this.applyLevel();
+    this.prev.clear();
+    this.phase.clear();
+    this.lastPose.clear();
+    this.clearCharacters();
+    const me = this.me;
+    this.camX = me.x + 60;
+    this.camY = me.y - 60;
+    this.worldCam.centerOn(this.camX, this.camY);
+  }
+
+  /** Oublie l'état de rendu propre aux personnages joueurs (écharpes, flashs, noms…). */
+  private clearCharacters(): void {
+    this.scarf.clear();
+    this.lastPlayerPose.clear();
+    this.hurtFlash.clear();
+    this.parryTick.clear();
+    this.ghostTimer.clear();
+    for (const t of this.labels.values()) t.destroy();
+    this.labels.clear();
   }
 
   private onGameOver(info: GameOverInfo): void {
@@ -349,22 +434,13 @@ export class GameScene extends Phaser.Scene {
     }
     if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
     if (this.screen === 'play' || this.screen === 'over') {
-      if (this.slowmo > 0) {
-        this.slowmo -= dt;
-        this.timeScale = 0.3;
+      const src = this.src;
+      const events = src.advance(dt, () => this.controls.sample(), () => this.snapshot());
+      if (src === this.local) this.timeScale = this.local.timeScale;
+      for (let i = 0; i < events.length; i++) {
+        // En local, chaque événement garde le tick du pas qui l'a produit (rattrapage de plusieurs pas).
+        this.onEvent(events[i], src === this.local ? this.local.eventTicks[i] : this.world.tick);
       }
-      this.acc += dt * this.timeScale;
-      let n = 0;
-      while (this.acc >= DT && n < 4) {
-        this.snapshot();
-        this.inputs.set(this.me.id, this.controls.sample());
-        stepWorld(this.world, this.inputs);
-        for (const ev of this.world.events) this.onEvent(ev);
-        this.world.events.length = 0;
-        this.acc -= DT;
-        n++;
-      }
-      if (n === 4) this.acc = 0;
     }
     this.renderFrame(dt, time);
   }
@@ -384,7 +460,7 @@ export class GameScene extends Phaser.Scene {
 
   private renderFrame(dt: number, time: number): void {
     const w = this.world;
-    const alpha = Math.min(1, this.acc / DT);
+    const alpha = Math.min(1, this.src.alpha());
     const boil = Math.floor(time / 85); // « ligne qui frémit » à ~12 i/s, comme une animation à la main
     const fxDt = dt * this.timeScale;
     this.gBack.clear();
@@ -398,7 +474,11 @@ export class GameScene extends Phaser.Scene {
     for (const e of w.enemies) this.drawEnemyEntity(e, alpha, fxDt, time, boil);
     this.drawProjectiles(time);
     this.drawOrbs(time);
-    const pos = this.drawPlayer(this.me, alpha, dt, time, boil);
+    const me = this.me;
+    // Les autres joueurs d'abord, le joueur local en dernier, par-dessus.
+    for (const p of w.players) if (p !== me) this.drawOther(p, alpha, dt, time, boil);
+    const pos = this.drawPlayer(me, alpha, dt, time, boil);
+    this.pruneCharacters();
 
     this.fx.update(fxDt);
     this.fx.draw(this.gBack, this.gFront, boil);
@@ -637,14 +717,58 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Autre joueur (coop, ou écho de débogage) : dessiné s'il est près de la vue, avec son nom au-dessus. */
+  private drawOther(p: Player, alpha: number, dt: number, time: number, boil: number): void {
+    const v = this.worldCam.worldView;
+    const label = this.labels.get(p.id);
+    const visible = p.x > v.x - OFFSCREEN_MARGIN && p.x < v.right + OFFSCREEN_MARGIN && p.y > v.y - OFFSCREEN_MARGIN && p.y < v.bottom + OFFSCREEN_MARGIN * 2;
+    if (!visible) {
+      label?.setVisible(false);
+      return;
+    }
+    const pos = this.drawPlayer(p, alpha, dt, time, boil);
+    // Nom : masqué pendant la mort et une fois sorti de la partie.
+    const show = p.state !== 'dead' && !p.out && p.name !== '';
+    const t = label ?? this.makeLabel(p);
+    if (t.text !== p.name) t.setText(p.name);
+    t.setPosition(pos.x, pos.y - 64).setVisible(show);
+  }
+
+  private makeLabel(p: Player): Phaser.GameObjects.Text {
+    const t = this.put(
+      this.add.text(0, 0, p.name, {
+        fontFamily: FONT_TEXT, fontSize: '13px', color: hexCss(playerColor(p.color)),
+        stroke: hexCss(C.paper), strokeThickness: 3,
+      }).setOrigin(0.5, 1).setDepth(25),
+      'world',
+    );
+    this.labels.set(p.id, t);
+    return t;
+  }
+
+  /** Oublie l'état de rendu des joueurs qui ne sont plus dans le monde (départ, déconnexion). */
+  private pruneCharacters(): void {
+    const players = this.world.players;
+    const gone = (id: number) => !players.some((p) => p.id === id);
+    for (const [id, t] of this.labels) {
+      if (!gone(id) && id !== this.src.meId) continue;
+      t.destroy();
+      this.labels.delete(id);
+    }
+    for (const m of [this.scarf, this.lastPlayerPose, this.hurtFlash, this.parryTick, this.ghostTimer] as Map<number, unknown>[]) {
+      for (const id of m.keys()) if (gone(id)) m.delete(id);
+    }
+  }
+
   private drawPlayer(p: Player, alpha: number, dt: number, time: number, boil: number): Pt {
     const pos = this.lerpPos(p.id, p.x, p.y, alpha);
     let ph = this.phase.get(p.id) ?? 0;
     if (p.onGround) ph += Math.abs(p.vx) * dt * this.timeScale * 0.075;
     this.phase.set(p.id, ph);
     const t = p.stateT + (p.freeze > 0 ? 0 : alpha);
-    const view = samuraiPose(p, t, ph, this.world.tick, this.world.tick - this.parryTick, time);
-    this.lastPlayerPose = view.pose;
+    const view = samuraiPose(p, t, ph, this.world.tick, this.world.tick - (this.parryTick.get(p.id) ?? -999), time);
+    this.lastPlayerPose.set(p.id, view.pose);
+    const accent = playerColor(p.color);
     const X = makeXf(pos.x, pos.y, p.facing, view.rot);
     const sk = buildSkeleton(view.pose, SAMURAI);
     const r = seeded(hash2(p.id + 999, boil));
@@ -652,9 +776,9 @@ export class GameScene extends Phaser.Scene {
     this.updateScarf(headBackWorld(sk, X), p, dt * this.timeScale, time);
 
     if (p.state === 'dash' || p.state === 'iaiStrike' || (p.state === 'slide' && p.stateT < 10)) {
-      this.ghostTimer -= dt;
-      if (this.ghostTimer <= 0) {
-        this.ghostTimer = 0.03;
+      const gt = (this.ghostTimer.get(p.id) ?? 0) - dt;
+      this.ghostTimer.set(p.id, gt <= 0 ? 0.03 : gt);
+      if (gt <= 0) {
         this.fx.ghost(view.pose, pos.x, pos.y, p.facing, view.rot, 0.22, C.washLight, 0.5);
       }
     }
@@ -665,7 +789,7 @@ export class GameScene extends Phaser.Scene {
       const tips = tr.tips.map(X);
       gFill(this.gChars, tips.concat(tr.wash.map(X).reverse()), C.wash, 0.22 * tr.alpha);
       gFill(this.gChars, tips.concat(tr.inner.map(X).reverse()), C.ink, 0.9 * tr.alpha);
-      if (tr.heavy) gStroke(this.gChars, tips, C.red, 0.85 * tr.alpha, { width: 2.4, taperStart: 0.6, taperEnd: 0.05 }, r);
+      if (tr.heavy) gStroke(this.gChars, tips, accent, 0.85 * tr.alpha, { width: 2.4, taperStart: 0.6, taperEnd: 0.05 }, r);
     }
     if (p.state === 'attack' && p.attack === 'plunge' && !p.plungeLanded && p.stateT > ATTACKS.plunge.startup) {
       for (let i = -1; i <= 1; i++) {
@@ -685,14 +809,16 @@ export class GameScene extends Phaser.Scene {
     let a = 1;
     if (p.iframes > 0 && p.state !== 'dash' && p.state !== 'iaiStrike' && p.state !== 'dead' && Math.floor(time / 70) % 2 === 0) a = 0.4;
     if (p.state === 'dead') a = Math.min(1, p.respawnT / 40);
+    const hurt = this.hurtFlash.get(p.id) ?? 0;
     drawSamurai(this.gChars, sk, X, {
       alpha: a,
-      tint: this.hurtFlash > 0 ? C.red : null,
+      tint: hurt > 0 ? C.red : null,
       rand: r,
       glint: p.state === 'iaiCharge' ? Math.min(1, p.iaiCharge / P.IAI_FULL_CHARGE) : 0,
-      scarf: this.scarf,
+      scarf: this.scarf.get(p.id),
+      accent,
     });
-    this.hurtFlash -= dt;
+    this.hurtFlash.set(p.id, hurt - dt);
     return pos;
   }
 
@@ -700,15 +826,17 @@ export class GameScene extends Phaser.Scene {
   private updateScarf(anchor: Pt, p: Player, dt: number, time: number): void {
     const n = 8;
     const seg = 5;
-    if (this.scarf.length !== n || Math.abs(this.scarf[0].x - anchor.x) > 100) {
-      this.scarf = Array.from({ length: n }, (_, i) => ({ x: anchor.x - p.facing * i * seg, y: anchor.y }));
+    let sc = this.scarf.get(p.id);
+    if (!sc || sc.length !== n || Math.abs(sc[0].x - anchor.x) > 100) {
+      sc = Array.from({ length: n }, (_, i) => ({ x: anchor.x - p.facing * i * seg, y: anchor.y }));
+      this.scarf.set(p.id, sc);
     }
-    this.scarf[0] = { x: anchor.x, y: anchor.y };
+    sc[0] = { x: anchor.x, y: anchor.y };
     for (let i = 1; i < n; i++) {
-      const q = this.scarf[i];
+      const q = sc[i];
       q.x += (-p.facing * 26 + Math.sin(time * 0.006 + i * 0.9) * 18) * dt;
       q.y += (34 + Math.cos(time * 0.009 + i * 0.7) * 22) * dt;
-      const pr = this.scarf[i - 1];
+      const pr = sc[i - 1];
       const dx = q.x - pr.x;
       const dy = q.y - pr.y;
       const d = Math.hypot(dx, dy) || 1;
@@ -771,11 +899,19 @@ export class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: t, y: y - 26, alpha: 0, delay: 380, duration: 600, ease: 'Sine.easeIn', onComplete: () => t.destroy() });
   }
 
-  private onEvent(ev: GameEvent): void {
+  /**
+   * Mise en scène d'un événement. `tick` : tick du monde au moment de l'événement.
+   * Les événements d'un joueur (pid) visent ce joueur ; tremblement, flash, ralenti et sons
+   * de dégât ne concernent que le joueur local (les autres sont seulement entendus de près).
+   */
+  private onEvent(ev: GameEvent, tick = this.world.tick): void {
     const fx = this.fx;
+    const mine = 'pid' in ev && ev.pid === this.src.meId;
+    // Son d'une action de joueur : toujours pour le joueur local, à portée d'oreille pour les autres.
+    const hear = (x: number) => mine || this.near(x);
     switch (ev.type) {
       case 'swing':
-        this.sfx.swing(ATTACKS[ev.attack].heavy);
+        if (hear(ev.x)) this.sfx.swing(ATTACKS[ev.attack].heavy);
         if (ev.attack === 'slash3') fx.dust(ev.x, ev.y, -ev.dir, 5);
         break;
       case 'hit':
@@ -792,13 +928,13 @@ export class GameScene extends Phaser.Scene {
         fx.inkBurst(ev.x, ev.y - h, ev.dir, ev.byIai ? 34 : boss ? 70 : 22, ev.byIai ? 520 : boss ? 620 : 380);
         if (ev.byIai || boss) fx.inkBurst(ev.x, ev.y - h, ev.dir, boss ? 30 : 8, 300, C.red);
         this.sfx.slice();
-        this.addShake(boss ? 18 : 5);
+        if (mine || boss) this.addShake(boss ? 18 : 5);
         this.lastPose.delete(ev.id);
         this.prev.delete(ev.id);
         this.phase.delete(ev.id);
-        if (ev.pid === this.me.id) this.best = Math.max(this.best, this.me.kills);
+        if (mine) this.best = Math.max(this.best, this.me.kills);
         if (boss) {
-          this.slowmo = 1.1;
+          this.setSlowmo(1.1);
           this.flash = 0.2;
           this.sfx.gong();
           this.hud.banner('討', 'Akaoni has fallen!', `+${ev.honor} honor`, '#b8321f', 2400);
@@ -809,15 +945,17 @@ export class GameScene extends Phaser.Scene {
         fx.sparks(ev.x, ev.y, 4, C.red, 200);
         break;
       case 'parry':
-        this.sfx.parry();
+        if (hear(ev.x)) this.sfx.parry();
         fx.sparks(ev.x, ev.y, 18, C.red, 520);
         fx.sparks(ev.x, ev.y, 10, C.ink, 400);
         fx.ring(ev.x, ev.y, 6, 46, 0.3, C.ink, 4);
         this.popKanji('弾', ev.x, ev.y - 34, '#b8321f', 46);
-        this.addShake(6);
-        this.flash = 0.06;
-        this.slowmo = 0.12;
-        this.parryTick = this.world.tick;
+        this.parryTick.set(ev.pid, tick);
+        if (mine) {
+          this.addShake(6);
+          this.flash = 0.06;
+          this.setSlowmo(0.12);
+        }
         break;
       case 'deflect':
         this.sfx.deflect();
@@ -837,111 +975,126 @@ export class GameScene extends Phaser.Scene {
         this.addShake(8);
         break;
       case 'playerHit':
-        this.sfx.hurt();
+        if (mine) this.sfx.hurt();
         fx.inkBurst(ev.x, ev.y, ev.dir, 14, 320, C.red);
-        this.hurtFlash = 0.12;
-        this.addShake(10);
+        this.hurtFlash.set(ev.pid, 0.12);
+        if (mine) this.addShake(10);
         break;
       case 'playerDeath':
-        this.sfx.death();
-        this.lastLost = ev.lost;
+        if (mine) {
+          this.sfx.death();
+          this.lastLost = ev.lost;
+        }
         fx.inkBurst(ev.x, ev.y - 24, 1, 20, 400, C.red);
         fx.inkBurst(ev.x, ev.y - 24, -1, 20, 400, C.ink);
-        this.slowmo = 0.6;
-        this.addShake(14);
+        if (mine) {
+          this.setSlowmo(0.6);
+          this.addShake(14);
+        }
         break;
       case 'respawn':
         fx.mist(ev.x, ev.y - 20, 14, { color: C.ink, size: 10, alpha: 0.25, spread: 30, vy: -30, life: 0.8, front: true });
         fx.ring(ev.x, ev.y - 24, 10, 60, 0.5, C.ink, 4);
-        this.sfx.spawn();
+        if (hear(ev.x)) this.sfx.spawn();
         break;
       case 'jump':
-        this.sfx.jump(ev.double);
+        if (hear(ev.x)) this.sfx.jump(ev.double);
         if (ev.double) fx.ring(ev.x, ev.y - 4, 4, 28, 0.3, C.wash, 2.5);
         else fx.dust(ev.x, ev.y, 0, 5);
         break;
       case 'wallJump':
-        this.sfx.jump(false);
+        if (hear(ev.x)) this.sfx.jump(false);
         fx.dust(ev.x, ev.y, ev.dir, 6);
         break;
       case 'land':
         if (ev.impact > 450) {
           fx.dust(ev.x, ev.y, 1, 4);
           fx.dust(ev.x, ev.y, -1, 4);
-          this.sfx.land(ev.impact > 850);
-          if (ev.impact > 850) this.addShake(4);
+          if (hear(ev.x)) this.sfx.land(ev.impact > 850);
+          if (ev.impact > 850 && mine) this.addShake(4);
         }
         break;
       case 'dash':
-        this.sfx.dash();
+        if (hear(ev.x)) this.sfx.dash();
         fx.mist(ev.x - ev.dir * 10, ev.y - 24, 6, { color: C.wash, size: 8, alpha: 0.25, vx: -ev.dir * 80 });
         break;
       case 'slide':
-        this.sfx.dash();
+        if (hear(ev.x)) this.sfx.dash();
         fx.dust(ev.x, ev.y, -ev.dir, 8);
         break;
       case 'iaiStart':
-        this.sfx.iaiCharge();
+        if (mine) this.sfx.iaiCharge();
         break;
       case 'iaiReady':
-        this.sfx.iaiReady();
+        if (hear(ev.x)) this.sfx.iaiReady();
         fx.ring(ev.x, ev.y, 34, 4, 0.25, C.red, 2.5);
         break;
       case 'iai': {
-        this.sfx.iai(ev.full);
+        if (hear(ev.x0) || this.near(ev.x1)) this.sfx.iai(ev.full);
         const y = ev.y - 26;
-        const dir = Math.sign(ev.x1 - ev.x0) || this.me.facing;
+        const dir = Math.sign(ev.x1 - ev.x0) || (this.player(ev.pid) ?? this.me).facing;
         const xa = ev.x0 - dir * 20;
         const xb = ev.x1 + dir * 40;
         const pts: Pt[] = [];
         for (let i = 0; i <= 12; i++) pts.push({ x: lerp(xa, xb, i / 12), y: y + (Math.random() - 0.5) * 2 });
         fx.line(pts, ev.full ? 10 : 6.5, C.ink, 0.95, 0.55, true);
         fx.line(pts.map((q) => ({ x: q.x, y: q.y + 1 })), 2, C.red, 0.9, 0.65, true);
-        if (this.lastPlayerPose) {
-          for (let i = 0; i < 5; i++) fx.ghost(this.lastPlayerPose, lerp(ev.x0, ev.x1, i / 5), ev.y, dir, 0, 0.3 + i * 0.04, C.wash, 0.45);
+        const ghostPose = this.lastPlayerPose.get(ev.pid);
+        if (ghostPose) {
+          for (let i = 0; i < 5; i++) fx.ghost(ghostPose, lerp(ev.x0, ev.x1, i / 5), ev.y, dir, 0, 0.3 + i * 0.04, C.wash, 0.45);
         }
         fx.dust(ev.x0, ev.y, -dir, 10);
-        this.addShake(ev.full ? 14 : 9);
-        this.flash = ev.full ? 0.12 : 0.07;
-        this.zoomPunch = ev.full ? 0.08 : 0.05;
+        if (mine) {
+          this.addShake(ev.full ? 14 : 9);
+          this.flash = ev.full ? 0.12 : 0.07;
+          this.zoomPunch = ev.full ? 0.08 : 0.05;
+        }
         if (ev.count > 0) {
-          this.slowmo = ev.full ? 0.45 : 0.3;
+          if (mine) this.setSlowmo(ev.full ? 0.45 : 0.3);
           this.popKanji('斬', ev.x1 + dir * 34, y - 44, '#15120e', ev.full ? 96 : 72);
         }
         break;
       }
       case 'plungeLand':
-        this.sfx.land(true);
+        if (hear(ev.x)) this.sfx.land(true);
         fx.ring(ev.x, ev.y - 2, 6, 62, 0.35, C.ink, 4);
         fx.dust(ev.x, ev.y, 1, 8);
         fx.dust(ev.x, ev.y, -1, 8);
-        this.addShake(8);
+        if (mine) this.addShake(8);
         break;
       case 'windSlash':
         this.sfx.swing(true);
         fx.mist(ev.x, ev.y, 4, { color: C.wash, size: 6, alpha: 0.3, vx: ev.dir * 200 });
         break;
-      case 'orb':
-        this.orbStreak++;
-        this.orbStreakT = 0.6;
-        this.sfx.orb(this.orbStreak, ev.lost);
-        if (ev.value >= 5 || ev.lost) fx.sparks(this.me.x, this.me.y - 26, 2, ev.lost ? C.red : C.ink, 160);
+      case 'orb': {
+        const p = this.player(ev.pid) ?? this.me;
+        if (mine) {
+          this.orbStreak++;
+          this.orbStreakT = 0.6;
+          this.sfx.orb(this.orbStreak, ev.lost);
+        }
+        if (ev.value >= 5 || ev.lost) fx.sparks(p.x, p.y - 26, 2, ev.lost ? C.red : C.ink, 160);
         break;
-      case 'levelUp':
-        this.sfx.levelUp();
-        fx.ring(this.me.x, this.me.y - 24, 10, 70, 0.5, C.red, 3);
-        this.popKanji('昇', this.me.x, this.me.y - 70, '#b8321f', 40);
+      }
+      case 'levelUp': {
+        const p = this.player(ev.pid) ?? this.me;
+        if (mine) this.sfx.levelUp();
+        fx.ring(p.x, p.y - 24, 10, 70, 0.5, C.red, 3);
+        this.popKanji('昇', p.x, p.y - 70, '#b8321f', 40);
         break;
+      }
       case 'pick': {
+        const p = this.player(ev.pid) ?? this.me;
         const t = UPGRADE_TEXT[ev.upgrade];
-        this.sfx.pick();
-        this.popKanji(t.kanji, this.me.x, this.me.y - 72, '#15120e', 48);
-        fx.ring(this.me.x, this.me.y - 24, 40, 6, 0.3, C.ink, 3);
+        if (mine) this.sfx.pick();
+        this.popKanji(t.kanji, p.x, p.y - 72, '#15120e', 48);
+        fx.ring(p.x, p.y - 24, 40, 6, 0.3, C.ink, 3);
         break;
       }
       case 'checkpoint':
-        this.sfx.bell();
         fx.ring(ev.x, ev.y - 40, 6, 50, 0.6, C.red, 3);
+        if (!mine) break;
+        this.sfx.bell();
         this.hud.banner('社', 'Shrine', 'rebirth point · life restored', '#15120e', 1100);
         break;
       case 'despawn':
@@ -1046,7 +1199,7 @@ export class GameScene extends Phaser.Scene {
         this.prev.clear();
         this.phase.clear();
         this.lastPose.clear();
-        this.scarf = [];
+        this.scarf.clear();
         this.lastLost = 0;
         this.sfx.taiko(false);
         {
