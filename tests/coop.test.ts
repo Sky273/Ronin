@@ -947,6 +947,433 @@ function nonFinite(w: World): string[] {
   check('solo : byPlayer absent (\'byPlayer\' in w.stage === false)', absent);
 }
 
+// ─── 20. Kekkai : cas limites (à cheval, recul, iai, mur, ninja, gardien, orbes, cor) ─
+{
+  /** Monde coop, arène fermée par A, gardien figé ; renforts coupés. */
+  const sealed = (seed: number) => {
+    const w = createWorld(seed, { mode: 'coop' });
+    w.spawnTimer = 1e9;
+    w.wave.t = -1e9;
+    const a = addPlayer(w, 'A');
+    const b = addPlayer(w, 'B');
+    a.iframes = b.iframes = 1e9;
+    warpToArena(w, a.id);
+    run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+    const g = w.enemies.find((e) => e.id === w.stage.guardianId)!;
+    g.freeze = 1e9;
+    const col = w.level.arena.col;
+    return { w, a, b, g, col, limit: (col + 1) * TILE };
+  };
+  const putAt = (w: World, p: Player, x: number) => place(w, p, x, w.level.arena.guardianY);
+
+  // K6. À cheval sur la colonne à la fermeture : B peut finir d'entrer, puis ne ressort plus.
+  {
+    let ok = true;
+    const info: string[] = [];
+    for (const off of [-12, 0, 12, 24]) {
+      const w = createWorld(808, { mode: 'coop' });
+      w.spawnTimer = 1e9;
+      w.wave.t = -1e9;
+      const a = addPlayer(w, 'A');
+      const b = addPlayer(w, 'B');
+      a.iframes = b.iframes = 1e9;
+      const col = w.level.arena.col;
+      const limit = (col + 1) * TILE;
+      warpToArena(w, a.id);
+      for (let i = 0; i < 40 && stateOf(w) !== 'arena'; i++) {
+        putAt(w, b, col * TILE + 16 + off);
+        run(w, 1, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+      }
+      const locked = stateOf(w) === 'arena';
+      run(w, 90, (_t, id) => (id === b.id ? BTN.RIGHT : 0));
+      let minLeft = Infinity;
+      run(w, 180, (t, id) => (id === b.id ? (t % 40 < 30 ? BTN.LEFT : BTN.LEFT | BTN.DASH) : 0), () => (minLeft = Math.min(minLeft, b.x - b.w / 2)));
+      ok &&= locked && minLeft >= limit - 0.5;
+      info.push(`${off}:${locked ? '' : 'non fermée '}${(minLeft - limit).toFixed(1)}`);
+    }
+    check('kekkai : à cheval à la fermeture, on finit d’entrer puis on ne ressort plus', ok, info.join(' '));
+  }
+
+  // K7. Recul d'un coup venu de l'intérieur (projeté vers la sortie) : on reste dedans.
+  {
+    let worst = Infinity;
+    for (const dmg of [5, 25, 60]) {
+      const { w, a, limit } = sealed(808);
+      putAt(w, a, limit + a.w / 2 + 1);
+      for (let i = 0; i < 5; i++) {
+        a.iframes = 0;
+        a.hp = a.maxHp;
+        if (a.state !== 'dead') {
+          a.state = 'normal';
+          damagePlayer(w, a, dmg, a.x + 30);
+        }
+        run(w, 20, () => BTN.LEFT, () => (worst = Math.min(worst, a.x - a.w / 2 - limit)));
+      }
+    }
+    check('kekkai : recul vers la sortie (5, 25, 60 dégâts), on reste dedans', worst >= -0.5, `marge ${worst.toFixed(2)} px`);
+  }
+
+  // K8. Iai chargé vers la gauche, à toutes les distances de la barrière (0 à 200 px).
+  {
+    let worst = Infinity;
+    for (let d = 0; d <= 200; d += 5) {
+      const { w, a, limit } = sealed(808);
+      putAt(w, a, limit + a.w / 2 + 0.01 + d);
+      a.facing = -1;
+      run(w, 100, (t) => (t % 50 < 40 ? BTN.IAI | BTN.LEFT : BTN.LEFT), () => (worst = Math.min(worst, a.x - a.w / 2 - limit)));
+    }
+    check('kekkai : iai chargé vers la gauche, jamais dehors', worst >= -0.5, `marge ${worst.toFixed(2)} px`);
+  }
+
+  // K9. Saut mural, plongeon, dash et glissade contre la barrière depuis l'intérieur ; de dehors, pas de mur.
+  {
+    const { w, a, b, limit } = sealed(808);
+    putAt(w, a, limit + 40);
+    let worst = Infinity;
+    let slid = false;
+    const seq = [BTN.LEFT | BTN.JUMP, BTN.LEFT, BTN.LEFT | BTN.JUMP, BTN.RIGHT | BTN.JUMP, BTN.LEFT | BTN.DOWN | BTN.ATTACK, BTN.DOWN | BTN.ATTACK, BTN.LEFT | BTN.DASH, BTN.LEFT | BTN.DOWN];
+    run(w, 2400, (t, id) => (id === a.id ? seq[((t / 7) | 0) % seq.length] : 0), () => {
+      worst = Math.min(worst, a.x - a.w / 2 - limit);
+      slid ||= a.wallDir === -1 && a.x < limit + 2 * TILE;
+    });
+    check('kekkai : saut mural, plongeon, dash, glissade depuis l’intérieur, jamais dehors', worst >= -0.5, `marge ${worst.toFixed(2)} px`);
+    check('kekkai : depuis l’intérieur, la barrière sert de mur (glissade murale)', slid);
+    putAt(w, b, limit - TILE - 60);
+    let wallOut = false;
+    run(w, 120, (t, id) => (id === b.id ? (t % 20 < 3 ? BTN.RIGHT | BTN.JUMP : BTN.RIGHT) : 0), () => (wallOut ||= b.wallDir === 1 && b.x < limit));
+    check('kekkai : de dehors, aucune glissade murale dessus, B entre en sautant', !wallOut && b.x - b.w / 2 > limit, `x−limite ${(b.x - limit).toFixed(0)}`);
+  }
+
+  // K10. Ninja resté dehors, sa cible dehors juste devant la barrière : sa disparition ne le fait pas
+  // réapparaître dans l'arène (le point « dans le dos » de la cible est de l'autre côté du kekkai).
+  {
+    const crossed: string[] = [];
+    let tried = 0;
+    for (const dx of [8, 12, 20]) {
+      for (const facing of [-1, 1] as const) {
+        const { w, b, col } = sealed(808);
+        putAt(w, b, col * TILE - dx);
+        b.facing = facing;
+        const n = spawnEnemy(w, 'ninja', b.x - 90, b.y, false);
+        n.state = 'chase';
+        n.dodgeCd = 0;
+        tried++;
+        let maxRight = -Infinity;
+        run(w, 120, () => 0, () => {
+          b.facing = facing;
+          if (w.enemies.includes(n)) maxRight = Math.max(maxRight, n.x + n.w / 2);
+        });
+        if (maxRight > col * TILE + 0.5) crossed.push(`dx ${dx} face ${facing} → x−limite ${(n.x - (col + 1) * TILE).toFixed(0)}, vise ${targetPlayer(w, n)?.name ?? '-'}`);
+      }
+    }
+    check('kekkai : un ninja de dehors ne se téléporte jamais dans l’arène', crossed.length === 0, `${crossed.length}/${tried} : ${crossed.slice(0, 2).join(' ; ')}`);
+  }
+
+  // K11. Le gardien qui charge ou bondit vers la barrière ne la franchit jamais.
+  {
+    let worst = Infinity;
+    for (let s = 0; s < 6; s++) {
+      const { w, a, g, limit } = sealed(808 + s);
+      g.freeze = 0;
+      g.state = 'chase';
+      putAt(w, a, limit + 30);
+      run(w, 3000, (t, id) => (id === a.id ? (t % 120 < 60 ? BTN.LEFT : BTN.LEFT | BTN.JUMP) : 0), () => {
+        if (w.enemies.includes(g)) worst = Math.min(worst, g.x - g.w / 2 - limit);
+        a.hp = a.maxHp;
+      });
+    }
+    check('kekkai : le gardien (charge, bond) reste dans l’arène', worst >= -0.5, `marge ${worst.toFixed(2)} px`);
+  }
+
+  // K12. Orbes : une orbe lancée vers la sortie s'arrête ; une orbe de l'arène n'est pas aspirée à travers.
+  {
+    const { w, a, b, limit } = sealed(808);
+    putAt(w, a, limit + 600);
+    putAt(w, b, limit - 600);
+    w.orbs.push({ id: w.nextId++, x: limit + 10, y: a.y - 40, vx: -500, vy: -100, value: 3, life: 600, lost: false, onGround: false });
+    let minX = Infinity;
+    run(w, 60, () => 0, () => w.orbs.forEach((o) => (minX = Math.min(minX, o.x))));
+    check('kekkai : une orbe lancée vers la sortie s’y arrête', minX >= limit - 3.5, `x−limite ${(minX - limit).toFixed(1)}`);
+
+    const s2 = sealed(808);
+    putAt(s2.w, s2.b, s2.col * TILE - 10);
+    putAt(s2.w, s2.a, s2.limit + 400);
+    s2.w.orbs.push({ id: s2.w.nextId++, x: s2.limit + 30, y: s2.b.y - 20, vx: 0, vy: 0, value: 7, life: 600, lost: false, onGround: false });
+    const h0 = s2.b.honor;
+    run(s2.w, 120);
+    check('kekkai : une orbe de l’arène n’est pas aspirée par un joueur resté dehors', s2.b.honor === h0, `Honneur de B ${h0} → ${s2.b.honor}`);
+  }
+
+  // K13. Renforts du cor, gardien collé à la barrière : tous dans l'arène.
+  {
+    let worst = Infinity;
+    let adds = 0;
+    for (let s = 0; s < 30; s++) {
+      const { w, g, limit } = sealed(900 + s);
+      g.x = limit + 60 + (s % 5) * 10;
+      g.freeze = 0;
+      g.hp = Math.floor(g.maxHp * 0.3);
+      const seen = new Set(w.enemies.map((e) => e.id));
+      run(w, 600, () => 0, () => {
+        for (const e of w.enemies) {
+          if (seen.has(e.id)) continue;
+          seen.add(e.id);
+          adds++;
+          worst = Math.min(worst, e.x - e.w / 2 - limit);
+        }
+      });
+    }
+    check('cor : renforts tous entièrement dans l’arène', adds > 0 && worst >= 0, `${adds} renforts, marge ${worst.toFixed(1)} px`);
+  }
+}
+
+// K14. Ninja déjà disparu (destination dans l'arène choisie avant la fermeture) : il ne doit pas
+// réapparaître dedans une fois le kekkai fermé.
+{
+  const w = createWorld(808, { mode: 'coop' });
+  w.spawnTimer = 1e9;
+  w.wave.t = -1e9;
+  const a = addPlayer(w, 'A');
+  const b = addPlayer(w, 'B');
+  a.iframes = b.iframes = 1e9;
+  const col = w.level.arena.col;
+  const limit = (col + 1) * TILE;
+  place(w, b, col * TILE - 10, w.level.arena.guardianY);
+  const n = spawnEnemy(w, 'ninja', b.x - 80, b.y, false);
+  n.state = 'hidden';
+  n.stateT = 0;
+  n.tx = b.x + 56; // « dans le dos » de B, de l'autre côté de la barrière
+  warpToArena(w, a.id);
+  run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+  const alive = w.enemies.includes(n);
+  check('kekkai : un ninja disparu avant la fermeture ne réapparaît pas dans l’arène', stateOf(w) === 'arena' && (!alive || n.x + n.w / 2 <= col * TILE + 0.5), alive ? `x−limite ${(n.x - limit).toFixed(0)}, état ${n.state}` : 'retiré');
+}
+
+// K15. Les sabres ne traversent pas le kekkai (gardien → joueur dehors, joueur dehors → gardien).
+// B reste dehors, collé à la barrière, et attaque ; le gardien, collé de l'autre côté, balaie vers lui.
+// Témoin en solo (même scène, barrière pleine) : les coups portent, le test discrimine.
+{
+  const duel = (mode: 'solo' | 'coop') => {
+    const w = createWorld(808, { mode });
+    w.spawnTimer = 1e9;
+    w.wave.t = -1e9;
+    const a = addPlayer(w, 'A');
+    const b = addPlayer(w, 'B');
+    a.iframes = 1e9;
+    warpToArena(w, a.id);
+    run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+    const locked = stateOf(w) === 'arena';
+    const col = w.level.arena.col;
+    const limit = (col + 1) * TILE;
+    const g = w.enemies.find((e) => e.id === w.stage.guardianId)!;
+    w.enemies = [g]; // seul le gardien : aucun ennemi du dehors ne vient toucher B
+    place(w, a, w.level.pxW - 4 * TILE, w.level.arena.guardianY); // A loin, au fond
+    const bx = col * TILE - 10;
+    place(w, b, bx, w.level.arena.guardianY);
+    g.x = limit + g.w / 2 + 2;
+    g.vx = 0;
+    g.state = 'chase';
+    const hp0 = b.hp;
+    const ghp0 = g.hp;
+    let bHurt = false;
+    run(w, 600, (t, id) => (id === b.id ? (t % 12 < 2 ? BTN.ATTACK : 0) : 0), (w) => {
+      // B ne doit pas entrer (l'élan de son attaque le porterait dedans) ; le gardien balaie vers la gauche.
+      b.x = Math.min(b.x, bx);
+      b.facing = 1;
+      g.x = Math.min(g.x, limit + g.w / 2 + 2);
+      g.facing = -1;
+      if (w.tick % 70 === 0 && g.state !== 'attack') {
+        g.state = 'windup';
+        g.move = 'sweep';
+        g.stateT = 0;
+      }
+      b.iframes = 0;
+      bHurt ||= b.hp < hp0;
+      if (b.state === 'dead') b.hp = b.maxHp;
+    });
+    return { locked, bHurt, hp: `${hp0} → ${b.hp}`, gHurt: g.hp < ghp0, ghp: `${ghp0} → ${g.hp}`, arena: stateOf(w) === 'arena' };
+  };
+  const solo = duel('solo');
+  const coop = duel('coop');
+  check('témoin solo : gardien et B se touchent à travers la barrière pleine (le test discrimine)', solo.locked && solo.bHurt && solo.gHurt, `PV B ${solo.hp}, gardien ${solo.ghp}`);
+  check('kekkai : le gardien collé à la barrière ne touche pas B dehors', coop.locked && coop.arena && !coop.bHurt, `PV B ${coop.hp}`);
+  check('kekkai : B dehors ne touche pas le gardien à travers la barrière', coop.locked && !coop.gHurt, `PV gardien ${coop.ghp}`);
+}
+
+// ─── 21. Vote du bilan : départs, seul, 12 joueurs, morts, choix d'amélioration ─
+{
+  const atClear = (n: number) => {
+    const w = createWorld(1234, { mode: 'coop' });
+    const ps = Array.from({ length: n }, (_, i) => addPlayer(w, `p${i}`));
+    w.stage.state = 'cleared';
+    w.stage.t = 0;
+    return { w, ps };
+  };
+  const press = (w: World, who: Player[], btn = BTN.JUMP) => run(w, 1, (_t, id) => (who.some((p) => p.id === id) ? btn : 0));
+
+  // Départ d'un non-votant : 2 prêts sur 4 → il en reste 3, la majorité est atteinte au tick suivant.
+  {
+    const { w, ps } = atClear(4);
+    run(w, 95);
+    press(w, [ps[0], ps[1]]);
+    const before = stateOf(w);
+    removePlayer(w, ps[3].id);
+    run(w, 1);
+    check('vote : le départ d’un non-votant (2/4 → 2/3) fait passer', before === 'cleared' && stateOf(w) === 'playing' && w.level.stage === 1, `${before} → ${stateOf(w)}`);
+  }
+  // Départ d'un votant : son vote part avec lui (2/4 → 1/3, on reste).
+  {
+    const { w, ps } = atClear(4);
+    run(w, 95);
+    press(w, [ps[0], ps[1]]);
+    removePlayer(w, ps[0].id);
+    run(w, 5);
+    const stay = stateOf(w);
+    press(w, [ps[2]]);
+    check('vote : le départ d’un votant retire son vote (1/3 reste, 2/3 passe)', stay === 'cleared' && stateOf(w) === 'playing', `${stay} → ${stateOf(w)}`);
+  }
+  // Tout le monde part pendant le bilan : pas d'exception, passage au délai, étape suivante vide.
+  {
+    const { w, ps } = atClear(3);
+    run(w, 95);
+    press(w, [ps[0]]);
+    for (const p of ps) removePlayer(w, p.id);
+    let err = '';
+    try {
+      run(w, COOP_CLEARED_TICKS);
+    } catch (x) {
+      err = String(x);
+    }
+    check('vote : salle vidée pendant le bilan, passage au délai sans erreur', err === '' && stateOf(w) === 'playing' && w.level.stage === 1 && JSON.stringify(w.stage.byPlayer) === '{}', err || stateOf(w));
+  }
+  // 12 joueurs : 6 votes ne suffisent pas, le 7e fait passer.
+  {
+    const { w, ps } = atClear(12);
+    run(w, 95);
+    press(w, ps.slice(0, 6));
+    run(w, 3);
+    const six = stateOf(w);
+    press(w, [ps[6]]);
+    check('vote à 12 : 6 votes ne suffisent pas, 7 oui', six === 'cleared' && stateOf(w) === 'playing', `${six} → ${stateOf(w)}`);
+  }
+  // Les morts votent ; à la sortie du bilan ils sont vivants au départ, la pénalité appliquée.
+  {
+    const { w, ps } = atClear(3);
+    for (const p of ps.slice(0, 2)) {
+      p.honor = 500;
+      p.up.parry = 2;
+      kill(w, p);
+      p.respawnT = 1e6; // encore morts au passage
+    }
+    run(w, 95);
+    press(w, ps.slice(0, 2));
+    check(
+      'vote : deux morts sur 3 votent et font passer ; ils repartent vivants, pénalité appliquée',
+      stateOf(w) === 'playing' && ps.every((p) => pState(p) !== 'dead' && p.x === w.level.spawn.x) && ps.slice(0, 2).every((p) => p.honor === 0 && p.up.parry === 0),
+      ps.map((p) => `${pState(p)}/${p.honor}`).join(' '),
+    );
+  }
+  // Choisir une amélioration pendant le bilan ne vaut pas vote ; JUMP sert de vote même avec un choix en attente.
+  {
+    const { w, ps } = atClear(1);
+    const p = ps[0];
+    p.picks = 1;
+    p.offer = ['parry', 'magnet', 'leech'] as typeof p.offer;
+    run(w, 95);
+    press(w, [p], BTN.PICK1);
+    const picked = p.picks === 0 && p.up.parry === 1;
+    const still = stateOf(w);
+    run(w, 1);
+    press(w, [p], BTN.ATTACK);
+    check('bilan : PICK1 applique l’amélioration sans voter ; ATTACK vote ensuite', picked && still === 'cleared' && stateOf(w) === 'playing' && p.up.parry === 1, `picks=${p.picks} parry=${p.up.parry} ${still}`);
+  }
+}
+
+// ─── 22. Statistiques sur une longue partie à plusieurs, arrivées et départs compris ─
+// Invariant : Σ fiches présentes + Σ fiches des partis (relevées au départ) = compteurs de l'étape.
+{
+  const w = createWorld(31337, { mode: 'coop', difficulty: 'easy' });
+  const input = scripted(2024);
+  for (let i = 0; i < 5; i++) addPlayer(w, `p${i}`, { color: i });
+  type K = 'kills' | 'deaths' | 'parries' | 'honor';
+  const KS: K[] = ['kills', 'deaths', 'parries', 'honor'];
+  let gone: Record<K, number> = { kills: 0, deaths: 0, parries: 0, honor: 0 };
+  let stage = w.level.stage;
+  let checks = 0;
+  let bad = '';
+  let stages = 0;
+  let joins = 0;
+  let leaves = 0;
+  let next = 6;
+  for (let t = 0; t < 24000; t++) {
+    if (w.level.stage !== stage) {
+      stage = w.level.stage;
+      gone = { kills: 0, deaths: 0, parries: 0, honor: 0 };
+      stages++;
+    }
+    if (t % 700 === 350 && w.players.length > 2) {
+      const p = w.players[(t / 700) % w.players.length | 0];
+      const s = w.stage.byPlayer?.[p.id];
+      if (s) for (const k of KS) gone[k] += s[k];
+      removePlayer(w, p.id);
+      leaves++;
+    }
+    if (t % 900 === 100 && w.players.length < 8) {
+      addPlayer(w, `p${next++}`);
+      joins++;
+    }
+    if (t % 500 === 250) for (const p of w.players) if (p.state !== 'dead' && (p.id + t) % 3 === 0) kill(w, p);
+    if (t % 3000 === 1500 && stateOf(w) === 'playing') warpToArena(w);
+    if (t % 3000 === 2000 && stateOf(w) === 'arena') {
+      const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+      if (g && w.players[0]) killEnemy(w, g, w.players[0], 0, false);
+    }
+    if (t % 3000 === 2100 && stateOf(w) === 'gateOpen') {
+      const p = w.players.find((q) => q.state !== 'dead');
+      if (p) place(w, p, w.level.gate.x - 4, w.level.gate.y);
+    }
+    run(w, 1, input);
+    if (t % 50 === 0 || stateOf(w) === 'cleared') {
+      const by = w.stage.byPlayer ?? {};
+      checks++;
+      const ids = Object.keys(by).map(Number).sort((a, b) => a - b).join();
+      const pids = w.players.map((p) => p.id).sort((a, b) => a - b).join();
+      if (ids !== pids) bad ||= `t=${t} fiches ${ids} ≠ joueurs ${pids}`;
+      for (const k of KS) {
+        const sum = Object.values(by).reduce((s, x) => s + x[k], 0) + gone[k];
+        if (sum !== w.stage[k]) bad ||= `t=${t} ${k} Σ ${sum} ≠ ${w.stage[k]} (étape ${w.level.stage}, ${w.stage.state})`;
+      }
+      const best = Math.max(0, ...Object.values(by).map((x) => x.bestCombo));
+      if (best > w.stage.bestCombo) bad ||= `t=${t} bestCombo fiche ${best} > étape ${w.stage.bestCombo}`;
+    }
+  }
+  check('S8 : partie longue significative (étapes, arrivées, départs)', stages >= 2 && joins >= 5 && leaves >= 5, `${stages} étapes, ${joins} arrivées, ${leaves} départs`);
+  check('S8 : Σ fiches (+ partis) = compteurs de l’étape à chaque relevé, une fiche par présent', bad === '', bad || `${checks} relevés`);
+}
+
+// ─── 23. Mort dehors pendant l'arène, puis réouverture : renaissance au sanctuaire ─
+{
+  const w = createWorld(808, { mode: 'coop' });
+  w.spawnTimer = 1e9;
+  const a = addPlayer(w, 'A');
+  const b = addPlayer(w, 'B');
+  a.iframes = 1e9;
+  const limit = (w.level.arena.col + 1) * TILE;
+  warpToArena(w, a.id);
+  run(w, 30, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+  const locked = stateOf(w) === 'arena';
+  kill(w, b); // B meurt dehors
+  run(w, 10);
+  kill(w, a); // plus personne dedans : réouverture
+  run(w, 2);
+  const reopened = stateOf(w) === 'playing';
+  const evs = run(w, PLAYER.RESPAWN_TICKS + 10);
+  const rb = evs.find((ev) => ev.type === 'respawn' && ev.pid === b.id);
+  const ra = evs.find((ev) => ev.type === 'respawn' && ev.pid === a.id);
+  check('arène rouverte avant la renaissance : B (mort dehors) renaît au sanctuaire', locked && reopened && !!rb && rb.type === 'respawn' && rb.x === b.spawnX && rb.x < limit, rb && rb.type === 'respawn' ? `x=${(rb.x / TILE).toFixed(1)}` : 'pas de renaissance');
+  check('arène rouverte : A (mort dedans) renaît aussi au sanctuaire', !!ra && ra.type === 'respawn' && ra.x === a.spawnX && ra.x < limit);
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

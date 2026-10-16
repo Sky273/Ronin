@@ -5,10 +5,12 @@
 // monotone, événements ni perdus ni dupliqués (un `kill` montré une seule fois), rien de bloqué.
 // Lancer : npm run test:netqa
 import { PREDICTED_TYPES } from '../client/net/eventGate';
+import { buildRoster, readyInfo } from '../client/ui/roster';
 import { BTN } from '../shared/input';
 import { damagePlayer, killEnemy } from '../shared/interactions';
 import { Rng } from '../shared/math';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { COOP_READY_AFTER } from '../shared/constants';
 import { MAX_REWIND_TICKS, SNAP_EVERY } from '../shared/net/protocol';
 import { CoopSession } from '../server/session';
 import { findGround, spawnEnemy } from '../shared/enemy';
@@ -557,6 +559,183 @@ for (const lag of LATS) {
   }
   const ctl = parryBench(0, false);
   check('témoin sans compensation : la même parade échoue (le test discrimine)', ctl.attacks > 10 && ctl.hurt > ctl.attacks / 2, `${ctl.attacks} attaques, ${ctl.parries} parades, ${ctl.hurt} touche(s)`);
+}
+
+// ─── 4. M3 : bilan coop en ligne (3 clients, 75 ms + gigue 20 ms) ───────────
+{
+  const bench = new NetBench({ seed: 33, lagMs: 75, jitterMs: 20 });
+  const cs = [bench.addClient('Ayame'), bench.addClient('Benkei'), bench.addClient('Chiyo')];
+  const w = bench.session.world;
+  const calm = (): void => {
+    w.spawnTimer = 1e6;
+    for (const p of w.players) p.iframes = 1e6;
+  };
+  bench.run(1000, () => 0, calm);
+  // Le premier joueur ferme l'arène et le gardien tombe ; il franchit la porte : bilan.
+  const a = bench.serverPlayer(cs[0].pid)!;
+  warpToArena(w, a.id);
+  bench.run(600, (i) => (i === 0 ? BTN.RIGHT : 0), calm);
+  const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+  if (g) killEnemy(w, g, a, 0, false);
+  bench.run(200, () => 0, calm);
+  a.x = w.level.gate.x - 40;
+  a.y = w.level.gate.y;
+  a.vx = a.vy = 0;
+  let clearedAt = -1;
+  bench.run(1500, (i) => (i === 0 ? BTN.RIGHT : 0), () => {
+    calm();
+    if (clearedAt < 0 && w.stage.state === 'cleared') clearedAt = bench.metrics.frames;
+  });
+  check('bilan coop atteint en ligne', w.stage.state === 'cleared', w.stage.state);
+  // Attendre que les votes comptent, puis voir le récapitulatif chez chaque client.
+  bench.run(((COOP_READY_AFTER + 20) * 1000) / 60, () => 0, calm);
+  const rows = cs.map((c) => buildRoster(c.src.world, c.pid));
+  check('chaque client voit le récapitulatif des 3 joueurs (statistiques transmises)', rows.every((r) => r.length === 3 && r.filter((x) => x.me).length === 1) && cs.every((c) => !!c.src.world.stage.byPlayer), rows.map((r) => r.length).join());
+  check('readyInfo : 2 votes nécessaires sur 3', readyInfo(cs[0].src.world).needed === 2);
+  const level0 = w.level.stage;
+  // Un seul vote (A) : on reste au bilan.
+  bench.run(300, (i, f) => (i === 0 && f % 20 < 3 ? BTN.JUMP : 0), calm);
+  // Laisser le temps au vote d'arriver chez les autres clients (latence + recul d'affichage).
+  bench.run(400, () => 0, calm);
+  const oneVote = w.stage.state === 'cleared';
+  const shownReady = readyInfo(cs[1].src.world).ready;
+  // Deuxième vote (B) : on repart.
+  bench.run(400, (i, f) => (i === 1 && f % 20 < 3 ? BTN.JUMP : 0), calm);
+  bench.run(600, () => 0, calm);
+  check('un seul vote sur 3 : le bilan reste affiché ; le vote est vu par les autres clients', oneVote && shownReady === 1, `prêts vus par B : ${shownReady}`);
+  check('deux votes sur 3 : étape suivante', w.level.stage === level0 + 1 && w.stage.state === 'playing', `${w.stage.state} étape ${w.level.stage}`);
+  check('hors bilan : statistiques par joueur plus transmises', cs.every((c) => c.src.world.stage.byPlayer === undefined));
+}
+
+// ─── 5. M3 : partie complète à 4 clients (75 ms + gigue 20 ms) ──────────────
+// A ferme l'arène, D (resté dehors) la rejoint en traversant le kekkai puis pousse vers la sortie ;
+// gardien vaincu, bilan voté (3 votes sur 4), étape suivante. Tailles d'instantané hors bilan / bilan.
+{
+  const bench = new NetBench({ seed: 45, lagMs: 75, jitterMs: 20 });
+  const cs = ['Ayame', 'Benkei', 'Chiyo', 'Daisuke'].map((n) => bench.addClient(n));
+  const logs = bench.clients.map(instrument);
+  const state = { since: 0 };
+  const w = bench.session.world;
+  const limit = (w.level.arena.col + 1) * 32;
+  const sp = (i: number) => bench.serverPlayer(cs[i].pid)!;
+  /** Corrections > 32 px sans recalage net, relevées à chaque réconciliation (client:état:px). */
+  const big: string[] = [];
+  const corr = cs.map((c) => {
+    const log = { px: [] as number[], snapped: [] as boolean[] };
+    const pred = c.src.predictor;
+    const orig = pred.reconcile.bind(pred);
+    pred.reconcile = (self, ack, ctx, enemiesAt) => {
+      const s0 = pred.snaps;
+      orig(self, ack, ctx, enemiesAt);
+      log.px.push(pred.lastCorrectionPx);
+      log.snapped.push(pred.snaps !== s0);
+      if (pred.snaps === s0 && pred.lastCorrectionPx > 32) big.push(`${c.src.world.players.find((p) => p.id === c.pid)?.name}:${w.stage.state}:${pred.lastCorrectionPx.toFixed(0)}px`);
+    };
+    return log;
+  });
+  const clear = (i: number) => (corr[i].px.length = corr[i].snapped.length = 0);
+  const freezeGuardian = (on: boolean) => {
+    w.spawnTimer = 1e6;
+    for (const p of w.players) p.iframes = 1e6;
+    w.enemies = w.enemies.filter((e) => e.type === 'boss' || (w.stage.state === 'arena' && e.x > limit));
+    for (const e of w.enemies) e.freeze = on ? 1e9 : 0;
+  };
+  const bytes: { playing: number[]; arena: number[]; cleared: number[] } = { playing: [], arena: [], cleared: [] };
+  let err = '';
+  let dEntered = false;
+  let dShownMin = Infinity;
+  let bShownMax = -Infinity;
+  let pDuring = '';
+  let rosterOk = false;
+  let rosterInfo = '';
+  let needed = -1;
+  const level0 = w.level.stage;
+  try {
+    runQA(bench, state, logs, 1500, () => 0, { onFrame: () => freezeGuardian(true) });
+    // B, C, D attendent à 6 tuiles de la barrière ; A ferme l'arène.
+    for (const i of [1, 2, 3]) {
+      const p = sp(i);
+      p.x = limit - (6 + i) * 32;
+      p.y = findGround(w.level, p.x, w.level.arena.guardianY, 12) ?? p.y;
+      p.vx = p.vy = 0;
+    }
+    warpToArena(w, cs[0].pid);
+    runQA(bench, state, logs, 1500, (i) => (i === 0 ? BTN.RIGHT : 0), { onFrame: () => freezeGuardian(true) });
+    pDuring = stateOf(w);
+    /** runQA en relevant la taille de chaque instantané, classée selon l'état de l'étape au serveur. */
+    const sizes = (ms: number, input: (i: number, f: number) => number, onFrame: () => void) => {
+      const origDeliver = cs.map((c) => c.transport.deliverSnapshot.bind(c.transport));
+      cs.forEach((c, i) => (c.transport.deliverSnapshot = (m) => {
+        const b = origDeliver[i](m);
+        bytes[stateOf(w) as keyof typeof bytes]?.push(b);
+        return b;
+      }));
+      runQA(bench, state, logs, ms, input, { onFrame });
+      cs.forEach((c, i) => (c.transport.deliverSnapshot = origDeliver[i]));
+    };
+    // D court vers l'arène et y entre.
+    clear(3);
+    sizes(3000, (i) => (i === 3 ? BTN.RIGHT : 0), () => {
+      freezeGuardian(true);
+      if (sp(3).x - sp(3).w / 2 > limit) dEntered = true;
+    });
+    const enterCorr = corr[3].px.filter((_, k) => !corr[3].snapped[k]);
+    const enterSnaps = corr[3].snapped.filter(Boolean).length;
+    check('4 clients : arène fermée par A, D dehors la rejoint en traversant le kekkai', pDuring === 'arena' && dEntered && stateOf(w) === 'arena', `${pDuring} x(D)-limite=${(sp(3).x - limit).toFixed(0)}`);
+    check('traversée du kekkai : aucune correction notable chez D (max < 4 px, aucun recalage net)', Math.max(0, ...enterCorr) < 4 && enterSnaps === 0, `max ${Math.max(0, ...enterCorr).toFixed(2)} px, ${enterSnaps} recalage(s)`);
+    // D pousse vers la sortie (course, dash, saut, iai) : jamais affiché dehors.
+    clear(3);
+    const outMoves = [BTN.LEFT, BTN.LEFT | BTN.DASH, BTN.LEFT | BTN.JUMP, BTN.IAI | BTN.LEFT, BTN.LEFT | BTN.DOWN];
+    sizes(4000, (i, f) => (i === 3 ? outMoves[((f / 40) | 0) % outMoves.length] : 0), () => {
+      freezeGuardian(true);
+      const p = bench.shownPlayer(cs[3]);
+      if (p) dShownMin = Math.min(dShownMin, p.x - p.w / 2);
+    });
+    const outCorr = corr[3].px.filter((_, k) => !corr[3].snapped[k]);
+    check('kekkai : D affiché ne ressort jamais (course, dash, saut, iai)', dShownMin >= limit - 0.5 && sp(3).x - sp(3).w / 2 >= limit - 0.5, `marge ${(dShownMin - limit).toFixed(2)} px`);
+    check('kekkai : pousser vers la sortie, corrections p99 < 1 px', percentile(outCorr, 99) < 1 && !corr[3].snapped.some(Boolean), `p99 ${percentile(outCorr, 99).toFixed(2)} px`);
+    // B et C, dehors, s'agitent : ils ne sont jamais affichés dedans chez A.
+    sizes(2000, (i, f) => (i === 1 || i === 2 ? [BTN.LEFT, BTN.RIGHT | BTN.JUMP, BTN.ATTACK][((f / 30) | 0) % 3] : 0), () => {
+      freezeGuardian(true);
+      const p = bench.shownPlayer(cs[0], cs[1].pid);
+      if (p) bShownMax = Math.max(bShownMax, p.x);
+    });
+    // Gardien vaincu, A franchit la porte : bilan.
+    const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+    if (g) killEnemy(w, g, sp(0), 0, false);
+    runQA(bench, state, logs, 400, () => 0, { onFrame: () => freezeGuardian(false) });
+    const a = sp(0);
+    a.x = w.level.gate.x - 40;
+    a.y = w.level.gate.y;
+    a.vx = a.vy = 0;
+    sizes(2500, (i) => (i === 0 ? BTN.RIGHT : 0), () => freezeGuardian(false));
+    // Récapitulatif chez chaque client, comparé aux fiches du serveur.
+    const by = w.stage.byPlayer ?? {};
+    const rows = cs.map((c) => buildRoster(c.src.world, c.pid));
+    rosterOk = stateOf(w) === 'cleared' && rows.every((r) => r.length === 4 && r.filter((x) => x.me).length === 1 &&
+      r.every((x) => !!by[x.id] && x.kills === by[x.id].kills && x.deaths === by[x.id].deaths && x.parries === by[x.id].parries && x.honor === by[x.id].honor && x.grade === by[x.id].grade));
+    rosterInfo = rows.map((r) => r.map((x) => `${x.name}:${x.kills}/${x.honor}/${x.grade}`).join(' ')).join(' | ');
+    needed = readyInfo(cs[2].src.world).needed;
+    // Votes : A et B (2/4) ne suffisent pas ; C fait passer.
+    sizes(800, (i, f) => ((i === 0 || i === 1) && f % 20 < 3 ? BTN.JUMP : 0), () => freezeGuardian(false));
+    const twoVotes = stateOf(w);
+    const seenReady = readyInfo(cs[3].src.world).ready;
+    sizes(800, (i, f) => (i === 2 && f % 20 < 3 ? BTN.JUMP : 0), () => freezeGuardian(false));
+    runQA(bench, state, logs, 1500, () => 0);
+    check('bilan à 4 : 2 votes ne suffisent pas, vus par D ; le 3e fait passer', twoVotes === 'cleared' && seenReady === 2 && w.level.stage === level0 + 1 && stateOf(w) === 'playing', `${twoVotes}, prêts vus par D ${seenReady}, étape ${w.level.stage}`);
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 400);
+  }
+  check('4 clients M3 : aucune exception', err === '', err);
+  check('buildRoster chez chaque client = fiches du serveur (4 lignes, une « moi »)', rosterOk, rosterInfo);
+  check('readyInfo : 3 votes nécessaires sur 4', needed === 3, `${needed}`);
+  check('B (dehors) jamais affiché dans l’arène chez A', bShownMax <= limit, `x max - limite = ${(bShownMax - limit).toFixed(1)}`);
+  check('4 clients M3 : aucune correction > 32 px hors recalage net pendant l’arène (kekkai)', !big.some((s) => s.includes(':arena:')), big.join(' ') || 'aucune');
+  console.log(`  · corrections > 32 px hors recalage net (toutes phases) : ${big.join(' ') || 'aucune'}`);
+  check('4 clients M3 : nombre de joueurs affichés toujours juste, rendu monotone', logs.every((l) => l.playersMismatch === 0 && l.renderBackwards === 0), logs.map((l) => `${l.playersMismatch}/${l.renderBackwards}`).join(','));
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
+  console.log(`  · tailles d'instantané à 4 joueurs : arène ${avg(bytes.arena).toFixed(0)} o (${bytes.arena.length}), bilan ${avg(bytes.cleared).toFixed(0)} o (${bytes.cleared.length}, max ${Math.max(0, ...bytes.cleared)} o)`);
+  check('bilan à 4 : instantané < 2 Ko (statistiques par joueur comprises)', bytes.cleared.length > 0 && Math.max(...bytes.cleared) < 2048, `max ${Math.max(0, ...bytes.cleared)} o`);
 }
 
 if (failures) {

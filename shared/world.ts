@@ -5,6 +5,7 @@ import { addScore, damagePlayer, emptyStageStats, gainHonor, hitEnemy, spawnOrbs
 import { keepGhost, lagOf, recordHistory, resolveDeferred } from './lagcomp';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
 import { approach, clamp, overlaps, Rng } from './math';
+import { kekkaiSplits } from './level';
 import { moveBody, solidAt } from './physics';
 import { arenaEntrance, createPlayer, stepPlayer } from './player';
 import { buildStage } from './stagebuild';
@@ -210,7 +211,8 @@ function stepOrbs(w: World): void {
     let best = Infinity;
     if (age > 18) {
       for (const p of w.players) {
-        if (p.state === 'dead') continue;
+        // Coop : une orbe n'est pas attirée à travers le kekkai fermé.
+        if (p.state === 'dead' || kekkaiSplits(w, o.x, p.x)) continue;
         const d = Math.hypot(p.x - o.x, p.y - 22 - o.y);
         if (d < magnetRadius(p) * (o.lost ? 1.6 : 1) && d < best) {
           best = d;

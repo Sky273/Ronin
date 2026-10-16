@@ -13,6 +13,7 @@
 import { bodyRect } from './combat';
 import { damagePlayer, stunEnemy } from './interactions';
 import { overlaps, type Rect } from './math';
+import { kekkaiSplits } from './level';
 import { MAX_REWIND_TICKS } from './net/protocol';
 import type { Enemy, Player, Projectile, World } from './types';
 
@@ -236,6 +237,7 @@ export function meleeStrike(w: World, net: NetCompensation, e: Enemy, box: Rect,
   let deferred = false;
   for (const p of w.players) {
     if (p.state === 'dead') continue;
+    if (kekkaiSplits(w, e.x, p.x)) continue; // le sabre ne traverse pas le kekkai
     if (lagOf(net, p.id) > 0) {
       deferred = true;
       continue;
@@ -286,7 +288,7 @@ function judgeStrikes(w: World, net: NetCompensation, p: Player, from: number, t
     if (st.tick > to) break; // frappes rangées par tick croissant
     if (st.tick <= from || st.swing.done) continue;
     if (p.state === 'dead') return;
-    if (!overlaps(st.box, bodyRect(p))) continue;
+    if (kekkaiSplits(w, st.srcX, p.x) || !overlaps(st.box, bodyRect(p))) continue;
     // Attaquant tombé depuis (tué, condamné, retiré) : sa frappe n'a plus d'effet.
     if (!alive(w, st.enemy)) continue;
     st.swing.done = true;

@@ -99,7 +99,9 @@ function lockArena(w: World): void {
   st.state = 'arena';
   st.t = 0;
   setBarrier(w, true);
-  w.enemies = w.enemies.filter((e) => !inArena(w, e.x));
+  // Coop : on retire aussi les ennemis à cheval sur la barrière (corps qui dépasse la colonne).
+  const edge = a.col * TILE;
+  w.enemies = w.enemies.filter((e) => !inArena(w, e.x) && !(w.mode === 'coop' && e.x + e.w / 2 > edge));
   w.projectiles = [];
   w.wave.phase = 'calm';
   w.wave.t = 0;

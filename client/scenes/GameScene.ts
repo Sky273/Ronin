@@ -32,6 +32,7 @@ import { AllyMarkers } from '../ui/allies';
 import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
+import { buildRoster, readyInfo } from '../ui/roster';
 import { Scoreboard } from '../ui/scoreboard';
 import { stageTitle, UPGRADE_TEXT } from '../ui/texts';
 import { OnlineMenu } from '../ui/onlineMenu';
@@ -125,6 +126,8 @@ export class GameScene extends Phaser.Scene {
   private orbStreakT = 0;
   private lastLost = 0;
   private wipe = 0;
+  /** Bilan coop affiché avec les statistiques par joueur (sinon réaffiché dès qu'elles arrivent). */
+  private rosterShown = false;
 
   constructor() {
     super('game');
@@ -632,6 +635,15 @@ export class GameScene extends Phaser.Scene {
     const src = this.src;
     this.hud.setNet(src instanceof RemoteSource ? { rtt: src.rtt, jitter: src.jitterMs, players: w.players.length } : null);
     this.hud.update(this.me, w, this.best, dt, time, this.worldCam);
+    // Bilan coop : coches « prêt », compte à rebours ; en ligne, les statistiques par joueur peuvent
+    // arriver une image après l'événement stageClear : le bilan est alors réaffiché avec elles.
+    if (w.mode === 'coop' && w.stage.state === 'cleared' && this.results.visible) {
+      if (!this.rosterShown && w.stage.byPlayer) {
+        this.results.show(w.stage, this.me, { stage: w.level.stage, biome: w.level.biome }, buildRoster(w, this.src.meId));
+        this.rosterShown = true;
+      }
+      this.results.update(buildRoster(w, this.src.meId), readyInfo(w));
+    }
     if (this.screen === 'play') this.allies.update(w, this.src.meId, this.worldCam);
     else this.allies.hide();
     this.updateMusic();
@@ -1370,7 +1382,9 @@ export class GameScene extends Phaser.Scene {
         this.sfx.bell();
         this.flash = 0.25;
         fx.ring(this.world.level.gate.x, this.world.level.gate.y - 50, 10, 120, 0.8, C.red, 4);
-        this.results.show(this.world.stage, this.me, { stage: this.world.level.stage, biome: this.world.level.biome });
+        // Coop : récapitulatif de la salle (note et statistiques de chacun, vote pour repartir).
+        this.results.show(this.world.stage, this.me, { stage: this.world.level.stage, biome: this.world.level.biome }, this.world.mode === 'coop' ? buildRoster(this.world, this.src.meId) : undefined);
+        this.rosterShown = this.world.stage.byPlayer !== undefined;
         // Le fond du biome suivant est généré pendant le bilan, pas au moment du changement d'étape.
         this.backdrop.prewarm(biomeForStage(this.world.level.stage + 1));
         break;

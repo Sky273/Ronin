@@ -3,7 +3,7 @@ import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from '.
 import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
 import { meleeStrike } from './lagcomp';
-import { arenaInside, type Level, T_EMPTY, tileAt } from './level';
+import { arenaInside, kekkaiSplits, type Level, T_EMPTY, tileAt } from './level';
 import { approach, clamp, overlaps, type Rect } from './math';
 import { fitsAt, groundAhead, moveBody, touchingWall } from './physics';
 import type { Enemy, EnemyMove, EnemyState, EnemyType, Player, World } from './types';
@@ -178,7 +178,7 @@ function meleeHit(c: Ctx, box: Rect, dmg: number): void {
   if (w.net) return meleeStrike(w, w.net, e, box, dmg, e.type === 'oni' ? 90 : undefined);
   if (e.hitDone) return;
   for (const p of w.players) {
-    if (p.state === 'dead' || !overlaps(box, bodyRect(p))) continue;
+    if (p.state === 'dead' || kekkaiSplits(w, e.x, p.x) || !overlaps(box, bodyRect(p))) continue;
     e.hitDone = true;
     if (damagePlayer(w, p, dmg, e.x) === 'parried') stunEnemy(w, e, -e.facing, e.type === 'oni' ? 90 : undefined);
     return;
@@ -364,7 +364,8 @@ function ninja(c: Ctx): void {
       c.gravity = false;
       e.vx = 0;
       if (e.stateT >= 16) {
-        e.x = e.tx;
+        // Destination choisie avant la fermeture de l'arène : pas de réapparition de l'autre côté du kekkai.
+        if (!kekkaiSplits(w, e.x, e.tx)) e.x = e.tx;
         if (t) {
           const gy = findGround(w.level, e.x, t.y, 1);
           if (gy !== null) e.y = gy;
@@ -412,6 +413,7 @@ function vanish(c: Ctx): void {
   const cands = [t.x - t.facing * 56, t.x + t.facing * 56];
   let tx: number | null = null;
   for (const x of cands) {
+    if (kekkaiSplits(w, e.x, x)) continue; // pas de téléportation à travers le kekkai
     const gy = findGround(w.level, x, t.y, 1);
     if (gy !== null && Math.abs(gy - t.y) < 40 && fitsAt(w.level, x, gy, e.w, e.h)) {
       tx = x;

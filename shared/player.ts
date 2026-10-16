@@ -6,6 +6,7 @@ import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interaction
 import { claimGhost, hurtRect, isGhost, projectileSeenBy, sliceableProjectiles } from './lagcomp';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
+import { kekkaiSplits } from './level';
 import { canFit, crossesKekkaiOut, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
 import type { Player, World } from './types';
 
@@ -401,6 +402,7 @@ function doHits(w: World, p: Player, d: AttackDef): void {
   const before = p.hitList.length;
   for (const e of w.enemies) {
     if (e.state === 'dead' || e.state === 'doomed' || p.hitList.includes(e.id)) continue;
+    if (kekkaiSplits(w, p.x, e.x)) continue; // le sabre ne traverse pas le kekkai
     // En ligne : corps de l'ennemi tel que le joueur le voyait (rembobiné de son retard).
     if (overlaps(box, hurtRect(w, p, e))) {
       p.hitList.push(e.id);
@@ -471,7 +473,7 @@ function stepPlunge(w: World, p: Player, d: AttackDef): void {
     p.stateT = 0;
     const shock: Rect = { x: p.x - 50, y: p.y - 28, w: 100, h: 30 };
     for (const e of w.enemies) {
-      if (e.state === 'dead' || e.state === 'doomed' || p.hitList.includes(e.id)) continue;
+      if (e.state === 'dead' || e.state === 'doomed' || p.hitList.includes(e.id) || kekkaiSplits(w, p.x, e.x)) continue;
       if (overlaps(shock, hurtRect(w, p, e))) {
         p.hitList.push(e.id);
         hitEnemy(w, p, e, {
@@ -553,7 +555,7 @@ function iaiStrike(w: World, p: Player): void {
   let count = 0;
   for (const e of w.enemies) {
     if (e.state === 'dead' || e.state === 'doomed' || e.state === 'hidden' || e.state === 'intro') continue;
-    if (!overlaps(rect, hurtRect(w, p, e))) continue;
+    if (kekkaiSplits(w, p.x, e.x) || !overlaps(rect, hurtRect(w, p, e))) continue;
     count++;
     const mult = e.state === 'stunned' ? 1.5 : 1;
     if (e.type !== 'boss' && e.hp - dmg * mult <= 0) doomEnemy(w, p, e);

@@ -266,7 +266,7 @@ function combatDirect(jitterMs: number, seed: number): { px: number[]; snapped: 
   const w = bench.session.world;
   const pred = a.src.predictor;
   const snaps0 = pred.snaps;
-  warpToArena(w, b.pid); // l'autre joueur part devant : il déclenche l'arène et aspire le joueur a
+  warpToArena(w, b.pid); // l'autre joueur part devant et ferme l'arène ; a reste dehors (plus d'aspiration)
   bb = BTN.RIGHT;
   let arenaSeen = false;
   bench.run(1500, (i) => (i === 1 ? bb : 0), () => {
@@ -275,7 +275,7 @@ function combatDirect(jitterMs: number, seed: number): { px: number[]; snapped: 
   const me = bench.shownPlayer(a)!;
   const sv = bench.serverPlayer(a.pid)!;
   check('arène verrouillée par l’autre joueur', arenaSeen && w.stage.state === 'arena');
-  check('aspiration dans l’arène : recalage net', pred.snaps > snaps0 && Math.abs(me.x - sv.x) < 1, `snaps ${snaps0} → ${pred.snaps}, écart ${Math.abs(me.x - sv.x).toFixed(2)} px`);
+  check('fermeture par l’autre joueur : a reste dehors, sans recalage net ni écart', pred.snaps === snaps0 && Math.abs(me.x - sv.x) < 1 && sv.x < (w.level.arena.col + 1) * TILE_PX, `snaps ${snaps0} → ${pred.snaps}, écart ${Math.abs(me.x - sv.x).toFixed(2)} px`);
 
   const snaps1 = pred.snaps;
   bb = 0;

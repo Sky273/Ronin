@@ -68,9 +68,8 @@ export class Predictor {
   /** Décalage de correction affiché (px), décroît vers 0. */
   private offX = 0;
   private offY = 0;
-  /** Étape et état d'étape du dernier instantané (détection des recalages nets). */
+  /** Étape du dernier instantané (détection des recalages nets). */
   private lastStage = -1;
-  private lastStageState: StageState['state'] | null = null;
   /** Entrées envoyées et pas encore acquittées (à rejouer après chaque instantané). */
   readonly pending: PendingInput[] = [];
 
@@ -132,9 +131,7 @@ export class Predictor {
    */
   reconcile(self: Player | null, ack: number, ctx: PredictionContext, enemiesAt: (v: number) => Enemy[]): void {
     const stageChanged = this.lastStage !== -1 && ctx.level.stage !== this.lastStage;
-    const pulled = ctx.stage.state === 'arena' && this.lastStageState !== null && this.lastStageState !== 'arena';
     this.lastStage = ctx.level.stage;
-    this.lastStageState = ctx.stage.state;
     this.serverTick = ctx.serverTick;
     this.replayed = 0;
     if (!self) {
@@ -173,9 +170,9 @@ export class Predictor {
     this.lastCorrectionPx = Math.sqrt(dx * dx + dy * dy);
     const sx = old.x - state.x + this.offX;
     const sy = old.y - state.y + this.offY;
-    // Recalage net : changement d'étape, fermeture de l'arène, mort ou renaissance, grand écart.
+    // Recalage net : changement d'étape, mort ou renaissance, grand écart.
     const snap =
-      stageChanged || pulled || lifeChanged(old, state) ||
+      stageChanged || lifeChanged(old, state) ||
       (old.state === 'dead' && state.state === 'dead' && old.respawnT !== state.respawnT) ||
       this.lastCorrectionPx > CORRECTION_SNAP_PX || sx * sx + sy * sy > CORRECTION_SNAP_PX * CORRECTION_SNAP_PX;
     this.cur = state;
@@ -226,7 +223,6 @@ export class Predictor {
     this.cur = this.prev = null;
     this.offX = this.offY = 0;
     this.lastStage = -1;
-    this.lastStageState = null;
     this.pending.length = 0;
     this.lastCorrectionPx = 0;
     this.replayed = 0;

@@ -143,6 +143,8 @@ export class Results {
    * `room` (coop) : tableau de la salle ; absent, la mise en page solo est inchangée.
    */
   show(st: StageState, p: Player, level?: { stage: number; biome: BiomeId }, room?: RosterRow[]): void {
+    // Réaffiché (statistiques coop arrivées après l'événement) : on repart des animations à zéro.
+    this.scene.tweens.killTweensOf([this.root, this.stamp, this.gradeName, this.footer]);
     const stage = level?.stage ?? st.loop;
     const biome = level?.biome ?? biomeForStage(stage);
     const W = this.scene.scale.width;
@@ -167,7 +169,8 @@ export class Results {
       ['Best combo', mine?.bestCombo ?? st.bestCombo],
       ['Perfect parries', mine?.parries ?? st.parries],
       ['Deaths', mine?.deaths ?? st.deaths],
-      ['Lives left', livesLabel(p.lives)],
+      // Coop : pas de vies ; l'Honneur gagné pendant l'étape à la place.
+      room ? ['Honor earned', mine?.honor ?? 0] : ['Lives left', livesLabel(p.lives)],
       ['Score', fmtScore(p.score)],
     ];
     rows.forEach(([label, value], i) => {
@@ -186,8 +189,10 @@ export class Results {
     if (room) {
       this.coopShown = true;
       this.tableSeed = st.loop * 53 + 11;
-      for (const row of this.table) row.sig = row.readySig = '';
-      this.footerSig = '';
+      // Valeur impossible : update() réécrit toutes les cellules (sinon une coche « prêt »
+      // d'un bilan précédent resterait affichée pour un joueur qui ne l'est plus).
+      for (const row of this.table) row.sig = row.readySig = '<reset>';
+      this.footerSig = '<reset>';
       this.roomGradeText.setText(`Room grade ${(GRADES[st.grade] ?? GRADES[2]).kanji}`);
       this.coop.setVisible(true);
       this.footer.setY(COOP_BOTTOM - 18).setFontSize(17);

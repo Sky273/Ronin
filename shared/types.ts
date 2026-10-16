@@ -177,7 +177,6 @@ export interface WaveState {
   quota: number;
 }
 
-/** Déroulé de l'étape : exploration → arène du gardien → porte ouverte → bilan. */
 /** Statistiques d'un joueur pour l'étape en cours (coop seulement). */
 export interface PlayerStageStats {
   kills: number;
@@ -190,6 +189,7 @@ export interface PlayerStageStats {
   ready: boolean; // a voté pour reprendre la route (bilan)
 }
 
+/** Déroulé de l'étape : exploration → arène du gardien → porte ouverte → bilan. */
 export interface StageState {
   loop: number; // 0 = premier voyage ; chaque boucle est plus difficile
   state: 'playing' | 'arena' | 'gateOpen' | 'cleared';
