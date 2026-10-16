@@ -204,7 +204,7 @@ export const DUEL = {
   ENTER_TICKS: 45, // mise en place
   KAMAE_MIN: 90, // durée de la garde avant le signal : entre MIN et MAX (tirée d'un hachage du duel)
   KAMAE_MAX: 240,
-  ANTICIPATE: 6, // une action consommée avant signal + ANTICIPATE est une faute (100 ms)
+  ANTICIPATE: 9, // une action consommée avant signal + ANTICIPATE est une faute (150 ms)
   STRIKE_TRAVEL: 8, // temps de lame de l'iai relâché : impact à t + STRIKE_TRAVEL
   SLASH_EXTRA: 6, // une attaque sans charge arrive SLASH_EXTRA ticks plus tard
   TIE_TICKS: 1, // impacts à ±TIE_TICKS : 相打ち (manche rejouée)
@@ -224,7 +224,11 @@ export const DUEL = {
   ENGAGED_RANGE: 400, // aucun ennemi engagé à moins de cette distance pour défier
   NO_SPAWN_RANGE: 600, // aucun renfort à moins de cette distance d'un duel
   SPOT_SCAN_TILES: 6, // recherche d'un sol plat autour du point médian
-  SUSPECT_REACT: 8, // réaction < 130 ms : journalisée par le serveur
+  SUSPECT_REACT: 10, // réaction < 167 ms (à peine au-dessus du seuil de faute) : journalisée par le serveur
+  FLOOD_WINDOW_MS: 2000, // duelliste : cadence d'entrées jugée sur cette fenêtre (temps réel serveur)
+  FLOOD_RATE: 1.25, // au-delà de 60 Hz × FLOOD_RATE (+ marge) sur la fenêtre : client accéléré, forfait
+  FLOOD_SLACK: 30, // marge d'entrées tolérée sur la fenêtre (rattrapage après une coupure)
+  QUEUE_MAX: 300, // file stricte d'un duelliste : borne mémoire (5 s), au-delà forfait
 } as const;
 
 /** Issues d'une manche, d'une série ou d'une invitation (événements `why`). */
@@ -245,6 +249,8 @@ export const DUEL_WHY = {
   HIT: 13, // l'un des deux touché ou mort
   DRAW: 14, // série nulle
   WIN: 15, // série gagnée
+  TIDE: 16, // la Marée se lève : défis en attente annulés
+  FLOOD: 17, // entrées envoyées trop vite pendant un duel : forfait
 } as const;
 
 /** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */

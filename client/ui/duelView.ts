@@ -100,6 +100,8 @@ const WHY: Record<number, { kanji: string; text: string }> = {
   [DUEL_WHY.HIT]: { kanji: '中断', text: 'a blow broke the duel' },
   [DUEL_WHY.DRAW]: { kanji: '引き分け', text: 'draw' },
   [DUEL_WHY.WIN]: { kanji: '勝', text: 'victory' },
+  [DUEL_WHY.TIDE]: { kanji: '潮', text: 'the Tide rises' },
+  [DUEL_WHY.FLOOD]: { kanji: '反則', text: 'too many inputs — forfeit' },
 };
 
 /** Libellé d'un code DUEL_WHY : kanji et texte anglais (vides si le code est inconnu). */
@@ -185,6 +187,8 @@ export function cancelText(ev: Extract<GameEvent, { type: 'duelCancel' }>, meId:
       return `Duel off — out of range`;
     case DUEL_WHY.TERRAIN:
       return 'Duel off — no flat ground here';
+    case DUEL_WHY.TIDE:
+      return 'Duel off — the Tide rises';
     case DUEL_WHY.DISCONNECT:
       return `Duel off — ${other} left`;
     case DUEL_WHY.HIT:

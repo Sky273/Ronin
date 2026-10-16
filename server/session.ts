@@ -14,7 +14,8 @@ import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
 import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
-import { COOP_AWAY_TICKS, COOP_KICK_TICKS } from '../shared/constants';
+import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_WHY } from '../shared/constants';
+import { forfeit, isDueling } from '../shared/duel';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
 import { Samples } from './stats';
 
@@ -48,6 +49,8 @@ interface PlayerSlot {
   lag: number;
   /** Dernier tick où le joueur a appuyé sur un bouton (un onglet laissé ouvert envoie des entrées vides). */
   lastActive: number;
+  /** Heures de réception (ms, horloge de la session) des entrées récentes : cadence soutenue en duel. */
+  recv: number[];
 }
 
 /** Tick de vue valide : entier ≥ 0 (sinon ignoré). */
@@ -61,6 +64,8 @@ export class CoopSession {
   /** Événements accumulés depuis le dernier envoi d'instantanés. */
   private events: GameEvent[] = [];
   private acc = 0;
+  /** Horloge de la session (ms écoulées, pas abandonnés compris) : cadence des entrées. */
+  private clockMs = 0;
   /** Retards L des entrées consommées (statistiques p50/p95 des journaux). */
   readonly lagStats = new Samples();
 
@@ -81,7 +86,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, recv: [] });
     return { pid: p.id, color };
   }
 
@@ -104,7 +109,7 @@ export class CoopSession {
    * `v` (tick de vue) est facultatif : absent ou invalide, l'entrée est jugée sans retard (L = 0).
    * Renvoie false si l'entrée est ignorée.
    */
-  pushInput(pid: number, msg: InputMsg): boolean {
+  pushInput(pid: number, msg: InputMsg, atMs?: number): boolean {
     const slot = this.slots.get(pid);
     if (!slot || !Number.isSafeInteger(msg.s) || !Number.isSafeInteger(msg.b)) return false;
     if (msg.s <= slot.lastSeq) return false;
@@ -112,6 +117,24 @@ export class CoopSession {
     const input: InputMsg = { s: msg.s, b: msg.b & BUTTON_MASK };
     if (validView(msg.v)) input.v = msg.v;
     slot.queue.push(input);
+    if (isDueling(this.world, pid)) {
+      // Duel : file stricte, une entrée par tick, jamais fusionnée. Le tick prédit par le client
+      // (tick serveur + entrées en attente) reste ainsi exactement le tick de consommation :
+      // envoyer plus vite que 60 Hz ne fait voir le signal en avance qu'au prix d'une file qui
+      // s'allonge d'autant. Une cadence soutenue trop rapide (client accéléré) fait perdre le duel ;
+      // une rafale après une coupure (même nombre d'entrées sur la fenêtre) ne compte pas.
+      // Heure de réception réelle si fournie (salle, banc), sinon horloge de la session.
+      const now = atMs ?? this.clockMs;
+      slot.recv.push(now);
+      while (slot.recv.length && slot.recv[0] < now - DUEL.FLOOD_WINDOW_MS) slot.recv.shift();
+      const allowed = (DUEL.FLOOD_WINDOW_MS / 1000) * NET_TICK * DUEL.FLOOD_RATE + DUEL.FLOOD_SLACK;
+      if (slot.recv.length > allowed || slot.queue.length > DUEL.QUEUE_MAX) {
+        forfeit(this.world, pid, DUEL_WHY.FLOOD);
+        slot.queue = [input];
+        slot.recv.length = 0;
+      }
+      return true;
+    }
     if (slot.queue.length > MAX_INPUT_QUEUE) {
       // File saturée (rafale réseau) : on ne garde que la plus récente, en conservant
       // les appuis des entrées abandonnées pour ne pas perdre un saut ou une attaque.
@@ -145,6 +168,7 @@ export class CoopSession {
   update(elapsedMs: number): number {
     // Durées nulles, négatives ou non finies ignorées (Infinity figerait l'accumulateur en NaN).
     if (!(elapsedMs > 0) || !Number.isFinite(elapsedMs * NET_TICK)) return 0;
+    this.clockMs += elapsedMs;
     this.acc += elapsedMs * NET_TICK;
     let steps = 0;
     while (this.acc >= STEP_UNITS && steps < MAX_STEPS_PER_UPDATE) {

@@ -1,6 +1,6 @@
 // Défis de duel en coop : défier, accepter, annuler, délais par paire.
 // Exécuté par stepWorld avant les joueurs, en coop seulement (jamais en solo).
-import { DUEL, DUEL_WHY } from './constants';
+import { DUEL, DUEL_WHY, TILE } from './constants';
 import { COOP_DUEL_RULES, findDuelSpot, isDueling, setPairCooldown, startDuel } from './duel';
 import { BTN } from './input';
 import { arenaInside, kekkaiSplits } from './level';
@@ -95,7 +95,12 @@ export function forgetInvites(w: World, pid: number): void {
 function accept(w: World, inv: DuelInvite, a: Player, b: Player): void {
   // Conditions revérifiées : si elles ne sont plus réunies, l'appui est sans effet (le défi attend).
   if (!free(w, a) || !free(w, b) || !duelAllowed(w, a, b)) return;
-  const spot = findDuelSpot(w.level, (a.x + b.x) / 2, (a.y + b.y) / 2, DUEL.GAP);
+  // Joueurs à la même hauteur (pas l'un sur une corniche au-dessus de l'autre).
+  if (Math.abs(a.y - b.y) > TILE) {
+    cancel(w, inv, DUEL_WHY.TERRAIN, false);
+    return;
+  }
+  const spot = findDuelSpot(w.level, (a.x + b.x) / 2, (a.y + b.y) / 2, DUEL.GAP, w.duels ?? []);
   if (!spot) {
     cancel(w, inv, DUEL_WHY.TERRAIN, false);
     return;
@@ -133,6 +138,8 @@ export function stepInvites(w: World, inputs: Map<number, number>): void {
       const a = w.players.find((p) => p.id === inv.from);
       const b = w.players.find((p) => p.id === inv.to);
       if (!a || !b) cancel(w, inv, DUEL_WHY.DISCONNECT, false);
+      // La Marée se lève : le défi ne pourrait plus être accepté (sans délai de paire).
+      else if (w.wave.phase !== 'calm') cancel(w, inv, DUEL_WHY.TIDE, false);
       else if (hitOrDead(a) || hitOrDead(b)) cancel(w, inv, DUEL_WHY.HIT, false);
       else if (dist(a, b) > DUEL.INVITE_BREAK) cancel(w, inv, DUEL_WHY.DISTANCE, true);
       else if (w.tick >= inv.until) cancel(w, inv, DUEL_WHY.EXPIRED, true);
@@ -144,15 +151,17 @@ export function stepInvites(w: World, inputs: Map<number, number>): void {
     if (isDueling(w, p.id)) continue; // en duel : tenir DUEL pour abandonner (stepForfeits)
     const cur = w.duelInvites!;
     const inc = incomingOf(cur, p.id);
+    const out = outgoingOf(cur, p.id);
+    // Son propre défi en cours d'abord : l'appui l'annule (un second appui acceptera un défi reçu),
+    // sauf s'il vise justement celui qui nous défie (défis croisés = acceptation mutuelle).
+    if (out && !(inc && inc.from === out.to)) {
+      cancel(w, out, DUEL_WHY.CANCEL, true);
+      continue;
+    }
     if (inc) {
       // Accepter (y compris un appui simultané : le défi de l'autre vient d'être lancé ce tick).
       const from = w.players.find((q) => q.id === inc.from);
       if (from) accept(w, inc, from, p);
-      continue;
-    }
-    const out = outgoingOf(cur, p.id);
-    if (out) {
-      cancel(w, out, DUEL_WHY.CANCEL, true);
       continue;
     }
     challenge(w, p);

@@ -8,7 +8,7 @@ import { CoopSession } from '../../server/session';
 import { Rng } from '../../shared/math';
 import type { SnapshotWire } from '../../shared/net/codec';
 import { SNAP_EVERY, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
-import type { Player } from '../../shared/types';
+import type { GameEvent, Player } from '../../shared/types';
 
 /** Horloge virtuelle (ms). */
 export class VirtualClock {
@@ -113,6 +113,14 @@ export interface BenchClient {
   transport: LinkTransport;
   /** Boutons échantillonnés à chaque image (dernier appel à sample). */
   lastButtons: number;
+  /**
+   * Cadence d'envoi simulée (Hz) : absente, une image = un appel à `advance` (60 Hz).
+   * Sinon, autant d'appels à `advance(1/60)` par image que nécessaire pour envoyer `sendHz` entrées
+   * par seconde de temps réel (client accéléré : boucle doublée, accélérateur de vitesse).
+   */
+  sendHz?: number;
+  /** Événements rendus par la source à chaque image (affichage), dans l'ordre. */
+  events: GameEvent[];
 }
 
 export interface BenchOptions {
@@ -171,9 +179,9 @@ export class NetBench {
         seed: o.seed ?? this.linkSeed++,
       });
     const { pid } = this.session.join(name);
-    const transport = new LinkTransport(this.clock, make(upOpts), make(downOpts), (m) => this.session.pushInput(pid, m));
+    const transport = new LinkTransport(this.clock, make(upOpts), make(downOpts), (m) => this.session.pushInput(pid, m, this.clock.t));
     const src = new RemoteSource(transport, { now: this.clock.now });
-    const c: BenchClient = { pid, src, transport, lastButtons: 0 };
+    const c: BenchClient = { pid, src, transport, lastButtons: 0, events: [] };
     this.clients.push(c);
     transport.deliverWelcome(this.session.welcomeFor(pid));
     return c;
@@ -199,7 +207,7 @@ export class NetBench {
       const msg: InputMsg = typeof x === 'number' ? { s: ++s, b: x, v: view } : x;
       if (typeof x !== 'number') s = Math.max(s, x.s);
       out.push(msg);
-      c.transport.up.send(msg, (m) => this.session.pushInput(c.pid, m as InputMsg));
+      c.transport.up.send(msg, (m) => this.session.pushInput(c.pid, m as InputMsg, this.clock.t));
     }
     this.burstSeq.set(c.pid, s);
     return out;
@@ -248,7 +256,14 @@ export class NetBench {
       for (const c of this.clients) c.transport.down.flush();
       const frame = this.metrics.frames++;
       this.clients.forEach((c, i) => {
-        c.src.advance(this.frameMs / 1000, () => (c.lastButtons = input(i, frame)), () => undefined);
+        if (c.sendHz === undefined) {
+          for (const ev of c.src.advance(this.frameMs / 1000, () => (c.lastButtons = input(i, frame)), () => undefined)) c.events.push(ev);
+          return;
+        }
+        // Client accéléré : n pas d'entrée de 1/60 s pendant cette image de temps réel.
+        const per = (c.sendHz * this.frameMs) / 1000;
+        const n = Math.floor((frame + 1) * per + 1e-9) - Math.floor(frame * per + 1e-9);
+        for (let k = 0; k < n; k++) for (const ev of c.src.advance(1 / 60, () => (c.lastButtons = input(i, frame)), () => undefined)) c.events.push(ev);
       });
       onFrame?.(frame);
     }

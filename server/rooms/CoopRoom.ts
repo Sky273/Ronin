@@ -2,6 +2,7 @@
 // Aucun état Schema : le serveur envoie des instantanés msgpack explicites (MSG.snap).
 import { CloseCode, getMessageBytes, matchMaker, Protocol, Room, type Client, type RoomException, type RoomMethodName } from '@colyseus/core';
 import { AWAY_CLOSE_CODE, MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg, type PingMsg } from '../../shared/net/protocol';
+import { DUEL, DUEL_WHY } from '../../shared/constants';
 import { LagLine, lagFromEnv } from '../lag';
 import { CoopSession } from '../session';
 import { Samples } from '../stats';
@@ -60,7 +61,7 @@ export class CoopRoom extends Room {
       if (isInt(v) && v >= 0) input.v = v;
       this.lag.run(`in:${client.sessionId}`, () => {
         const pid = this.pids.get(client.sessionId);
-        if (pid !== undefined) this.session.pushInput(pid, input);
+        if (pid !== undefined) this.session.pushInput(pid, input, performance.now());
       });
     });
 
@@ -170,6 +171,24 @@ export class CoopRoom extends Room {
     }
   }
 
+  /**
+   * Journal des duels : fin de série, et réactions anormalement rapides (< SUSPECT_REACT ticks, ~130 ms),
+   * signe possible d'un script (le signal est connu à l'avance). Les sanctions viendront avec le dojo.
+   */
+  private logDuels(): void {
+    for (const ev of this.session.pendingEvents) {
+      if (ev.type === 'duelRound') {
+        if (ev.why === DUEL_WHY.FOUL || ev.why === DUEL_WHY.DOUBLE_FOUL) continue; // anticipation honnête
+        const d = this.session.world.duels?.find((x) => x.id === ev.id);
+        for (const [pid, r] of [[d?.a.pid ?? -1, ev.ra], [d?.b.pid ?? -1, ev.rb]] as const) {
+          if (r >= 0 && r < DUEL.SUSPECT_REACT) console.warn(`[coop ${this.roomId}] duel ${ev.id} : réaction suspecte du joueur ${pid} : ${Math.round((r * 1000) / NET_TICK)} ms`);
+        }
+      } else if (ev.type === 'duelEnd') {
+        console.log(`[coop ${this.roomId}] duel ${ev.id} terminé : ${ev.wa}–${ev.wb}, vainqueur ${ev.winner}, issue ${ev.why}`);
+      }
+    }
+  }
+
   private tick(): void {
     const t0 = performance.now();
     const elapsed = t0 - this.lastTickAt;
@@ -193,6 +212,7 @@ export class CoopRoom extends Room {
       this.snapBytes.add(n);
       this.bytesOut += n;
     }
+    this.logDuels();
     this.session.flushEvents();
     this.sendMs.add(performance.now() - t1);
   }

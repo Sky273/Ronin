@@ -29,7 +29,8 @@ import type { ScoreTable } from '../scores/types';
 import { DifficultySelect } from '../ui/difficultySelect';
 import { DIFFICULTY_TEXT, fmtScore, foesLabel, livesLabel } from '../ui/difficultyText';
 import { AllyMarkers } from '../ui/allies';
-import { DevDuel, DuelOverlay } from '../ui/duel';
+import { DuelOverlay } from '../ui/duel';
+import { COOP_DUEL_RULES, startDuel } from '../../shared/duel';
 import { duelView } from '../ui/duelView';
 import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
@@ -80,8 +81,6 @@ export class GameScene extends Phaser.Scene {
   private allies!: AllyMarkers;
   /** Duels iaidō (coop) : invitation, signal 斬, issues, toasts. */
   private duel!: DuelOverlay;
-  /** Développement : faux duel local (F9). */
-  private devDuel: DevDuel | null = null;
   private results!: Results;
   private gBack!: G;
   private gChars!: G;
@@ -230,12 +229,20 @@ export class GameScene extends Phaser.Scene {
         if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
         this.local.addEcho();
       });
-      // F9 : faux duel avec un autre joueur (un écho est ajouté au besoin), pour juger le rendu sans réseau.
+      // F9 : vrai duel local contre un écho (ajouté au besoin), avec les règles du jeu, sans réseau.
+      // Le monde local passe en coop jusqu'à la prochaine partie (resetWorld le remet en solo).
       this.controls.onKey('F9', () => {
         if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
+        const w = this.world;
         const me = this.me;
-        const other = this.world.players.find((p) => p.id !== me.id) ?? this.local.addEcho();
-        if (other) (this.devDuel ??= new DevDuel()).start(this.world, me.id, other.id);
+        const other = w.players.find((p) => p.id !== me.id) ?? this.local.addEcho();
+        if (!other) return;
+        w.mode = 'coop';
+        w.duels ??= [];
+        w.duelInvites ??= [];
+        if (!startDuel(w, me, other, COOP_DUEL_RULES)) this.hud.banner('決', 'No flat ground here', 'move and try again', '#15120e', 1200);
+        for (const ev of w.events) this.onEvent(ev);
+        w.events.length = 0;
       });
       // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
       this.controls.onKey('F7', () => {
@@ -409,7 +416,6 @@ export class GameScene extends Phaser.Scene {
     // Une partie solo se joue toujours sur la source locale.
     if (this.src !== this.local) this.useSource(this.local);
     const w = this.local.world;
-    this.devDuel?.stop(w);
     resetWorld(w, (Date.now() & 0xffff) + 1, { difficulty: d });
     this.local.reset(addPlayer(w, sanitizeName(this.prefs.name)).id);
     this.meCache = null;
@@ -567,7 +573,6 @@ export class GameScene extends Phaser.Scene {
         // En local, chaque événement garde le tick du pas qui l'a produit (rattrapage de plusieurs pas).
         this.onEvent(events[i], src === this.local ? this.local.eventTicks[i] : this.world.tick);
       }
-      if (src === this.local && this.devDuel?.active) for (const ev of this.devDuel.step(this.world)) this.onEvent(ev);
       // En ligne, une étape a pu changer sans que son événement nous parvienne (arrivée en cours de route).
       if (src instanceof RemoteSource && src.consumeStageChanged() && !events.some((e) => e.type === 'stageStart')) this.resetView();
     }

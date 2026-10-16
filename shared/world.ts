@@ -64,6 +64,8 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
 export function resetWorld(w: World, seed: number, opts: WorldOptions = {}): void {
   const fresh = createWorld(seed, opts);
   Object.assign(w.level, fresh.level);
+  // Champs facultatifs (duels, absents, gardien…) absents de la nouvelle partie : retirés.
+  for (const k of Object.keys(w) as (keyof World)[]) if (!(k in fresh)) delete w[k];
   Object.assign(w, { ...fresh, level: w.level });
 }
 
@@ -243,6 +245,9 @@ function stepOrbs(w: World): void {
       if (best < HONOR.PICKUP) {
         gainHonor(w, target, o.value);
         w.events.push({ type: 'orb', x: o.x, y: o.y, value: o.value, lost: o.lost, pid: target.id });
+        // Ramassée : elle ne compte plus parmi les orbes restantes (plusieurs peuvent l'être au même tick,
+        // fréquent sous un duel ; sinon le repère d'Honneur perdu restait affiché pour rien).
+        o.life = 0;
         if (o.lost && !w.orbs.some((q) => q !== o && q.lost && q.life > 0)) {
           // Plus aucun Honneur perdu au sol : en coop, le repère de chacun s'efface (les orbes n'ont pas de propriétaire).
           if (w.mode === 'coop') for (const q of w.players) q.lostX = NaN;

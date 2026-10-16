@@ -152,16 +152,26 @@ export function kamaeLength(id: number, played: number): number {
  * même hauteur, rien ne bloque un corps le long du segment, et aucune n'est dans l'arène.
  * Balayage du centre par tuiles jusqu'à ±SPOT_SCAN_TILES, au plus près d'abord. null si rien ne convient.
  */
-export function findDuelSpot(level: Level, x: number, y: number, gap: number): { x: number; y: number } | null {
-  for (let k = 0; k <= DUEL.SPOT_SCAN_TILES; k++) {
+export function findDuelSpot(level: Level, x: number, y: number, gap: number, avoid: readonly Duel[] = []): { x: number; y: number } | null {
+  // Un duel en cours à éviter peut demander de s'écarter d'un segment entier.
+  const scan = DUEL.SPOT_SCAN_TILES + (avoid.length ? Math.ceil((gap + 2 * P.W) / TILE) : 0);
+  for (let k = 0; k <= scan; k++) {
     for (const s of k === 0 ? [0] : [1, -1]) {
       const cx = x + s * k * TILE;
       const x0 = cx - gap / 2;
       const x1 = cx + gap / 2;
       if (x0 < TILE || x1 > level.pxW - TILE) continue;
       if (arenaInside(level, x0) || arenaInside(level, x1)) continue;
-      const g0 = findGround(level, x0, y);
-      if (g0 === null || findGround(level, x1, y) !== g0) continue;
+      // Ni dans ni contre la colonne du kekkai (une tuile de marge) : une arène fermée pendant le duel
+      // ne doit pas enfermer un duelliste dans la barrière.
+      const kL = (level.arena.col - 1) * TILE - P.W / 2;
+      const kR = (level.arena.col + 2) * TILE + P.W / 2;
+      if (x1 > kL && x0 < kR) continue;
+      // Pas sur le segment d'un duel en cours (une largeur de corps de marge, même hauteur).
+      if (avoid.some((o) => Math.abs(o.y - y) < 2 * TILE && x1 + P.W > o.x - o.gap / 2 && x0 - P.W < o.x + o.gap / 2)) continue;
+      // Sol à la hauteur des joueurs (jamais le toit d'un bloc au-dessus d'eux).
+      const g0 = findGround(level, x0, y, 1);
+      if (g0 === null || Math.abs(g0 - y) > TILE || findGround(level, x1, y, 1) !== g0) continue;
       let clear = true;
       for (let px = x0; px < x1 + 2; px += 4) {
         if (!fitsAt(level, Math.min(px, x1), g0, P.W, P.H)) {
@@ -199,7 +209,7 @@ function resetRound(d: Duel): void {
  */
 export function startDuel(w: World, a: Player, b: Player, rules: DuelRules, spot?: { x: number; y: number }): Duel | null {
   if (a === b || isDueling(w, a.id) || isDueling(w, b.id)) return null;
-  const at = spot ?? findDuelSpot(w.level, (a.x + b.x) / 2, (a.y + b.y) / 2, DUEL.GAP);
+  const at = spot ?? findDuelSpot(w.level, (a.x + b.x) / 2, (a.y + b.y) / 2, DUEL.GAP, w.duels ?? []);
   if (!at) return null;
   const [l, r] = a.x <= b.x ? [a, b] : [b, a];
   const d: Duel = {
@@ -291,7 +301,9 @@ export function stepDuelist(w: World, d: Duel, p: Player, buttons: number, press
 
 /** Actions pendant la garde et après le signal (constantes de base : améliorations ignorées). */
 function duelAct(w: World, d: Duel, side: DuelSide, p: Player, buttons: number, pressed: number): void {
-  if (side.strikeT >= 0 || side.foul) return; // engagé : la pose tient jusqu'au dénouement
+  // Engagé : la pose tient jusqu'au dénouement. La pose suffit aussi à le savoir : le prédicteur
+  // repart à chaque pas de la copie du duel reçue du serveur, sans les actions déjà prédites.
+  if (side.strikeT >= 0 || side.foul || p.state === 'iaiStrike' || p.state === 'attack') return;
   if (p.state === 'parry') {
     if (p.stateT >= P.PARRY_ACTIVE + P.PARRY_RECOVERY) setPose(p, 'normal'); // retour en kamae
     return;
@@ -434,8 +446,8 @@ function endRound(w: World, d: Duel, v: ExchangeVerdict): void {
   const sums = reactSums.get(d);
   if (sums) {
     // Sans action (ou faute) : la manche compte pour ROUND_MAX.
-    sums[0] += d.a.react >= 0 ? d.a.react : DUEL.ROUND_MAX;
-    sums[1] += d.b.react >= 0 ? d.b.react : DUEL.ROUND_MAX;
+    sums[0] += d.a.react >= 0 && !d.a.foul ? d.a.react : DUEL.ROUND_MAX;
+    sums[1] += d.b.react >= 0 && !d.b.foul ? d.b.react : DUEL.ROUND_MAX;
   }
   w.events.push({
     type: 'duelRound', id: d.id, round, winner: d.winner, why: v.why,

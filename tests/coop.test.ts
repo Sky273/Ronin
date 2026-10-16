@@ -3,7 +3,7 @@
 import { COOP, COOP_CLEARED_TICKS, COOP_READY_AFTER, ENEMY, PLAYER, TICK_RATE, TILE } from '../shared/constants';
 import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
 import { BTN } from '../shared/input';
-import { damagePlayer, doomEnemy, killEnemy, takeToken } from '../shared/interactions';
+import { damagePlayer, doomEnemy, killEnemy, spawnOrbs, takeToken } from '../shared/interactions';
 import { Rng } from '../shared/math';
 import type { GameEvent, Player, World } from '../shared/types';
 import { clearBonus, type DifficultyId, guardianHpScale } from '../shared/difficulty';
@@ -675,8 +675,8 @@ function nonFinite(w: World): string[] {
     return `${h.toString(16)} étape=${w.level.stage} over=${w.over}`;
   };
   const golden: [number, DifficultyId, number, number, string][] = [
-    [4242, 'normal', 1, 9000, 'f54fa7a9 étape=2 over=false'],
-    [7, 'veryEasy', 2, 9000, 'e4940a1b étape=3 over=false'],
+    [4242, 'normal', 1, 9000, '4bc51c69 étape=2 over=false'],
+    [7, 'veryEasy', 2, 9000, 'b985761f étape=3 over=false'],
     [99991, 'hard', 1, 6000, 'e2e14bbb étape=2 over=true'],
   ];
   for (const [seed, diff, n, ticks, want] of golden) {
@@ -1472,6 +1472,32 @@ function nonFinite(w: World): string[] {
   addPlayer(w, 'S');
   run(w, 2000, scripted(9));
   check('absents : solo, clé away jamais posée par la simulation', !('away' in w));
+}
+
+// ─── 26. Honneur perdu ramassé d'un coup : le repère s'efface ───────────────
+// Orbes perdues empilées sur le joueur (sortie de duel, tas au fond d'un trou) : toutes ramassées
+// au même tick, la dernière doit effacer le repère, en solo comme en coop.
+for (const mode of ['solo', 'coop'] as const) {
+  const w = createWorld(5, { mode, difficulty: 'normal' });
+  const p = addPlayer(w, 'a', { color: 0 });
+  w.enemies = [];
+  w.spawnTimer = 1e9;
+  run(w, 60, () => 0, (w) => {
+    w.spawnTimer = 1e9;
+  });
+  spawnOrbs(w, p.x, p.y - 20, 40, true);
+  p.lostX = p.x;
+  p.lostY = p.y;
+  for (const o of w.orbs) {
+    o.x = p.x;
+    o.y = p.y - 22;
+    o.vx = o.vy = 0;
+    o.life -= 30; // assez vieilles pour être attirées
+  }
+  const n = w.orbs.filter((o) => o.lost).length;
+  stepWorld(w, new Map([[p.id, 0]]));
+  const left = w.orbs.filter((o) => o.lost).length;
+  check(`${mode} : ${n} orbes perdues ramassées au même tick → repère effacé`, n > 1 && left === 0 && Number.isNaN(p.lostX), `restantes ${left}, lostX ${p.lostX}`);
 }
 
 if (failures) {

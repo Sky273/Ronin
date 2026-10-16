@@ -71,7 +71,7 @@ npm run dev          # then choose "Online" on the title screen
 - `npm run bots -- 12` fills a room with 12 bots and prints traffic statistics.
 - `npm run build:server` and `npm run start:server` build and run the production server.
 
-Your own samurai is predicted locally and reconciled with the server, so it reacts on the very frame you press a key; other players and enemies are interpolated about 100 ms behind. The server judges your strikes and parries against what you saw on screen (lag compensation, up to 333 ms), and snapshots are compact (well under 1 KB with 12 players). Iaidō duels between players and a 1v1 tournament dojo come next.
+Your own samurai is predicted locally and reconciled with the server, so it reacts on the very frame you press a key; other players and enemies are interpolated about 100 ms behind. The server judges your strikes and parries against what you saw on screen (lag compensation, up to 500 ms), and snapshots are compact (well under 1 KB with 12 players). In a room, press **G** near another ronin to challenge them to an **iaidō duel** (they press G to accept): a best-of-three face-off where the 斬 signal appears at the same game tick for both players whatever their latency, and the first clean strike wins (parry, fouls and simultaneous strikes included). A 1v1 tournament dojo comes next.
 
 ## Controls
 
@@ -85,6 +85,7 @@ Your own samurai is predicted locally and reconciled with the server, so it reac
 | Parry | K | right click / LB · RB |
 | Iai (hold, then release) | L | middle click / Y |
 | Choose an upgrade | 1 · 2 · 3 | — |
+| Challenge / accept a duel (online) · hold to forfeit | G | R3 |
 | Help · sound · music · hitboxes | H · M · N · F1 | — |
 
 Development shortcuts (dev server only): **F2** next Tide phase, **F3** warp to the guardian's arena, **F4** +100 honor.
