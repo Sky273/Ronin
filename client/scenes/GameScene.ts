@@ -5,7 +5,8 @@ import { gainHonor } from '../../shared/interactions';
 import type { Rect } from '../../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../../shared/types';
 import { DIFFICULTIES, type DifficultyId } from '../../shared/difficulty';
-import { addPlayer, createWorld, resetWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
+import { BIOMES } from '../../shared/biomes';
+import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
 import { Sfx } from '../audio/sfx';
 import { Fx } from '../fx/fx';
@@ -26,7 +27,7 @@ import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
 import { Scoreboard } from '../ui/scoreboard';
-import { UPGRADE_TEXT } from '../ui/texts';
+import { stageTitle, UPGRADE_TEXT } from '../ui/texts';
 import { TitleScreen } from '../ui/title';
 
 type Layer = 'bg' | 'world' | 'ui';
@@ -130,6 +131,7 @@ export class GameScene extends Phaser.Scene {
     this.worldCam.centerOn(this.camX, this.camY);
 
     this.backdrop = new Backdrop(this, this.put);
+    this.backdrop.setBiome(L.biome);
     this.terrain = new Terrain(this, L, this.put);
     this.fx = new Fx(L, this.terrain);
     this.gBack = this.put(this.add.graphics().setDepth(5), 'world');
@@ -160,6 +162,13 @@ export class GameScene extends Phaser.Scene {
       this.controls.onKey('F2', () => this.screen === 'play' && skipWavePhase(this.world));
       this.controls.onKey('F3', () => this.screen === 'play' && warpToArena(this.world));
       this.controls.onKey('F4', () => this.screen === 'play' && gainHonor(this.world, this.me, 100));
+      // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
+      this.controls.onKey('F7', () => {
+        if (this.screen !== 'play' || this.world.over) return;
+        nextStage(this.world);
+        for (const ev of this.world.events) this.onEvent(ev);
+        this.world.events.length = 0;
+      });
       (window as unknown as { __ronin: unknown }).__ronin = this;
     }
   }
@@ -181,6 +190,14 @@ export class GameScene extends Phaser.Scene {
       onTitle: () => this.goTitle(),
     });
     this.titleScreen.show();
+  }
+
+  /** Le niveau courant a changé (nouvelle étape, nouvelle partie) : terrain, caméra et fond suivent. */
+  private applyLevel(): void {
+    const L = this.world.level;
+    this.terrain.repaint(L);
+    this.worldCam.setBounds(0, 0, L.pxW, L.pxH);
+    this.backdrop.setBiome(L.biome);
   }
 
   /** Premier geste de l'utilisateur : le navigateur autorise alors l'audio. */
@@ -236,7 +253,7 @@ export class GameScene extends Phaser.Scene {
 
     resetWorld(this.world, (Date.now() & 0xffff) + 1, { difficulty: d });
     this.me = addPlayer(this.world, sanitizeName(this.prefs.name));
-    this.terrain.repaint();
+    this.applyLevel();
     this.prev.clear();
     this.phase.clear();
     this.lastPose.clear();
@@ -1009,7 +1026,7 @@ export class GameScene extends Phaser.Scene {
         this.sfx.bell();
         this.flash = 0.25;
         fx.ring(this.world.level.gate.x, this.world.level.gate.y - 50, 10, 120, 0.8, C.red, 4);
-        this.results.show(this.world.stage, this.me);
+        this.results.show(this.world.stage, this.me, { stage: this.world.level.stage, biome: this.world.level.biome });
         break;
       case 'gameOver':
         this.onGameOver({ score: ev.score, loop: ev.loop, kills: ev.kills });
@@ -1017,14 +1034,21 @@ export class GameScene extends Phaser.Scene {
       case 'stageStart':
         this.results.hide();
         this.wipe = 1.3;
-        this.terrain.repaint();
+        this.applyLevel();
+        this.camX = this.me.x + 60;
+        this.camY = this.me.y - 60;
+        this.worldCam.centerOn(this.camX, this.camY);
         this.prev.clear();
         this.phase.clear();
         this.lastPose.clear();
         this.scarf = [];
         this.lastLost = 0;
         this.sfx.taiko(false);
-        this.hud.banner('周', `The journey begins anew — loop ${ev.loop + 1}`, 'the enemies are more numerous and fiercer', '#15120e', 2200);
+        {
+          const L = this.world.level;
+          const b = BIOMES[L.biome];
+          this.hud.banner(b.kanji, stageTitle(L.stage, L.biome), `${b.subtitle} — the enemies grow fiercer`, '#15120e', 2400);
+        }
         break;
       case 'tideStart':
         this.sfx.drum(0, true);

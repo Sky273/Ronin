@@ -549,6 +549,9 @@ function makeNearLayer(scene: Phaser.Scene, key: string, kind: NearKind, h: numb
 const FAR_H = 460;
 const MID_H = 460;
 const NEAR_H = 620;
+const NEAR_Y = 120;
+/** Décalage vertical de la couche proche pour les biomes à silhouettes posées (village, neige, château). */
+const NEAR_LIFT = -130;
 
 /** Génère paresseusement les trois couches d'un biome ; les textures déjà créées sont réutilisées. */
 function ensureLayers(scene: Phaser.Scene, look: BiomeLook): BiomeLook['keys'] {
@@ -591,7 +594,7 @@ export class Backdrop {
     };
     add(keys.far, 60, FAR_H, 0.08);
     add(keys.mid, 150, MID_H, 0.2);
-    add(keys.near, 120, NEAR_H, 0.42);
+    add(keys.near, NEAR_Y, NEAR_H, 0.42);
   }
 
   /** Change le paysage de fond (textures générées au premier passage dans le biome). */
@@ -604,6 +607,9 @@ export class Backdrop {
     far.spr.setTexture(keys.far);
     mid.spr.setTexture(keys.mid);
     near.spr.setTexture(keys.near);
+    // Toits, pins et remparts reposent au bas de leur texture : on remonte la couche pour que
+    // leurs bases se tiennent sur l'horizon, derrière le terrain (le bambou couvre toute la hauteur).
+    near.baseY = NEAR_Y + (id === 'bamboo' ? 0 : NEAR_LIFT);
     this.sun.setTexture(ensureOrb(this.scene, look.orb));
     this.sunBase = { x: this.scene.scale.width * look.orbPos.x, y: this.scene.scale.height * look.orbPos.y };
     this.sun.setPosition(this.sunBase.x, this.sunBase.y);
