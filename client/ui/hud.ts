@@ -200,7 +200,7 @@ export class Hud {
     const st = w.stage;
     const W = this.scene.scale.width;
     const boss = w.enemies.find((e) => e.type === 'boss');
-    const loop = st.loop > 0 ? `周 ${st.loop + 1}  ·  ` : '';
+    const loop = `Stage ${st.loop + 1}  ·  `;
     if (st.state === 'arena') this.wave.setText(`${loop}門  the guardian bars the way`).setColor('#8e2416');
     else if (st.state === 'gateOpen') this.wave.setText(`${loop}門  the gate is open — press on →`).setColor('#b8321f');
     else if (st.state === 'cleared') this.wave.setText('');

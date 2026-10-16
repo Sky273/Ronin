@@ -10,6 +10,14 @@ export const C = {
   redDeep: 0x8e2416,
   wood: 0x3a2c20,
   blossom: 0xe3a3a0,
+  // Teintes des biomes (ajouts) : braises, suie, neige, pierre de château.
+  ember: 0xd9642b,
+  soot: 0x261c15,
+  inkWarm: 0x2b1a10,
+  inkCold: 0x1b252e,
+  snow: 0xfbf8f1,
+  snowShade: 0xb9c0c4,
+  stone: 0x3a3936,
 };
 
 export function rgba(hex: number, a: number): string {

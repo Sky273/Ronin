@@ -1,9 +1,11 @@
 import Phaser from 'phaser';
+import { biomeForStage, type BiomeId } from '../../shared/biomes';
 import { TICK_RATE } from '../../shared/constants';
 import type { Player, StageState } from '../../shared/types';
 import { fmtScore, livesLabel } from './difficultyText';
 import { gFill, gStroke, seeded } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
+import { stageTitle } from './texts';
 
 type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'world' | 'ui') => T;
 
@@ -50,7 +52,10 @@ export class Results {
     );
   }
 
-  show(st: StageState, p: Player): void {
+  /** `level` : étape terminée et son biome (par défaut, déduits de la boucle). */
+  show(st: StageState, p: Player, level?: { stage: number; biome: BiomeId }): void {
+    const stage = level?.stage ?? st.loop;
+    const biome = level?.biome ?? biomeForStage(stage);
     const W = this.scene.scale.width;
     const r = seeded(st.loop * 31 + 7);
     const g = this.panel;
@@ -61,7 +66,7 @@ export class Results {
 
     const secs = Math.floor(st.time / TICK_RATE);
     const time = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    this.subtitle.setText(`Stage 1 · the bamboo forest · 周 ${st.loop + 1}`);
+    this.subtitle.setText(stageTitle(stage, biome));
     const rows: [string, string | number][] = [
       ['Time', time],
       ['Foes slain', st.kills],
@@ -82,7 +87,7 @@ export class Results {
     sg.clear();
     gFill(sg, [{ x: -62, y: -64 }, { x: 64, y: -60 }, { x: 60, y: 64 }, { x: -64, y: 60 }], C.red, 0.92);
     gStroke(sg, [{ x: -54, y: -54 }, { x: 55, y: -51 }, { x: 52, y: 54 }, { x: -55, y: 51 }, { x: -54, y: -54 }], C.paper, 0.5, { width: 3, taperStart: 0, taperEnd: 0, jitter: 0.4 }, r);
-    this.footer.setText(`Space — continue the journey  ·  周 ${st.loop + 2}: the enemy grows fiercer`).setAlpha(0);
+    this.footer.setText(`Space — continue to ${stageTitle(stage + 1, biomeForStage(stage + 1))}`).setAlpha(0);
 
     this.visible = true;
     this.root.setVisible(true).setAlpha(0).setY(20);

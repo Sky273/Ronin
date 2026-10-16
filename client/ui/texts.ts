@@ -1,4 +1,10 @@
+import { BIOMES, type BiomeId } from '../../shared/biomes';
 import type { UpgradeId } from '../../shared/upgrades';
+
+/** Titre d'étape affiché (étape comptée à partir de 0) : « Stage 3 · the snowy pass ». */
+export function stageTitle(stage: number, biome: BiomeId): string {
+  return `Stage ${stage + 1} · ${BIOMES[biome].name}`;
+}
 
 export const UPGRADE_TEXT: Record<UpgradeId, { kanji: string; name: string; desc: string }> = {
   edge: { kanji: '刃', name: 'Edge', desc: '+20% damage' },
