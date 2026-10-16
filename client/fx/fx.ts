@@ -158,12 +158,23 @@ export class Fx {
     }
   }
 
-  petal(x: number, y: number): void {
+  /** Particule d'ambiance : pétales (bambou, château), flocons (neige), cendres et braises (village). */
+  petal(x: number, y: number, kind: 'petal' | 'snow' | 'ash' = 'petal'): void {
     const life = 5 + rnd() * 4;
-    this.push({
-      kind: 'petal', x, y, vx: -20 - rnd() * 30, vy: 18 + rnd() * 22, life, max: life,
-      size: 1.8 + rnd() * 1.4, color: rnd() < 0.7 ? C.blossom : C.red, alpha: 0.75, front: true,
-    });
+    if (kind === 'snow') {
+      this.push({ kind: 'petal', x, y, vx: -10 - rnd() * 20, vy: 25 + rnd() * 25, life, max: life, size: 1.4 + rnd() * 1.8, color: C.snow, alpha: 0.9, front: true });
+    } else if (kind === 'ash') {
+      const ember = rnd() < 0.3;
+      this.push({
+        kind: 'petal', x, y, vx: -15 - rnd() * 25, vy: ember ? 6 + rnd() * 10 : 14 + rnd() * 16, life, max: life,
+        size: ember ? 1.1 + rnd() : 1.5 + rnd() * 1.6, color: ember ? C.ember : C.soot, alpha: ember ? 0.9 : 0.55, front: true,
+      });
+    } else {
+      this.push({
+        kind: 'petal', x, y, vx: -20 - rnd() * 30, vy: 18 + rnd() * 22, life, max: life,
+        size: 1.8 + rnd() * 1.4, color: rnd() < 0.7 ? C.blossom : C.red, alpha: 0.75, front: true,
+      });
+    }
   }
 
   ring(x: number, y: number, r0: number, r1: number, dur: number, color: number, width: number): void {

@@ -41,7 +41,8 @@ function segWeight(d: SegmentDef, stage: number): number {
   return d.weight * f;
 }
 
-/** Largeur visée d'une étape (tuiles). */
+/** Largeur visée d'une étape (tuiles). L'assemblage peut dépasser de quelques tuiles
+ *  (dernier segment toléré à +4, fusion des plats) : largeurs réelles ≈ 200-262. */
 export function targetWidth(rng: Rng, stage: number): number {
   const base = 190 + 10 * Math.min(Math.max(stage, 1), 6);
   return Math.max(208, Math.min(258, base + randInt(rng, -6, 12)));
@@ -147,15 +148,27 @@ export function assembleLevel(pieces: SegmentPiece[], rng: Rng, stage: number, b
   // Décors du biome : au sol, espacés, jamais sur un sanctuaire ni dans l'arène.
   const decoList = BIOMES[biome].decos;
   const slots = [...c.decoSlots].sort((a, b) => a.tx - b.tx || a.fromRow - b.fromRow);
+  // Maisons et remparts sont larges (jusqu'à ~7 tuiles) : plus d'espace, et un sol plat dessous.
+  const WIDE: DecoKind[] = ['house', 'rampart'];
   let lastDeco = -99;
+  let lastWide = false;
   for (const s of slots) {
     if (s.tx >= ar.col || s.tx - lastDeco < 3) continue;
     if (cps.some((cp) => Math.abs(cp - s.tx) <= 2)) continue;
     if (rng.next() > 0.42) continue;
     const kind: DecoKind = pickWeighted(rng, decoList);
     const scale = Math.round((0.8 + rng.next() * 0.4) * 100) / 100;
-    decos.push({ kind, x: center(s.tx), y: c.surface(s.tx, s.fromRow, false) * TILE, s: scale });
+    const wide = WIDE.includes(kind);
+    if ((wide || lastWide) && s.tx - lastDeco < 7) continue;
+    const row = c.surface(s.tx, s.fromRow, false);
+    if (wide) {
+      let flat = s.tx + 3 < ar.col;
+      for (let d = -3; d <= 3 && flat; d++) if (c.surface(s.tx + d, s.fromRow, false) !== row) flat = false;
+      if (!flat) continue;
+    }
+    decos.push({ kind, x: center(s.tx), y: row * TILE, s: scale });
     lastDeco = s.tx;
+    lastWide = wide;
   }
 
   // Ennemis : emplacements admissibles (loin du départ, avant l'arène, un seul par colonne et rangée).

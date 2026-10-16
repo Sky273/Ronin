@@ -5,7 +5,7 @@ import { gainHonor } from '../../shared/interactions';
 import type { Rect } from '../../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../../shared/types';
 import { DIFFICULTIES, type DifficultyId } from '../../shared/difficulty';
-import { BIOMES } from '../../shared/biomes';
+import { BIOMES, biomeForStage } from '../../shared/biomes';
 import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, stepWorld, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
 import { Sfx } from '../audio/sfx';
@@ -405,9 +405,12 @@ export class GameScene extends Phaser.Scene {
 
     this.petalTimer -= dt;
     if (this.petalTimer <= 0) {
-      this.petalTimer = 0.2 + Math.random() * 0.45;
+      const biome = this.world.level.biome;
+      // Cadence et nature de l'ambiance selon le biome : neige dense, cendres, pétales rares au château.
+      const k = biome === 'snow' ? 0.35 : biome === 'castle' ? 2.5 : 1;
+      this.petalTimer = (0.2 + Math.random() * 0.45) * k;
       const v = this.worldCam.worldView;
-      this.fx.petal(v.x + v.width * (0.2 + Math.random()), v.y - 10);
+      this.fx.petal(v.x + v.width * (0.2 + Math.random()), v.y - 10, biome === 'snow' ? 'snow' : biome === 'village' ? 'ash' : 'petal');
     }
 
     if (this.debug) this.drawDebug();
@@ -1027,6 +1030,8 @@ export class GameScene extends Phaser.Scene {
         this.flash = 0.25;
         fx.ring(this.world.level.gate.x, this.world.level.gate.y - 50, 10, 120, 0.8, C.red, 4);
         this.results.show(this.world.stage, this.me, { stage: this.world.level.stage, biome: this.world.level.biome });
+        // Le fond du biome suivant est généré pendant le bilan, pas au moment du changement d'étape.
+        this.backdrop.prewarm(biomeForStage(this.world.level.stage + 1));
         break;
       case 'gameOver':
         this.onGameOver({ score: ev.score, loop: ev.loop, kills: ev.kills });

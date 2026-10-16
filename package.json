@@ -17,9 +17,10 @@
     "test:sim": "esbuild tests/sim.smoke.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/sim.smoke.mjs && node node_modules/.cache/sim.smoke.mjs",
     "test:scores": "esbuild tests/highscores.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/highscores.test.mjs && node node_modules/.cache/highscores.test.mjs",
     "test:gameover": "esbuild tests/gameover.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/gameover.test.mjs && node node_modules/.cache/gameover.test.mjs",
-    "test": "npm run test:sim && npm run test:scores && npm run test:gameover && npm run test:melody && npm run test:levelgen",
+    "test": "npm run test:sim && npm run test:scores && npm run test:gameover && npm run test:melody && npm run test:levelgen && npm run test:stages",
     "test:melody": "esbuild tests/melody.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/melody.test.mjs && node node_modules/.cache/melody.test.mjs",
-    "test:levelgen": "esbuild tests/levelgen.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/levelgen.test.mjs && node node_modules/.cache/levelgen.test.mjs"
+    "test:levelgen": "esbuild tests/levelgen.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/levelgen.test.mjs && node node_modules/.cache/levelgen.test.mjs",
+    "test:stages": "esbuild tests/stages.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/stages.test.mjs && node node_modules/.cache/stages.test.mjs"
   },
   "dependencies": {
     "phaser": "3.90.0"

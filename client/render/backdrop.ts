@@ -598,6 +598,13 @@ export class Backdrop {
   }
 
   /** Change le paysage de fond (textures générées au premier passage dans le biome). */
+  /** Génère à l'avance les textures d'un biome (sans l'afficher) pour éviter un à-coup plus tard. */
+  prewarm(id: BiomeId): void {
+    const look = BIOME_LOOK[id];
+    ensureLayers(this.scene, look);
+    ensureOrb(this.scene, look.orb);
+  }
+
   setBiome(id: BiomeId): void {
     if (id === this.biome) return;
     this.biome = id;

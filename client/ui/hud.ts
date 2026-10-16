@@ -200,15 +200,15 @@ export class Hud {
     const st = w.stage;
     const W = this.scene.scale.width;
     const boss = w.enemies.find((e) => e.type === 'boss');
-    const loop = `Stage ${st.loop + 1}  ·  `;
-    if (st.state === 'arena') this.wave.setText(`${loop}門  the guardian bars the way`).setColor('#8e2416');
-    else if (st.state === 'gateOpen') this.wave.setText(`${loop}門  the gate is open — press on →`).setColor('#b8321f');
+    const stagePrefix = `Stage ${st.loop + 1}  ·  `;
+    if (st.state === 'arena') this.wave.setText(`${stagePrefix}門  the guardian bars the way`).setColor('#8e2416');
+    else if (st.state === 'gateOpen') this.wave.setText(`${stagePrefix}門  the gate is open — press on →`).setColor('#b8321f');
     else if (st.state === 'cleared') this.wave.setText('');
-    else if (wv.phase === 'tide') this.wave.setText(`${loop}潮  Tide ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`).setColor('#8e2416');
+    else if (wv.phase === 'tide') this.wave.setText(`${stagePrefix}潮  Tide ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`).setColor('#8e2416');
     else if (wv.phase === 'calm') {
       const left = Math.max(0, (calmLength(w) - wv.t) / 60);
-      this.wave.setText(`${loop}凪  calm — the Tide comes in ${Math.ceil(left)} s`).setColor('#4a433b');
-    } else this.wave.setText(`${loop}潮  the Tide is rising…`).setColor('#8e2416');
+      this.wave.setText(`${stagePrefix}凪  calm — the Tide comes in ${Math.ceil(left)} s`).setColor('#4a433b');
+    } else this.wave.setText(`${stagePrefix}潮  the Tide is rising…`).setColor('#8e2416');
 
     if (boss) {
       this.shownBoss += (boss.hp / boss.maxHp - this.shownBoss) * 0.15;
