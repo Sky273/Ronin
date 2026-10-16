@@ -21,6 +21,7 @@ const HELP = [
   'Shift   dash · K / right click   parry · L (hold)   iai, draw-and-strike',
   '1 2 3   choose an upgrade · H   help · M   sound · N   music · F1   hitboxes',
   'Online: Esc or hold Select (gamepad)   leave the room',
+  'G   challenge / accept a duel (online)',
 ];
 
 interface Card {

@@ -199,6 +199,18 @@ export class Sfx {
   shuriken(): void {
     this.whoosh(0, 0.12, 4000, 6000, 4, 0.12);
   }
+  /** Signal 斬 d'un duel : claquement sec de hyōshigi et souffle bref (plus discret en spectateur). */
+  zan(soft = false): void {
+    const k = soft ? 0.35 : 1;
+    this.tone('square', 2100, 1900, 0, 0.035, 0.12 * k);
+    this.tone('sine', 880, 860, 0, 0.12, 0.25 * k);
+    this.whoosh(0, 0.09, 6000, 2500, 1.5, 0.3 * k, 'highpass');
+  }
+  /** Défi reçu : deux notes graves de koto. */
+  duelInvite(): void {
+    this.tone('triangle', 392, 388, 0, 0.35, 0.12);
+    this.tone('triangle', 294, 292, 0.14, 0.5, 0.12);
+  }
 
   /** Vent d'ambiance très discret. */
   private wind(): void {

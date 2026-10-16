@@ -29,6 +29,8 @@ import type { ScoreTable } from '../scores/types';
 import { DifficultySelect } from '../ui/difficultySelect';
 import { DIFFICULTY_TEXT, fmtScore, foesLabel, livesLabel } from '../ui/difficultyText';
 import { AllyMarkers } from '../ui/allies';
+import { DevDuel, DuelOverlay } from '../ui/duel';
+import { duelView } from '../ui/duelView';
 import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
@@ -76,6 +78,10 @@ export class GameScene extends Phaser.Scene {
   private hud!: Hud;
   /** Repères des coéquipiers hors de la vue (coop). */
   private allies!: AllyMarkers;
+  /** Duels iaidō (coop) : invitation, signal 斬, issues, toasts. */
+  private duel!: DuelOverlay;
+  /** Développement : faux duel local (F9). */
+  private devDuel: DevDuel | null = null;
   private results!: Results;
   private gBack!: G;
   private gChars!: G;
@@ -199,6 +205,7 @@ export class GameScene extends Phaser.Scene {
     this.gOverlay = this.put(this.add.graphics().setDepth(95), 'ui');
     this.hud = new Hud(this, this.put);
     this.allies = new AllyMarkers(this, this.put);
+    this.duel = new DuelOverlay(this, this.put, { sfx: this.sfx, shake: (v) => this.addShake(v) });
     this.results = new Results(this, this.put, () => {
       this.sfx.drum(0, true);
       this.addShake(6);
@@ -222,6 +229,13 @@ export class GameScene extends Phaser.Scene {
       this.controls.onKey('F8', () => {
         if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
         this.local.addEcho();
+      });
+      // F9 : faux duel avec un autre joueur (un écho est ajouté au besoin), pour juger le rendu sans réseau.
+      this.controls.onKey('F9', () => {
+        if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
+        const me = this.me;
+        const other = this.world.players.find((p) => p.id !== me.id) ?? this.local.addEcho();
+        if (other) (this.devDuel ??= new DevDuel()).start(this.world, me.id, other.id);
       });
       // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
       this.controls.onKey('F7', () => {
@@ -395,6 +409,7 @@ export class GameScene extends Phaser.Scene {
     // Une partie solo se joue toujours sur la source locale.
     if (this.src !== this.local) this.useSource(this.local);
     const w = this.local.world;
+    this.devDuel?.stop(w);
     resetWorld(w, (Date.now() & 0xffff) + 1, { difficulty: d });
     this.local.reset(addPlayer(w, sanitizeName(this.prefs.name)).id);
     this.meCache = null;
@@ -414,6 +429,7 @@ export class GameScene extends Phaser.Scene {
     this.results.hide();
     this.hud.reset();
     this.allies.clear();
+    this.duel.clear();
     this.fx.clear();
     this.controls.reset();
     this.deathText.setAlpha(0);
@@ -437,6 +453,7 @@ export class GameScene extends Phaser.Scene {
     this.meCache = null;
     this.timeScale = 1;
     this.allies.clear();
+    this.duel.clear();
     // Les effets tachent le terrain du niveau : ils suivent l'objet niveau de la nouvelle source.
     this.fx.clear();
     this.fx = new Fx(src.world.level, this.terrain);
@@ -550,6 +567,7 @@ export class GameScene extends Phaser.Scene {
         // En local, chaque événement garde le tick du pas qui l'a produit (rattrapage de plusieurs pas).
         this.onEvent(events[i], src === this.local ? this.local.eventTicks[i] : this.world.tick);
       }
+      if (src === this.local && this.devDuel?.active) for (const ev of this.devDuel.step(this.world)) this.onEvent(ev);
       // En ligne, une étape a pu changer sans que son événement nous parvienne (arrivée en cours de route).
       if (src instanceof RemoteSource && src.consumeStageChanged() && !events.some((e) => e.type === 'stageStart')) this.resetView();
     }
@@ -646,6 +664,8 @@ export class GameScene extends Phaser.Scene {
     }
     if (this.screen === 'play') this.allies.update(w, this.src.meId, this.worldCam);
     else this.allies.hide();
+    if (this.screen === 'play' && (w.duels || w.duelInvites || this.duel.busy)) this.duel.update(duelView(w, this.src.meId, this.duel.memo), w, this.worldCam, time);
+    else this.duel.hide();
     this.updateMusic();
 
     const dead = this.me.state === 'dead' && (this.screen === 'play' || this.screen === 'over');
@@ -888,7 +908,8 @@ export class GameScene extends Phaser.Scene {
     const away = !!this.world.away?.includes(p.id);
     const text = away ? `${p.name} · away` : p.name;
     if (t.text !== text) t.setText(text);
-    t.setPosition(pos.x, pos.y - 64).setVisible(show).setAlpha(away ? 0.5 : 1);
+    // En duel, le nom est porté par la surcouche du duel (avec les marques de victoire).
+    t.setPosition(pos.x, pos.y - 64).setVisible(show && !this.duel.ownsName(p.id)).setAlpha(away ? 0.5 : 1);
   }
 
   private makeLabel(p: Player): Phaser.GameObjects.Text {
@@ -1416,6 +1437,13 @@ export class GameScene extends Phaser.Scene {
         break;
       case 'tideStart':
         this.sfx.drum(0, true);
+        break;
+      case 'duelInvite':
+      case 'duelCancel':
+      case 'duelStart':
+      case 'duelRound':
+      case 'duelEnd':
+        this.duel.onEvent(ev, this.src.meId);
         break;
       case 'tideEnd':
         this.sfx.gong();
