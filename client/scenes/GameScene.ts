@@ -6,6 +6,8 @@ import type { Rect } from '../../shared/math';
 import type { Enemy, GameEvent, Player, World } from '../../shared/types';
 import { DIFFICULTIES, type DifficultyId } from '../../shared/difficulty';
 import { BIOMES, biomeForStage } from '../../shared/biomes';
+import { targetPlayer } from '../../shared/enemy';
+import { arenaInside } from '../../shared/level';
 import { createPlayer } from '../../shared/player';
 import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
@@ -26,6 +28,7 @@ import { insertScore, loadPrefs, loadScores, type Prefs, qualifies, sanitizeName
 import type { ScoreTable } from '../scores/types';
 import { DifficultySelect } from '../ui/difficultySelect';
 import { DIFFICULTY_TEXT, fmtScore, foesLabel, livesLabel } from '../ui/difficultyText';
+import { AllyMarkers } from '../ui/allies';
 import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
@@ -70,6 +73,8 @@ export class GameScene extends Phaser.Scene {
   private terrain!: Terrain;
   private fx!: Fx;
   private hud!: Hud;
+  /** Repères des coéquipiers hors de la vue (coop). */
+  private allies!: AllyMarkers;
   private results!: Results;
   private gBack!: G;
   private gChars!: G;
@@ -190,6 +195,7 @@ export class GameScene extends Phaser.Scene {
     this.put(this.add.image(0, 0, makeVignette(this, 'vignette', W, H)).setOrigin(0).setDepth(91), 'ui');
     this.gOverlay = this.put(this.add.graphics().setDepth(95), 'ui');
     this.hud = new Hud(this, this.put);
+    this.allies = new AllyMarkers(this, this.put);
     this.results = new Results(this, this.put, () => {
       this.sfx.drum(0, true);
       this.addShake(6);
@@ -404,6 +410,7 @@ export class GameScene extends Phaser.Scene {
     this.worldCam.centerOn(this.camX, this.camY);
     this.results.hide();
     this.hud.reset();
+    this.allies.clear();
     this.fx.clear();
     this.controls.reset();
     this.deathText.setAlpha(0);
@@ -426,6 +433,7 @@ export class GameScene extends Phaser.Scene {
     this.src = src;
     this.meCache = null;
     this.timeScale = 1;
+    this.allies.clear();
     // Les effets tachent le terrain du niveau : ils suivent l'objet niveau de la nouvelle source.
     this.fx.clear();
     this.fx = new Fx(src.world.level, this.terrain);
@@ -624,6 +632,8 @@ export class GameScene extends Phaser.Scene {
     const src = this.src;
     this.hud.setNet(src instanceof RemoteSource ? { rtt: src.rtt, jitter: src.jitterMs, players: w.players.length } : null);
     this.hud.update(this.me, w, this.best, dt, time, this.worldCam);
+    if (this.screen === 'play') this.allies.update(w, this.src.meId, this.worldCam);
+    else this.allies.hide();
     this.updateMusic();
 
     const dead = this.me.state === 'dead' && (this.screen === 'play' || this.screen === 'over');
@@ -680,6 +690,7 @@ export class GameScene extends Phaser.Scene {
         gStroke(gB, [{ x: x - 2 + sway, y: y + 6 }, { x: x + 2 + sway, y: y + 14 }, { x: x - 2 + sway, y: y + 23 }], C.red, 0.9, { width: 2.2, taperStart: 0.1, taperEnd: 0.4 }, r);
       }
       if (Math.random() < 0.25) this.fx.mist(x, bot - Math.random() * bot, 1, { color: C.redDeep, size: 5, alpha: 0.2, vy: -30, life: 0.8 });
+      if (this.world.mode === 'coop') this.drawKekkaiArrows(x, bot, time, boil);
     }
     // Porte : scellée par des ofuda tant que le gardien vit, lumineuse une fois ouverte.
     const gx = l.gate.x;
@@ -708,10 +719,34 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Coop : sens unique du kekkai. Chevrons d'encre qui glissent vers l'intérieur (la droite) entre les
+   * ofuda, et une flèche au pied de la barrière : on entre, on ne ressort pas.
+   */
+  private drawKekkaiArrows(x: number, bot: number, time: number, boil: number): void {
+    const gB = this.gFront;
+    const drift = (time * 0.02) % 14;
+    for (let k = 0; k < 5; k++) {
+      const y = bot - 100 - k * 90; // entre deux ofuda
+      const r = seeded(hash2(k + 130, boil));
+      for (let j = 0; j < 3; j++) {
+        const cx = x - 16 + j * 14 + drift;
+        const a = 0.25 + 0.45 * (1 - Math.abs(cx - x) / 30);
+        gStroke(gB, [{ x: cx - 5, y: y - 8 }, { x: cx + 3, y }, { x: cx - 5, y: y + 8 }], C.redDeep, Math.max(0.1, a), { width: 2.4, taperStart: 0.15, taperEnd: 0.35 }, r);
+      }
+    }
+    // Flèche au sol : trait horizontal et pointe, du côté extérieur vers l'arène.
+    const r = seeded(hash2(171, boil));
+    const y = bot - 8;
+    gStroke(gB, [{ x: x - 34, y }, { x: x + 26, y: y - 1 }], C.ink, 0.6, { width: 3, taperStart: 0.4, taperEnd: 0.05, jitter: 0.2 }, r);
+    gStroke(gB, [{ x: x + 16, y: y - 8 }, { x: x + 28, y: y - 1 }, { x: x + 16, y: y + 6 }], C.ink, 0.7, { width: 3, taperStart: 0.1, taperEnd: 0.3 }, r);
+  }
+
   private drawCheckpoints(time: number): void {
     const cps = this.world.level.checkpoints;
     cps.forEach((c, i) => {
-      const active = i === this.me.checkpoint;
+      // Coop : la lueur marque le sanctuaire commun de la salle, pas celui du joueur local.
+      const active = this.world.mode === 'coop' ? i === this.world.shrine : i === this.me.checkpoint;
       const fy = c.y - 30 * 1.35;
       const r = seeded(hash2(i, Math.floor(time / 90)));
       if (active) {
@@ -771,7 +806,8 @@ export class GameScene extends Phaser.Scene {
         const x0 = pos.x + e.facing * BOSS.SWEEP_HB.x;
         gStroke(this.gBack, [{ x: x0, y: pos.y - 1 }, { x: x0 + e.facing * BOSS.SWEEP_HB.w * k, y: pos.y - 1 }], C.red, 0.35, { width: 4, taperStart: 0.1, taperEnd: 0.6 }, r);
       } else {
-        const tgt = this.me.x;
+        // Coop : le bond vise la cible du gardien (joueur de son côté du kekkai), pas forcément le joueur local.
+        const tgt = this.world.mode === 'coop' ? (targetPlayer(this.world, e)?.x ?? this.me.x) : this.me.x;
         gStroke(this.gBack, ringPoints(tgt, pos.y - 2, 30 * k + 10, Math.PI, Math.PI * 2, 12), C.red, 0.35, { width: 3, taperStart: 0.2, taperEnd: 0.2 }, r);
       }
     }
@@ -995,6 +1031,26 @@ export class GameScene extends Phaser.Scene {
     this.shake = Math.max(this.shake, v);
   }
 
+  /** Cloche douce (sanctuaire d'un coéquipier) : une seule note, plus brève et plus faible que Sfx.bell. */
+  private softBell(): void {
+    const out = this.sfx.output;
+    if (!out) return;
+    const { ctx, dest } = out;
+    const t = ctx.currentTime;
+    for (const [f, peak, dur] of [[784.6, 0.035, 1.1], [1176, 0.015, 0.7]] as const) {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(dest);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+    }
+  }
+
   private near(x: number): boolean {
     return Math.abs(x - this.me.x) < 700;
   }
@@ -1201,6 +1257,16 @@ export class GameScene extends Phaser.Scene {
         break;
       }
       case 'checkpoint':
+        if (this.world.mode === 'coop' && !mine) {
+          // Sanctuaire commun atteint par un coéquipier : annoncé à toute la salle, son et lueur de près seulement.
+          const who = this.player(ev.pid)?.name || 'a ronin';
+          this.hud.banner('社', `Shrine — reached by ${who}`, 'shared rebirth point', '#15120e', 900);
+          if (this.near(ev.x)) {
+            fx.ring(ev.x, ev.y - 40, 6, 50, 0.6, C.red, 3);
+            this.softBell();
+          }
+          break;
+        }
         fx.ring(ev.x, ev.y - 40, 6, 50, 0.6, C.red, 3);
         if (!mine) break;
         this.sfx.bell();
@@ -1262,7 +1328,14 @@ export class GameScene extends Phaser.Scene {
         this.hud.banner('怒', 'Akaoni is enraged', 'faster · devastating charge', '#8e2416', 1400);
         break;
       case 'bossSpawn':
-        this.hud.banner('赤鬼', 'Akaoni, demon general', 'sweep: crouch · leap: jump · charge: dash', '#8e2416', 2600);
+        if (this.world.mode === 'coop') {
+          // Coop : la bannière du kekkai (arenaLock, même tick) reste lisible ; le gardien est présenté
+          // ensuite, et seulement à ceux qui sont dans l'arène.
+          this.time.delayedCall(1400, () => {
+            if (this.screen !== 'play' || this.world.mode !== 'coop' || this.world.stage.state !== 'arena') return;
+            if (arenaInside(this.world.level, this.me.x)) this.hud.banner('赤鬼', 'Akaoni, demon general', 'sweep: crouch · leap: jump · charge: dash', '#8e2416', 2600);
+          });
+        } else this.hud.banner('赤鬼', 'Akaoni, demon general', 'sweep: crouch · leap: jump · charge: dash', '#8e2416', 2600);
         fx.mist(ev.x, ev.y - 50, 26, { color: C.ink, size: 16, alpha: 0.3, spread: 70, vy: -30, life: 1.2, front: true });
         break;
       case 'tideWarn':
@@ -1271,6 +1344,12 @@ export class GameScene extends Phaser.Scene {
         break;
       case 'arenaLock':
         this.sfx.taiko(true);
+        if (this.world.mode === 'coop') {
+          // Coop : la salle entière est prévenue ; dedans ou dehors, le message diffère.
+          if (arenaInside(this.world.level, this.me.x)) this.hud.banner('結界', 'The kekkai is sealed', 'none may leave — the guardian awaits', '#8e2416', 1300);
+          else this.hud.banner('結界', 'The kekkai is sealed — enter, none may leave', 'follow 結界 ▶ to join the fight', '#8e2416', 2000);
+          if (!this.near(ev.x)) break;
+        }
         fx.mist(ev.x, this.me.y - 60, 20, { color: C.redDeep, size: 12, alpha: 0.3, spread: 40, vy: -20, life: 1, front: true });
         this.addShake(8);
         break;
