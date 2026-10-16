@@ -1,5 +1,18 @@
 // Tests de la simulation des duels iaidō (jugement, manches, invitations, immunité).
 // Lancer : npm run test:duel
+import { DUEL, DUEL_WHY, PLAYER, TILE } from '../shared/constants';
+import {
+  duelOf, type DuelRules, type ExchangeSide, findDuelSpot, isFoul, judgeExchange, kamaeLength, startDuel, stepDuelist, strikeStart,
+} from '../shared/duel';
+import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
+import { BTN } from '../shared/input';
+import { damagePlayer, killEnemy } from '../shared/interactions';
+import { createLagComp, setLag } from '../shared/lagcomp';
+import { T_EMPTY, T_SOLID, type Level } from '../shared/level';
+import type { DifficultyId } from '../shared/difficulty';
+import type { Duel, GameEvent, Player, World } from '../shared/types';
+import { addPlayer, createWorld, nextStage, removePlayer, stepWorld, warpToArena } from '../shared/world';
+
 export {};
 let failures = 0;
 function check(name: string, ok: boolean, info = ''): void {
@@ -7,7 +20,813 @@ function check(name: string, ok: boolean, info = ''): void {
   if (!ok) failures++;
 }
 
-check('suite initialisée', true);
+const W = DUEL_WHY;
+
+// ─── Outils ─────────────────────────────────────────────────────────────────
+
+type Script = (w: World, p: Player) => number;
+
+/** Salle coop calme : aucun ennemi, aucun renfort, Marée figée en accalmie. */
+function quiet(w: World): void {
+  w.enemies = [];
+  w.projectiles = [];
+  w.spawnTimer = 1e9;
+  w.wave.phase = 'calm';
+  w.wave.t = 0;
+}
+
+/** Monde coop à n joueurs, tous posés au sol près d'un sol plat (centre renvoyé). */
+function coopWorld(n: number, seed = 5): { w: World; ps: Player[]; cx: number; gy: number } {
+  const w = createWorld(seed, { mode: 'coop', difficulty: 'normal' });
+  const ps: Player[] = [];
+  for (let i = 0; i < n; i++) ps.push(addPlayer(w, 'p' + i, { color: i }));
+  quiet(w);
+  const spot = findDuelSpot(w.level, w.level.spawn.x + 300, w.level.spawn.y, DUEL.GAP)!;
+  for (const p of ps) {
+    p.iframes = 0;
+    put(w, p, spot.x);
+  }
+  return { w, ps, cx: spot.x, gy: spot.y };
+}
+
+function put(w: World, p: Player, x: number): void {
+  p.x = x;
+  p.y = findGround(w.level, x, p.y, 3) ?? findGround(w.level, x, p.y, 12) ?? p.y;
+  p.vx = 0;
+  p.vy = 0;
+  p.onGround = true;
+}
+
+/** Avance d'un tick ; renvoie les événements produits. */
+function tick(w: World, script: Script = () => 0, keepQuiet = true): GameEvent[] {
+  const m = new Map<number, number>();
+  for (const p of w.players) m.set(p.id, script(w, p));
+  stepWorld(w, m);
+  if (keepQuiet) quiet(w);
+  const ev = w.events.slice();
+  w.events.length = 0;
+  return ev;
+}
+
+function run(w: World, n: number, script: Script = () => 0, keepQuiet = true): GameEvent[] {
+  const out: GameEvent[] = [];
+  for (let i = 0; i < n; i++) out.push(...tick(w, script, keepQuiet));
+  return out;
+}
+
+/** Avance jusqu'à la fin du duel `d` (retiré de w.duels) ; renvoie les événements. */
+function runDuel(w: World, d: Duel, script: Script, max = 20000): GameEvent[] {
+  const out: GameEvent[] = [];
+  for (let i = 0; i < max && w.duels!.includes(d); i++) out.push(...tick(w, script));
+  return out;
+}
+
+/** Plan d'un duelliste pour une manche : action et décalage par rapport au signal. */
+type Plan = { kind: 'none' } | { kind: 'iai' | 'attack' | 'parry'; at: number };
+const none: Plan = { kind: 'none' };
+const iai = (at: number): Plan => ({ kind: 'iai', at });
+const attack = (at: number): Plan => ({ kind: 'attack', at });
+const parry = (at: number): Plan => ({ kind: 'parry', at });
+
+/**
+ * Script de duel : pour chaque manche jouée (d.played), le plan de chaque côté.
+ * iai : IAI tenu dès la garde puis relâché au tick sig + at ; attack / parry : appui au tick sig + at.
+ */
+function duelScript(plans: (pid: number, played: number) => Plan): Script {
+  return (w, p) => {
+    const d = duelOf(w, p.id);
+    if (!d || (d.phase !== 'kamae' && d.phase !== 'open')) return 0;
+    const plan = plans(p.id, d.played);
+    const t = w.tick - d.sigTick;
+    switch (plan.kind) {
+      case 'none': return 0;
+      case 'iai': return t < plan.at ? BTN.IAI : 0;
+      case 'attack': return t === plan.at ? BTN.ATTACK : 0;
+      case 'parry': return t === plan.at ? BTN.PARRY : 0;
+    }
+  };
+}
+
+const rounds = (ev: GameEvent[]) => ev.filter((e): e is Extract<GameEvent, { type: 'duelRound' }> => e.type === 'duelRound');
+const ends = (ev: GameEvent[]) => ev.filter((e): e is Extract<GameEvent, { type: 'duelEnd' }> => e.type === 'duelEnd');
+const cancels = (ev: GameEvent[]) => ev.filter((e): e is Extract<GameEvent, { type: 'duelCancel' }> => e.type === 'duelCancel');
+const invites = (ev: GameEvent[]) => ev.filter((e): e is Extract<GameEvent, { type: 'duelInvite' }> => e.type === 'duelInvite');
+
+/** Engage un duel coop entre deux joueurs (sol plat trouvé autour d'eux). */
+function duel(w: World, a: Player, b: Player, rules: DuelRules = { firstTo: DUEL.FIRST_TO, maxRounds: DUEL.MAX_ROUNDS, draw: true }): Duel {
+  const d = startDuel(w, a, b, rules);
+  if (!d) throw new Error('aucun emplacement de duel');
+  w.events.length = 0;
+  return d;
+}
+
+// ─── 1. judgeExchange : table ───────────────────────────────────────────────
+{
+  const S = 1000;
+  const T = DUEL.STRIKE_TRAVEL;
+  const side = (o: Partial<ExchangeSide> = {}): ExchangeSide => ({ foul: false, strikeT: -1, parryT: -1, ...o });
+  const iaiAt = (t: number) => side({ strikeT: strikeStart(t, false) });
+  const slashAt = (t: number) => side({ strikeT: strikeStart(t, true) });
+  /** Premier verdict rendu en avançant le tick de jugement, et son tick. */
+  const first = (a: ExchangeSide, b: ExchangeSide) => {
+    for (let now = S - 300; now < S + DUEL.ROUND_MAX + 100; now++) {
+      const v = judgeExchange(S, a, b, now);
+      if (v) return { ...v, now };
+    }
+    return null;
+  };
+  const is = (r: ReturnType<typeof first>, winner: number, why: number, now?: number) =>
+    !!r && r.winner === winner && r.why === why && (now === undefined || r.now === now);
+  const fmt = (r: ReturnType<typeof first>) => (r ? `w=${r.winner} why=${r.why} à S${r.now - S >= 0 ? '+' : ''}${r.now - S}` : 'aucun');
+
+  check('faute : action avant S + ANTICIPATE', isFoul(S, S - 50) && isFoul(S, S + DUEL.ANTICIPATE - 1) && !isFoul(S, S + DUEL.ANTICIPATE));
+  let r = first(side({ foul: true }), iaiAt(S + 20));
+  check('faute seule : l\'autre gagne (反則)', is(r, 1, W.FOUL), fmt(r));
+  r = first(iaiAt(S + 20), side({ foul: true }));
+  check('faute seule (côté b) : a gagne', is(r, 0, W.FOUL), fmt(r));
+  r = first(side({ foul: true }), side({ foul: true }));
+  check('double faute : rejouée', is(r, -1, W.DOUBLE_FOUL), fmt(r));
+
+  r = first(iaiAt(S + 10), iaiAt(S + 15));
+  check('frappe contre frappe : le premier impact gagne, tranché à min(I) + TIE', is(r, 0, W.IPPON, S + 10 + T + DUEL.TIE_TICKS), fmt(r));
+  r = first(iaiAt(S + 30), iaiAt(S + 12));
+  check('frappe contre frappe (b plus rapide)', is(r, 1, W.IPPON, S + 12 + T + DUEL.TIE_TICKS), fmt(r));
+  for (const dt of [-1, 0, 1]) {
+    r = first(iaiAt(S + 20), iaiAt(S + 20 + dt));
+    check(`相打ち à ${dt >= 0 ? '+' : ''}${dt} tick : rejouée`, is(r, -1, W.AIUCHI, S + 20 + Math.min(0, dt) + T + DUEL.TIE_TICKS), fmt(r));
+  }
+  r = first(iaiAt(S + 20), iaiAt(S + 22));
+  check('écart de 2 ticks : pas de 相打ち', is(r, 0, W.IPPON), fmt(r));
+
+  for (let k = 0; k <= T; k++) {
+    r = first(iaiAt(S + 20), side({ parryT: S + 20 + k }));
+    check(`parade ${k} tick(s) après la frappe adverse : contre (弾)`, is(r, 1, W.PARRY, S + 20 + T), fmt(r));
+  }
+  r = first(iaiAt(S + 20), side({ parryT: S + 20 + T + 1 }));
+  check('parade 9 ticks après la frappe : trop tard', is(r, 0, W.IPPON), fmt(r));
+  r = first(side({ parryT: S + 18 }), iaiAt(S + 20));
+  check('parade avant la frappe (garde qui couvre l\'impact) : contre', is(r, 0, W.PARRY), fmt(r));
+  r = first(iaiAt(S + 20), side({ parryT: S + 20 + T - PLAYER.PARRY_ACTIVE - 1 }));
+  check('impact juste après la garde (récupération) : la frappe gagne', is(r, 0, W.IPPON), fmt(r));
+  r = first(iaiAt(S + 14), side({ parryT: S + 10 }));
+  check('parade dans le vide puis frappe pendant la récupération : la frappe gagne', is(r, 0, W.IPPON), fmt(r));
+  r = first(slashAt(S + 10), iaiAt(S + 14));
+  check('ATTACK plus lent de 6 ticks : l\'iai relâché 4 ticks plus tard gagne', is(r, 1, W.IPPON), fmt(r));
+  r = first(slashAt(S + 10), iaiAt(S + 15));
+  check('ATTACK contre iai relâché 5 ticks plus tard : 相打ち (impacts à 1 tick)', is(r, -1, W.AIUCHI), fmt(r));
+  r = first(slashAt(S + 10), iaiAt(S + 16));
+  check('ATTACK contre iai relâché 6 ticks plus tard : 相打ち', is(r, -1, W.AIUCHI), fmt(r));
+  r = first(slashAt(S + 10), iaiAt(S + 18));
+  check('ATTACK contre iai relâché 8 ticks plus tard : ATTACK gagne', is(r, 0, W.IPPON), fmt(r));
+  r = first(side(), side());
+  check('personne ne frappe : rejouée à S + ROUND_MAX', is(r, -1, W.TIMEOUT, S + DUEL.ROUND_MAX), fmt(r));
+  r = first(side({ parryT: S + 30 }), side());
+  check('une parade seule ne fait rien : rejouée (TIMEOUT)', is(r, -1, W.TIMEOUT), fmt(r));
+  r = first(iaiAt(S + DUEL.ROUND_MAX - 1), side());
+  check('frappe juste avant ROUND_MAX : elle porte', is(r, 0, W.IPPON), fmt(r));
+
+  // Balayage : symétrie a ↔ b et stabilité du verdict (il ne change plus une fois rendu).
+  const offs = [-1, 6, 8, 10, 12, 14, 18, 20, 22, 26, 30, 40];
+  let asym = 0;
+  let unstable = 0;
+  let total = 0;
+  for (const sa of offs) for (const pa of offs) for (const sb of offs) for (const pb of offs) for (const slash of [false, true]) {
+    const a = side({ strikeT: sa < 0 ? -1 : strikeStart(S + sa, slash), parryT: pa < 0 ? -1 : S + pa });
+    const b = side({ strikeT: sb < 0 ? -1 : strikeStart(S + sb, false), parryT: pb < 0 ? -1 : S + pb });
+    const ab = first(a, b);
+    const ba = first(b, a);
+    total++;
+    if (!ab || !ba || ab.why !== ba.why || ab.now !== ba.now || (ab.winner < 0 ? ba.winner !== -1 : ba.winner !== 1 - ab.winner)) asym++;
+    const late = judgeExchange(S, a, b, S + DUEL.ROUND_MAX + 500);
+    if (ab && (!late || late.winner !== ab.winner || late.why !== ab.why)) unstable++;
+  }
+  check(`balayage de ${total} échanges : verdict symétrique (a ↔ b)`, asym === 0, `${asym} écart(s)`);
+  check('balayage : verdict stable une fois rendu', unstable === 0, `${unstable} écart(s)`);
+
+  const ks = new Set<number>();
+  let inRange = true;
+  for (let id = 1; id < 400; id++) for (let pl = 0; pl < 6; pl++) {
+    const k = kamaeLength(id, pl);
+    ks.add(k);
+    if (k < DUEL.KAMAE_MIN || k > DUEL.KAMAE_MAX) inRange = false;
+  }
+  check('durée de garde hachée dans [KAMAE_MIN, KAMAE_MAX], variée', inRange && ks.size > 100, `${ks.size} valeurs`);
+}
+
+// ─── 2. Manches simulées ────────────────────────────────────────────────────
+{
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const rngBefore = JSON.stringify(w.rng);
+  const d = duel(w, a, b);
+  check('startDuel : joueurs sur leurs marques, face à face, même sol', a.x === d.x - d.gap / 2 && b.x === d.x + d.gap / 2 && a.y === d.y && b.y === d.y && a.facing === 1 && b.facing === -1);
+  check('le joueur de gauche est le côté a', d.a.pid === a.id && d.b.pid === b.id);
+  // Mise en place : bouger ne sert à rien.
+  run(w, DUEL.ENTER_TICKS - 1, () => BTN.RIGHT | BTN.JUMP);
+  check('enter : immobiles malgré les entrées', d.phase === 'enter' && a.x === d.x - d.gap / 2 && a.y === d.y && a.state === 'normal');
+  tick(w);
+  check('kamae : signal publié dès l\'entrée en garde', d.phase === 'kamae' && d.sigTick === w.tick + kamaeLength(d.id, 0), `sig=${d.sigTick} tick=${w.tick}`);
+  // Garde : IAI tenu charge à la vitesse de base ; aucune autre entrée ne déplace.
+  a.up.iai = 5; // amélioration ignorée en duel
+  const ev = run(w, 60, (_w, p) => (p === a ? BTN.IAI | BTN.LEFT : BTN.DASH | BTN.RIGHT | BTN.DOWN));
+  check('kamae : IAI tenu → pose iaiCharge, charge à vitesse de base', a.state === 'iaiCharge' && a.iaiCharge === 59, `état=${a.state} charge=${a.iaiCharge}`);
+  check('kamae : événements iaiStart et iaiReady', ev.some((e) => e.type === 'iaiStart' && e.pid === a.id) && ev.some((e) => e.type === 'iaiReady' && e.pid === a.id));
+  check('kamae : personne ne bouge (dash, déplacement)', a.x === d.x - d.gap / 2 && b.x === d.x + d.gap / 2 && b.state === 'normal' && !b.crouch);
+  check('le duel ne consomme pas w.rng', JSON.stringify(w.rng) === rngBefore);
+  // Relâcher avant le signal : faute.
+  const ev2 = run(w, 2, () => 0);
+  const r0 = rounds(ev2)[0];
+  check('relâcher l\'iai chargé avant le signal : faute, b gagne la manche', !!r0 && r0.winner === b.id && r0.why === W.FOUL && d.phase === 'resolve' && d.b.wins === 1, JSON.stringify(r0));
+  check('react publié (négatif pour une faute pendant la garde, -1 sans action)', !!r0 && r0.ra < 0 && r0.rb === -1);
+  tick(w);
+  check('resolve : vainqueur en iaiStrike, perdant en hurt', b.state === 'iaiStrike' && a.state === 'hurt', `${b.state}/${a.state}`);
+}
+
+// Séries complètes
+function series(plans: (side: 'a' | 'b', played: number) => Plan, rules: DuelRules = { firstTo: 2, maxRounds: 5, draw: true }) {
+  const { w, ps } = coopWorld(2);
+  const d = duel(w, ps[0], ps[1], rules);
+  const ev = runDuel(w, d, duelScript((pid, pl) => plans(pid === d.a.pid ? 'a' : 'b', pl)));
+  return { w, d, ev, a: ps[0], b: ps[1] };
+}
+{
+  const s = series((side) => (side === 'a' ? iai(10) : none));
+  const rs = rounds(s.ev);
+  const e = ends(s.ev)[0];
+  check('série 2–0 : deux ippon, duelEnd WIN', rs.length === 2 && rs.every((x) => x.why === W.IPPON && x.winner === s.a.id) && !!e && e.why === W.WIN && e.winner === s.a.id && e.wa === 2 && e.wb === 0, JSON.stringify(e));
+  check('réaction publiée (ticks après le signal)', rs[0].ra === 10 && rs[0].rb === -1, `${rs[0].ra}/${rs[0].rb}`);
+  check('numéros de manche 1, 2', rs[0].round === 1 && rs[1].round === 2);
+  check('fin : duel retiré, joueurs libérés avec END_IFRAMES', !s.w.duels!.length && s.a.state === 'normal' && s.b.state === 'normal' && s.a.iframes === DUEL.END_IFRAMES && s.b.iframes === DUEL.END_IFRAMES);
+  check('fin : délai AFTER_COOLDOWN pour la paire', s.w.duelInvites!.some((i) => i.cd && i.until === s.w.tick - 1 + DUEL.AFTER_COOLDOWN));
+}
+{
+  const s = series((side, pl) => (pl === 1 ? (side === 'b' ? iai(9) : none) : side === 'a' ? iai(12) : parry(40)));
+  const rs = rounds(s.ev);
+  const e = ends(s.ev)[0];
+  check('série 2–1', rs.length === 3 && !!e && e.winner === s.a.id && e.wa === 2 && e.wb === 1 && e.why === W.WIN, rs.map((x) => `${x.winner}:${x.why}`).join(' '));
+}
+{
+  // 1–1 puis trois 相打ち : 5 manches jouées, nul (coop).
+  const plan = (side: 'a' | 'b', pl: number): Plan => (pl === 0 ? (side === 'a' ? iai(10) : none) : pl === 1 ? (side === 'b' ? iai(10) : none) : iai(10));
+  const s = series(plan);
+  const rs = rounds(s.ev);
+  const e = ends(s.ev)[0];
+  check('nul après 5 manches (相打ち rejouées comprises)', rs.length === 5 && rs.slice(2).every((x) => x.why === W.AIUCHI && x.winner === -1) && !!e && e.why === W.DRAW && e.winner === -1 && s.d.played === 5, rs.map((x) => x.why).join(','));
+  check('manche rejouée : même numéro de manche', rs[2].round === 3 && rs[3].round === 3 && rs[4].round === 3);
+  // Même chose sans nul : mort subite.
+  const s2 = series((side, pl) => (pl < 5 ? plan(side, pl) : side === 'b' ? iai(15) : none), { firstTo: 2, maxRounds: 5, draw: false });
+  const e2 = ends(s2.ev)[0];
+  check('mort subite si draw: false', rounds(s2.ev).length === 6 && !!e2 && e2.why === W.WIN && e2.winner === s2.b.id && e2.wb === 2, JSON.stringify(e2));
+  // Mort subite plafonnée : 0–0 à SUDDEN_MAX, départage par la somme des réactions.
+  const s3 = series((side) => (side === 'a' ? iai(10) : iai(11)), { firstTo: 2, maxRounds: 5, draw: false });
+  const e3 = ends(s3.ev)[0];
+  check('mort subite plafonnée : départage par la plus petite somme des réactions', rounds(s3.ev).length === DUEL.SUDDEN_MAX && !!e3 && e3.winner === s3.a.id && e3.wa === 0 && e3.wb === 0, JSON.stringify(e3));
+}
+{
+  // Parade : manche gagnée par le défenseur ; parade dans le vide puis frappe.
+  const s = series((side, pl) => (pl === 0 ? (side === 'a' ? iai(10) : parry(10 + DUEL.STRIKE_TRAVEL)) : side === 'a' ? parry(8) : iai(12)));
+  const rs = rounds(s.ev);
+  check('simulé : parade 8 ticks après la frappe adverse → 弾, défenseur gagnant', rs[0].why === W.PARRY && rs[0].winner === s.b.id);
+  check('simulé : parade dans le vide puis frappe pendant la récupération → frappe gagnante', rs[1].why === W.IPPON && rs[1].winner === s.b.id);
+  // Attaque sans charge contre iai.
+  const s2 = series((side) => (side === 'a' ? attack(10) : iai(14)));
+  check('simulé : ATTACK (plus lent de 6) perd contre un iai relâché 4 ticks après', rounds(s2.ev)[0].winner === s2.b.id && rounds(s2.ev)[0].why === W.IPPON);
+  // Relâcher un iai pas assez chargé ne fait rien.
+  const { w, ps } = coopWorld(2);
+  const d = duel(w, ps[0], ps[1]);
+  run(w, DUEL.ENTER_TICKS);
+  run(w, 5, (_w, p) => (p === ps[0] ? BTN.IAI : 0));
+  run(w, 2);
+  check('iai relâché sous IAI_MIN_CHARGE : aucune action, aucune faute', !d.a.foul && d.a.strikeT < 0 && d.a.react === -1 && d.phase === 'kamae' && ps[0].state === 'normal');
+  const evT = runDuel(w, d, () => 0);
+  check('personne ne frappe : manches rejouées (TIMEOUT) puis nul', rounds(evT).every((x) => x.why === W.TIMEOUT) && ends(evT)[0]?.why === W.DRAW);
+}
+{
+  // Double faute simulée.
+  const { w, ps } = coopWorld(2);
+  const d = duel(w, ps[0], ps[1]);
+  const ev = run(w, DUEL.ENTER_TICKS + 3, (ww) => (ww.duels![0]?.phase === 'kamae' ? BTN.ATTACK : 0));
+  const r = rounds(ev)[0];
+  check('double faute simulée : rejouée', !!r && r.why === W.DOUBLE_FOUL && r.winner === -1 && d.a.wins === 0 && d.b.wins === 0);
+}
+
+// ─── 3. Prédiction : stepDuelist ne dépend que de w.tick, d et p ────────────
+{
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const d = duel(w, a, b);
+  const script = duelScript((pid, pl) => (pid === a.id ? (pl % 2 ? parry(9) : iai(12)) : pl % 2 ? iai(10) : attack(20)));
+  let diverge = 0;
+  let steps = 0;
+  for (let i = 0; i < 6000 && w.duels!.includes(d); i++) {
+    const bA = script(w, a);
+    // Copie jetable : un monde minimal, le duel et le joueur clonés.
+    const dc: Duel = structuredClone(d);
+    const pc: Player = structuredClone(a);
+    const fake = { tick: w.tick, duels: [dc], events: [] as GameEvent[] } as unknown as World;
+    const pressed = bA & ~pc.prevButtons;
+    pc.prevButtons = bA;
+    stepDuelist(fake, dc, pc, bA, pressed);
+    tick(w, (_w, p) => (p === a ? bA : script(w, p)));
+    if (!w.duels!.includes(d)) break;
+    steps++;
+    const same = pc.state === a.state && pc.stateT === a.stateT && pc.iaiCharge === a.iaiCharge && pc.x === a.x && pc.y === a.y && pc.facing === a.facing;
+    const sideSame = JSON.stringify(dc.a) === JSON.stringify({ ...d.a, wins: dc.a.wins }) || d.phase === 'resolve' || d.phase === 'enter';
+    if (!same || !sideSame) diverge++;
+  }
+  check('copie jetable du duel : même pose et mêmes actions que le serveur', diverge === 0 && steps > 500, `${diverge} écart(s) sur ${steps} ticks`);
+}
+
+// ─── 4. Invitations ─────────────────────────────────────────────────────────
+const press = (who: Player[]): Script => (_w, p) => (who.includes(p) ? BTN.DUEL : 0);
+{
+  const { w, ps, cx } = coopWorld(3);
+  const [a, b, c] = ps;
+  put(w, a, cx);
+  put(w, b, cx + DUEL.INVITE_RANGE + 30);
+  put(w, c, cx - 4000);
+  a.facing = 1;
+  let ev = tick(w, press([a]));
+  check('hors de portée : aucun défi', invites(ev).length === 0 && !w.duelInvites!.length);
+  tick(w);
+  put(w, b, cx + 200);
+  ev = tick(w, press([a]));
+  check('à portée : défi lancé (duelInvite)', invites(ev).length === 1 && invites(ev)[0].to === b.id && w.duelInvites!.length === 1);
+  tick(w);
+  ev = tick(w, press([a]));
+  check('second appui : annulation (CANCEL), pas de second défi', cancels(ev)[0]?.why === W.CANCEL && !w.duelInvites!.some((i) => !i.cd));
+  tick(w);
+  ev = tick(w, press([a]));
+  check('délai par paire après annulation : B n\'est plus défiable', invites(ev).length === 0);
+  put(w, c, cx - 150);
+  tick(w);
+  ev = tick(w, press([a]));
+  check('… mais C l\'est (même en tournant le dos)', invites(ev)[0]?.to === c.id);
+  check('une seule invitation sortante', w.duelInvites!.filter((i) => !i.cd && i.from === a.id).length === 1);
+  run(w, DUEL.PAIR_COOLDOWN + 5);
+  check('délais purgés à l\'échéance', !w.duelInvites!.some((i) => i.cd && i.until <= w.tick));
+}
+{
+  // Choix de la cible : le plus proche devant, sinon le plus proche.
+  const { w, ps, cx } = coopWorld(3);
+  const [a, b, c] = ps;
+  put(w, a, cx);
+  put(w, b, cx + 220);
+  put(w, c, cx - 60);
+  a.facing = 1;
+  let ev = tick(w, press([a]));
+  check('cible : le plus proche dans la direction regardée', invites(ev)[0]?.to === b.id);
+  tick(w);
+  tick(w, press([a])); // annule
+  tick(w);
+  a.facing = -1;
+  ev = tick(w, press([a]));
+  check('cible : se retourner change de cible', invites(ev)[0]?.to === c.id);
+}
+{
+  // Conditions.
+  const attempt = (setup: (w: World, a: Player, b: Player) => void, keepQuiet = true): number => {
+    const { w, ps, cx } = coopWorld(2);
+    const [a, b] = ps;
+    put(w, a, cx - 60);
+    put(w, b, cx + 60);
+    a.facing = 1;
+    setup(w, a, b);
+    const ev = tick(w, press([a]), keepQuiet);
+    return invites(ev).length;
+  };
+  check('conditions réunies : défi', attempt(() => {}) === 1);
+  check('Marée en alerte : pas de défi', attempt((w) => { w.wave.phase = 'warn'; }, false) === 0);
+  check('dans l\'arène : pas de défi', attempt((w, a, b) => {
+    const x = (w.level.arena.col + 4) * TILE;
+    put(w, a, x);
+    put(w, b, x + 80);
+  }) === 0);
+  check('cible morte : pas de défi', attempt((w, _a, b) => { b.iframes = 0; damagePlayer(w, b, 1e6, b.x + 10); }) === 0);
+  check('cible absente : pas de défi', attempt((w, _a, b) => { w.away = [b.id]; }) === 0);
+  check('défieur absent : pas de défi', attempt((w, a) => { w.away = [a.id]; }) === 0);
+  check('étape hors exploration : pas de défi', attempt((w) => { w.stage.state = 'gateOpen'; }) === 0);
+  const engagedAt = (dx: number) => attempt((w, a) => {
+    const e = spawnEnemy(w, 'ashigaru', a.x + dx, a.y, false);
+    e.state = 'chase';
+    e.freeze = 99;
+  }, false);
+  check('ennemi engagé à moins de ENGAGED_RANGE : pas de défi', engagedAt(-DUEL.ENGAGED_RANGE + 50) === 0);
+  check('ennemi engagé au-delà : défi possible', engagedAt(-DUEL.ENGAGED_RANGE - 200) === 1);
+  check('ennemi en patrouille tout près : défi possible', attempt((w, a) => {
+    const e = spawnEnemy(w, 'ashigaru', a.x - 100, a.y, false);
+    e.freeze = 99;
+  }, false) === 1);
+}
+{
+  // Expiration, rupture par la distance, coup reçu.
+  const { w, ps, cx } = coopWorld(2);
+  const [a, b] = ps;
+  put(w, a, cx - 60);
+  put(w, b, cx + 60);
+  a.facing = 1;
+  tick(w, press([a]));
+  const ev = run(w, DUEL.INVITE_TICKS + 2);
+  check('expiration après INVITE_TICKS (EXPIRED)', cancels(ev)[0]?.why === W.EXPIRED && !w.duelInvites!.some((i) => !i.cd));
+  check('expiration : délai PAIR_COOLDOWN pour la paire', w.duelInvites!.some((i) => i.cd && i.from === a.id && i.until > w.tick + DUEL.PAIR_COOLDOWN - 10));
+
+  const s = coopWorld(2);
+  put(s.w, s.ps[0], s.cx - 60);
+  put(s.w, s.ps[1], s.cx + 60);
+  s.ps[0].facing = 1;
+  tick(s.w, press([s.ps[0]]));
+  put(s.w, s.ps[1], s.cx + DUEL.INVITE_BREAK + 100);
+  check('écart > INVITE_BREAK : défi rompu (DISTANCE)', cancels(tick(s.w))[0]?.why === W.DISTANCE);
+
+  const h = coopWorld(2);
+  put(h.w, h.ps[0], h.cx - 60);
+  put(h.w, h.ps[1], h.cx + 60);
+  h.ps[0].facing = 1;
+  tick(h.w, press([h.ps[0]]));
+  damagePlayer(h.w, h.ps[1], 5, h.ps[1].x + 10);
+  check('l\'un des deux touché : défi rompu (HIT)', cancels(tick(h.w))[0]?.why === W.HIT);
+}
+{
+  // Accepter, appui mutuel.
+  const { w, ps, cx } = coopWorld(2);
+  const [a, b] = ps;
+  put(w, a, cx - 60);
+  put(w, b, cx + 60);
+  a.facing = 1;
+  tick(w, press([a]));
+  tick(w);
+  const ev = tick(w, press([b]));
+  const st = ev.find((e) => e.type === 'duelStart');
+  check('accepter : duelStart, duel engagé, défi consommé', !!st && w.duels!.length === 1 && !w.duelInvites!.some((i) => !i.cd));
+  check('placement sur sol plat : même hauteur, écart GAP', a.y === b.y && Math.abs(b.x - a.x) === DUEL.GAP && findGround(w.level, a.x, a.y) === a.y && findGround(w.level, b.x, b.y) === b.y);
+  // DUEL encore tenu après l'acceptation : pas d'abandon.
+  run(w, DUEL.FORFEIT_HOLD + 30, press([b]));
+  check('DUEL tenu depuis l\'acceptation : pas d\'abandon', w.duels!.length === 1 && w.duels![0].phase !== 'end');
+
+  const m = coopWorld(2);
+  put(m.w, m.ps[0], m.cx - 60);
+  put(m.w, m.ps[1], m.cx + 60);
+  m.ps[0].facing = 1;
+  m.ps[1].facing = -1;
+  const evm = tick(m.w, press(m.ps));
+  check('appui mutuel au même tick : duel engagé', evm.some((e) => e.type === 'duelStart') && m.w.duels!.length === 1);
+}
+{
+  // Échec TERRAIN : piliers hauts toutes les 4 colonnes autour des joueurs.
+  const { w, ps, cx, gy } = coopWorld(2);
+  const [a, b] = ps;
+  const L = w.level;
+  const floorRow = gy / TILE;
+  const c0 = Math.floor(cx / TILE);
+  for (let c = c0 - 24; c <= c0 + 24; c++) {
+    if ((c - c0) % 4 !== 2 && (c - c0) % 4 !== -2) continue;
+    for (let r = Math.max(0, floorRow - 12); r < floorRow; r++) L.tiles[r * L.w + c] = T_SOLID;
+  }
+  put(w, a, (c0 - 1 + 0.5) * TILE);
+  put(w, b, (c0 + 1 + 0.5) * TILE);
+  a.facing = 1;
+  check('findDuelSpot : aucun sol plat → null', findDuelSpot(L, cx, gy, DUEL.GAP) === null);
+  tick(w, press([a]));
+  tick(w);
+  const ev = tick(w, press([b]));
+  check('sans emplacement : duelCancel TERRAIN', cancels(ev)[0]?.why === W.TERRAIN && !w.duels!.length);
+}
+{
+  // findDuelSpot sur un niveau synthétique.
+  const mk = (heights: number[]): Level => {
+    const w = heights.length;
+    const h = 20;
+    const tiles = new Uint8Array(w * h).fill(T_EMPTY);
+    heights.forEach((gh, c) => { for (let r = h - gh; r < h; r++) tiles[r * w + c] = T_SOLID; });
+    return { stage: 0, biome: 'bamboo', w, h, pxW: w * TILE, pxH: h * TILE, tiles, spawn: { x: 0, y: 0 }, decos: [], enemySpawns: [], checkpoints: [], arena: { col: w + 10, rows: h, trigger: 1e9, guardianX: 0, guardianY: 0, backup: [] }, gate: { x: 0, y: 0 } } as unknown as Level;
+  };
+  const flat = mk(new Array(60).fill(3));
+  const s = findDuelSpot(flat, 30 * TILE, 17 * TILE, DUEL.GAP);
+  check('findDuelSpot : sol plat trouvé au point demandé', !!s && s.x === 30 * TILE && s.y === 17 * TILE, JSON.stringify(s));
+  const step = mk(Array.from({ length: 60 }, (_, c) => (c < 31 ? 3 : 4)));
+  const s2 = findDuelSpot(step, 30 * TILE, 17 * TILE, DUEL.GAP);
+  check('findDuelSpot : marche → centre décalé sur un sol plat, marques à même hauteur', !!s2 && s2.x !== 30 * TILE && Math.abs(s2.x - 30 * TILE) <= DUEL.SPOT_SCAN_TILES * TILE, JSON.stringify(s2));
+  const bumpy = mk(Array.from({ length: 60 }, (_, c) => 3 + (c % 2)));
+  check('findDuelSpot : sol irrégulier partout → null (ou marques à même hauteur sans mur)', (() => {
+    const r = findDuelSpot(bumpy, 30 * TILE, 17 * TILE, DUEL.GAP);
+    return r === null;
+  })());
+}
+
+// ─── 5. Immunité ────────────────────────────────────────────────────────────
+function immunityScene(net: boolean) {
+  const { w, ps, cx } = coopWorld(3);
+  const [a, b, c] = ps;
+  put(w, a, cx - 60);
+  put(w, b, cx + 60);
+  put(w, c, cx - 4000);
+  const d = duel(w, a, b);
+  if (net) {
+    w.net = createLagComp();
+    for (const p of ps) setLag(w.net, p.id, 4);
+  }
+  return { w, a, b, c, d };
+}
+for (const net of [false, true]) {
+  const tag = net ? ' (compensation de latence)' : '';
+  {
+    const { w, a, b, c, d } = immunityScene(net);
+    // Spectateur collé derrière le duelliste a (entre les marques) ; ennemi à gauche de a.
+    put(w, c, a.x + 14);
+    const e = spawnEnemy(w, 'ashigaru', a.x - 70, a.y, false);
+    e.state = 'chase';
+    e.facing = 1;
+    check(`targetPlayer ignore les duellistes${tag}`, targetPlayer(w, e) === c);
+    const hits: number[] = [];
+    for (let i = 0; i < 900; i++) {
+      const ev = tick(w, () => 0, false);
+      w.projectiles = w.projectiles.filter((p) => p.owner !== 'enemy' || p.kind !== 'arrow');
+      w.spawnTimer = 1e9;
+      w.enemies = w.enemies.filter((x) => x === e);
+      w.wave.t = 0;
+      for (const x of ev) if (x.type === 'playerHit') hits.push(x.pid);
+      c.hp = c.maxHp;
+      c.x = a.x + 14;
+      if (!w.enemies.includes(e)) break;
+    }
+    check(`frappes ennemies : duelliste jamais touché, spectateur derrière lui touché${tag}`, !hits.includes(a.id) && !hits.includes(b.id) && hits.includes(c.id), `touchés : ${hits.join(',')}`);
+    check(`duellistes sans dégâts${tag}`, a.hp === a.maxHp && b.hp === b.maxHp && d.phase !== 'end');
+    check(`damagePlayer ignore un duelliste${tag}`, damagePlayer(w, a, 50, a.x + 10) === 'ignored' && a.hp === a.maxHp);
+  }
+  {
+    const { w, a, b, c } = immunityScene(net);
+    // Spectateur collé derrière le duelliste a (entre les marques, sur le même sol).
+    c.x = a.x + 30;
+    c.y = a.y;
+    c.onGround = true;
+    // Flèche tirée de la gauche, à hauteur du torse : elle traverse a et touche c.
+    w.projectiles.push({ id: w.nextId++, kind: 'arrow', x: a.x - 120, y: a.y - 28, vx: 700, vy: -60, owner: 'enemy', ownerId: 0, damage: 10, life: 200, hits: [], dead: false });
+    const hits: number[] = [];
+    for (let i = 0; i < 90; i++) {
+      const ev = tick(w, () => 0, false);
+      w.enemies = [];
+      w.spawnTimer = 1e9;
+      for (const x of ev) if (x.type === 'playerHit') hits.push(x.pid);
+    }
+    check(`flèches : traversent le duelliste, touchent le spectateur collé derrière${tag}`, !hits.includes(a.id) && !hits.includes(b.id) && hits.includes(c.id), `touchés : ${hits.join(',')}`);
+  }
+}
+{
+  // Orbes : un duelliste ne les attire pas.
+  const { w, a, c } = immunityScene(false);
+  w.orbs.push({ id: w.nextId++, x: a.x, y: a.y - 22, vx: 0, vy: 0, value: 5, life: 600, lost: false, onGround: true });
+  const h0 = a.honor;
+  run(w, 60, () => 0, false);
+  check('orbes : non ramassées par un duelliste', a.honor === h0 && c.honor === 0);
+}
+{
+  // Aucun renfort près d'un duel (la horde continue ailleurs).
+  const { w, ps, cx } = coopWorld(3);
+  const [a, b, c] = ps;
+  put(w, a, cx - 60);
+  put(w, b, cx + 60);
+  const d = duel(w, a, b);
+  put(w, c, cx + 1900);
+  w.spawnTimer = 0;
+  w.enemies = [];
+  const near: number[] = [];
+  let spawns = 0;
+  for (let i = 0; i < 2500 && w.duels!.includes(d); i++) {
+    const ev = tick(w, () => 0, false);
+    w.wave.t = 0;
+    for (const x of ev) {
+      if (x.type !== 'spawn') continue;
+      spawns++;
+      if (Math.abs(x.x - d.x) < DUEL.NO_SPAWN_RANGE) near.push(Math.round(x.x - d.x));
+    }
+    // Les ennemis retirés régulièrement : le spawner reste actif.
+    if (i % 200 === 0) w.enemies = [];
+    c.hp = c.maxHp;
+  }
+  check('aucun renfort à moins de NO_SPAWN_RANGE d\'un duel (la horde continue ailleurs)', near.length === 0 && spawns > 0, `${spawns} renforts, près : ${near.join(',')}`);
+}
+
+// ─── 6. Sorties : abandon, déconnexion, passage d'étape ─────────────────────
+{
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const d = duel(w, a, b);
+  run(w, 70);
+  const ev = run(w, DUEL.FORFEIT_HOLD, press([b]));
+  const e = ends(ev)[0];
+  check('abandon : DUEL tenu FORFEIT_HOLD ticks → FORFEIT, l\'autre gagne', !!e && e.why === W.FORFEIT && e.winner === a.id && d.phase === 'end');
+  const ev2 = runDuel(w, d, () => 0);
+  check('abandon : duel retiré après END_TICKS', !w.duels!.includes(d) && ends(ev2).length === 0);
+}
+{
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const d = duel(w, a, b);
+  run(w, 100);
+  removePlayer(w, b.id);
+  const e = ends(w.events)[0];
+  w.events.length = 0;
+  check('removePlayer d\'un duelliste : victoire de l\'autre (DISCONNECT)', !!e && e.why === W.DISCONNECT && e.winner === a.id);
+  runDuel(w, d, () => 0);
+  check('déconnexion : duel retiré, a libéré', !w.duels!.length && a.state === 'normal' && a.iframes === DUEL.END_IFRAMES);
+}
+{
+  const { w, ps } = coopWorld(3);
+  const [a, b, c] = ps;
+  duel(w, a, b);
+  put(w, c, a.x - 3000);
+  run(w, 100);
+  // c défie quelqu'un ? personne à portée : on pose un défi en attente à la main.
+  w.duelInvites!.push({ from: c.id, to: a.id, until: w.tick + 100, cd: false });
+  nextStage(w);
+  const e = ends(w.events)[0];
+  const cn = cancels(w.events)[0];
+  w.events.length = 0;
+  check('passage d\'étape : duel interrompu sans résultat (INTERRUPT)', !!e && e.why === W.INTERRUPT && e.winner === -1 && !w.duels!.length);
+  check('passage d\'étape : défis en attente tombés', cn?.why === W.INTERRUPT && !w.duelInvites!.some((i) => !i.cd));
+  check('passage d\'étape : joueurs libres', a.state === 'normal' && b.state === 'normal' && !duelOf(w, a.id));
+}
+{
+  // Bilan (clearStage) pendant un duel.
+  const { w, ps } = coopWorld(3);
+  const [a, b, c] = ps;
+  duel(w, a, b);
+  run(w, 10);
+  warpToArena(w, c.id);
+  const ev: GameEvent[] = [];
+  for (let i = 0; i < 600 && w.stage.state !== 'cleared'; i++) {
+    if (w.stage.state === 'arena') {
+      const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+      if (g) killEnemy(w, g, c, 0, false);
+    }
+    if (w.stage.state === 'gateOpen') {
+      c.x = w.level.gate.x;
+      c.y = w.level.gate.y;
+    }
+    c.hp = c.maxHp;
+    ev.push(...tick(w, (ww, p) => (p === c && ww.stage.state === 'playing' ? BTN.RIGHT : 0), false));
+  }
+  check('bilan pendant un duel : duel interrompu (INTERRUPT)', w.stage.state === 'cleared' && ends(ev).some((x) => x.why === W.INTERRUPT) && !w.duels!.length, `état=${w.stage.state}`);
+}
+
+// ─── 7. Neutralité ──────────────────────────────────────────────────────────
+{
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  a.up.iai = 3;
+  a.up.parry = 2;
+  b.up.edge = 4;
+  a.honor = 120;
+  b.honor = 40;
+  a.hp = 70;
+  a.picks = 1;
+  a.offer = ['edge', 'reach', 'swift'];
+  const before = JSON.stringify({ a: [a.up, a.honor, a.hp, a.level, a.picks, a.offer, a.kills, a.score], b: [b.up, b.honor, b.hp, b.level, b.kills, b.score], st: w.stage.byPlayer, s: [w.stage.kills, w.stage.parries, w.stage.deaths, w.stage.honor] });
+  const d = duel(w, a, b);
+  runDuel(w, d, duelScript((pid, pl) => (pid === a.id ? (pl === 1 ? parry(9) : iai(10)) : pl === 1 ? iai(10) : none)), 20000);
+  // Les appuis PICK pendant le duel ne choisissent rien non plus.
+  const after = JSON.stringify({ a: [a.up, a.honor, a.hp, a.level, a.picks, a.offer, a.kills, a.score], b: [b.up, b.honor, b.hp, b.level, b.kills, b.score], st: w.stage.byPlayer, s: [w.stage.kills, w.stage.parries, w.stage.deaths, w.stage.honor] });
+  check('après un duel : améliorations, Honneur, PV et byPlayer inchangés', before === after, after);
+  const s2 = coopWorld(2);
+  s2.ps[0].picks = 1;
+  s2.ps[0].offer = ['edge', 'reach', 'swift'];
+  duel(s2.w, s2.ps[0], s2.ps[1]);
+  run(s2.w, 10, (_w, p) => (p === s2.ps[0] ? BTN.PICK1 : 0));
+  check('choix d\'amélioration bloqué pendant le duel', s2.ps[0].up.edge === 0 && s2.ps[0].picks === 1);
+}
+
+// ─── 8. Déterminisme ────────────────────────────────────────────────────────
+{
+  const scenario = (): string => {
+    const w = createWorld(31337, { mode: 'coop', difficulty: 'normal' });
+    const ps = [addPlayer(w, 'a'), addPlayer(w, 'b'), addPlayer(w, 'c')];
+    const log: GameEvent[] = [];
+    const m = new Map<number, number>();
+    for (let t = 0; t < 4000; t++) {
+      m.clear();
+      for (const p of ps) {
+        const d = duelOf(w, p.id);
+        let bt = 0;
+        if (!d) bt = t % 400 === 50 + p.id * 3 ? BTN.DUEL : t % 400 < 40 ? BTN.RIGHT : 0;
+        else if (d.phase === 'kamae' || d.phase === 'open') bt = w.tick - d.sigTick < 8 + p.id * 2 ? BTN.IAI : 0;
+        m.set(p.id, bt);
+      }
+      stepWorld(w, m);
+      log.push(...w.events);
+      w.events.length = 0;
+    }
+    const n = log.filter((e) => e.type.startsWith('duel')).length;
+    return `${n}|${JSON.stringify(log)}|${JSON.stringify({ ...w, net: undefined })}`;
+  };
+  const r1 = scenario();
+  const r2 = scenario();
+  check('déterminisme : même graine, même résultat (duels et défis compris)', r1 === r2 && Number(r1.split('|')[0]) > 0, `${r1.split('|')[0]} événements de duel`);
+}
+
+// ─── 9. Solo intact ─────────────────────────────────────────────────────────
+{
+  // Même empreinte que tests/coop.test.ts §13, avec un bit ajouté à toutes les entrées.
+  const soloFingerprint = (seed: number, difficulty: DifficultyId, nPlayers: number, ticks: number, extra: number): { fp: string; keys: boolean } => {
+    const w = createWorld(seed, { difficulty });
+    for (let i = 0; i < nPlayers; i++) addPlayer(w, 'p' + i, { color: i });
+    let s = (seed * 31 + nPlayers) >>> 0 || 1;
+    const rnd = () => (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const moves = [0, BTN.RIGHT, BTN.RIGHT, BTN.RIGHT, BTN.RIGHT | BTN.ATTACK, BTN.LEFT, BTN.RIGHT | BTN.JUMP, BTN.ATTACK, BTN.DASH | BTN.RIGHT, BTN.PARRY, BTN.IAI, BTN.DOWN, BTN.PICK1, BTN.PICK2, BTN.UP | BTN.ATTACK, BTN.JUMP | BTN.ATTACK];
+    const held = new Map<number, [number, number]>();
+    const m = new Map<number, number>();
+    let h = 0x811c9dc5;
+    let keys = false;
+    const feed = (str: string) => {
+      for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 0x01000193) >>> 0;
+    };
+    const state = () => {
+      const j = JSON.stringify({ ...w, shrine: undefined });
+      if (j.includes('"duels"') || j.includes('"duelInvites"')) keys = true;
+      return j;
+    };
+    const kill = (p: Player) => {
+      if (p.state === 'dead') return;
+      p.iframes = 0;
+      p.state = 'normal';
+      damagePlayer(w, p, 1e6, p.x + 10);
+    };
+    for (let t = 0; t < ticks; t++) {
+      if (t % 2300 === 350) for (const p of w.players) if (p.state !== 'dead') kill(p);
+      if (t % 3000 === 1500) warpToArena(w);
+      if (t % 3000 === 1700 && w.stage.state === 'arena') {
+        const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+        if (g) killEnemy(w, g, w.players[0], 0, false);
+      }
+      if (t % 3000 === 1760 && w.players[0]) {
+        w.players[0].x = w.level.gate.x - 40;
+        w.players[0].y = w.level.gate.y;
+      }
+      if (t % 60 === 0) for (const p of w.players) if (p.state !== 'dead') p.hp = p.maxHp;
+      if (t % 3000 === 600 || t % 3000 === 1100) {
+        const cps = w.level.checkpoints;
+        const c = cps[1 + (((t / 500) | 0) % Math.max(1, cps.length - 1))] ?? cps[0];
+        const p = w.players[w.players.length - 1];
+        if (p && p.state !== 'dead' && w.stage.state === 'playing') {
+          p.x = c.x;
+          p.y = c.y;
+        }
+      }
+      m.clear();
+      for (const p of w.players) {
+        let k = held.get(p.id);
+        if (!k || t >= k[1]) {
+          k = [moves[Math.floor(rnd() * moves.length)], t + 3 + Math.floor(rnd() * 25)];
+          held.set(p.id, k);
+        }
+        m.set(p.id, (w.stage.state === 'cleared' && t % 200 === 0 ? BTN.JUMP : k[0]) | extra);
+      }
+      stepWorld(w, m);
+      if (w.events.length) feed(t + JSON.stringify(w.events));
+      w.events.length = 0;
+      if (t % 500 === 0) feed(state());
+    }
+    feed(state());
+    return { fp: `${h.toString(16)} étape=${w.level.stage} over=${w.over}`, keys };
+  };
+  const golden: [number, DifficultyId, number, number, string][] = [
+    [4242, 'normal', 1, 9000, 'f54fa7a9 étape=2 over=false'],
+    [7, 'veryEasy', 2, 9000, 'e4940a1b étape=3 over=false'],
+  ];
+  for (const [seed, diff, n, ticks, want] of golden) {
+    const plain = soloFingerprint(seed, diff, n, ticks, 0);
+    const withDuel = soloFingerprint(seed, diff, n, ticks, BTN.DUEL);
+    check(`solo : empreinte identique avec BTN.DUEL sur toutes les entrées (graine ${seed})`, plain.fp === withDuel.fp && withDuel.fp === want, `${plain.fp} / ${withDuel.fp}`);
+    check(`solo : aucune clé duels ni duelInvites dans le JSON (graine ${seed})`, !plain.keys && !withDuel.keys);
+  }
+  const solo = createWorld(3);
+  check('solo : createWorld sans duels ni duelInvites', !('duels' in solo) && !('duelInvites' in solo));
+}
+{
+  // Coop hors duel : appuyer sur DUEL sans personne à portée ne change rien.
+  const fp = (extra: number): string => {
+    const w = createWorld(77, { mode: 'coop', difficulty: 'normal' });
+    addPlayer(w, 'solo-en-coop');
+    let s = 12345;
+    const rnd = () => (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const moves = [0, BTN.RIGHT, BTN.RIGHT | BTN.ATTACK, BTN.LEFT, BTN.RIGHT | BTN.JUMP, BTN.PARRY, BTN.IAI, BTN.DASH | BTN.RIGHT];
+    let held = 0;
+    let until = 0;
+    const m = new Map<number, number>();
+    let log = '';
+    for (let t = 0; t < 5000; t++) {
+      if (t >= until) {
+        held = moves[Math.floor(rnd() * moves.length)];
+        until = t + 3 + Math.floor(rnd() * 25);
+      }
+      m.set(w.players[0].id, held | (t % 7 < 3 ? extra : 0));
+      stepWorld(w, m);
+      if (w.events.length) log += t + JSON.stringify(w.events);
+      w.events.length = 0;
+    }
+    return log + JSON.stringify({ ...w, players: w.players.map((p) => ({ ...p, prevButtons: 0 })) });
+  };
+  check('coop hors duel : DUEL sans cible ne change rien', fp(0) === fp(BTN.DUEL));
+}
 
 if (failures) {
   console.log(`\n${failures} échec(s)`);

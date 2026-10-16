@@ -11,6 +11,7 @@
 // Convention des ticks : l'enregistrement H[k] est l'état du monde au début du pas k
 // (enregistré à la fin du pas k − 1, après w.tick++), c'est-à-dire l'instantané de tick k.
 import { bodyRect } from './combat';
+import { isDueling } from './duel';
 import { damagePlayer, stunEnemy } from './interactions';
 import { overlaps, type Rect } from './math';
 import { kekkaiSplits } from './level';
@@ -237,6 +238,7 @@ export function meleeStrike(w: World, net: NetCompensation, e: Enemy, box: Rect,
   let deferred = false;
   for (const p of w.players) {
     if (p.state === 'dead') continue;
+    if (w.duels && isDueling(w, p.id)) continue; // duelliste : ni jugé ni différé (le coup reste disponible)
     if (kekkaiSplits(w, e.x, p.x)) continue; // le sabre ne traverse pas le kekkai
     if (lagOf(net, p.id) > 0) {
       deferred = true;
@@ -284,6 +286,7 @@ export function resolveDeferred(w: World): void {
 }
 
 function judgeStrikes(w: World, net: NetCompensation, p: Player, from: number, to: number): void {
+  if (w.duels && isDueling(w, p.id)) return; // duelliste : sauté avant tout chevauchement
   for (const st of net.strikes) {
     if (st.tick > to) break; // frappes rangées par tick croissant
     if (st.tick <= from || st.swing.done) continue;
@@ -297,6 +300,7 @@ function judgeStrikes(w: World, net: NetCompensation, p: Player, from: number, t
 }
 
 function judgeProjectiles(w: World, net: NetCompensation, p: Player, from: number, to: number): void {
+  if (w.duels && isDueling(w, p.id)) return; // duelliste : les projectiles le traversent
   for (const a of w.projectiles) {
     if (a.dead || a.owner !== 'enemy') continue;
     judgeProjectile(w, net, p, a, from, to);
