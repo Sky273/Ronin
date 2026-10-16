@@ -1,5 +1,7 @@
 import { bodyRect } from './combat';
-import { COOP, DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
+import { COOP, DT, DUEL, DUEL_WHY, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
+import { forfeit, isDueling, stepDuels, stepForfeits } from './duel';
+import { forgetInvites, stepInvites } from './duelInvite';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { addScore, damagePlayer, emptyStageStats, gainHonor, hitEnemy, spawnOrbs } from './interactions';
 import { keepGhost, lagOf, recordHistory, resolveDeferred } from './lagcomp';
@@ -45,6 +47,11 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
     over: false,
     overT: 0,
   };
+  // Coop : duels et défis (clés absentes en solo, empreintes inchangées).
+  if (w.mode === 'coop') {
+    w.duels = [];
+    w.duelInvites = [];
+  }
   openStageStats(w); // coop seulement (aucun joueur encore : enregistrement vide)
   populateStage(w);
   return w;
@@ -92,6 +99,9 @@ function placeNewcomer(w: World, p: Player): void {
  * par les ennemis (pas par les joueurs), w.shrine est un index de sanctuaire indépendant des joueurs.
  */
 export function removePlayer(w: World, id: number): void {
+  // Duelliste qui s'en va : l'autre gagne (不戦勝) ; ses défis en attente tombent.
+  if (w.duels) forfeit(w, id, DUEL_WHY.DISCONNECT);
+  if (w.duelInvites) forgetInvites(w, id);
   w.players = w.players.filter((p) => p.id !== id);
   if (w.stage.byPlayer) delete w.stage.byPlayer[id];
 }
@@ -110,7 +120,14 @@ export function stepWorld(w: World, inputs: Map<number, number>): void {
     recordHistory(w);
     return;
   }
+  const coop = w.mode === 'coop';
+  if (coop) {
+    w.duels ??= [];
+    stepForfeits(w, inputs);
+    stepInvites(w, inputs);
+  }
   for (const p of w.players) stepPlayer(w, p, inputs.get(p.id) ?? 0);
+  if (coop) stepDuels(w);
   for (const e of w.enemies) stepEnemy(w, e);
   stepProjectiles(w);
   // En ligne : frappes et projectiles ennemis jugés avec le retard de chaque joueur.
@@ -164,7 +181,8 @@ function stepProjectiles(w: World): void {
     const r = a.kind === 'wave' ? { x: a.x - 14, y: a.y - 26, w: 28, h: 52 } : { x: a.x - 6, y: a.y - 3, w: 12, h: 6 };
     if (a.owner === 'enemy') {
       for (const p of w.players) {
-        if (p.state === 'dead' || !overlaps(r, bodyRect(p))) continue;
+        // Un duelliste est traversé (sauté avant le chevauchement : la flèche continue sa route).
+        if (p.state === 'dead' || (w.duels && isDueling(w, p.id)) || !overlaps(r, bodyRect(p))) continue;
         // En ligne : un joueur en retard est jugé plus tard, à la position vue (resolveDeferred).
         if (w.net && lagOf(w.net, p.id) > 0) continue;
         const res = damagePlayer(w, p, a.damage, a.x - Math.sign(a.vx) * 40);
@@ -212,7 +230,8 @@ function stepOrbs(w: World): void {
     if (age > 18) {
       for (const p of w.players) {
         // Coop : une orbe n'est pas attirée à travers le kekkai fermé.
-        if (p.state === 'dead' || kekkaiSplits(w, o.x, p.x)) continue;
+        // Coop : un duelliste n'attire pas les orbes.
+        if (p.state === 'dead' || kekkaiSplits(w, o.x, p.x) || (w.duels && isDueling(w, p.id))) continue;
         const d = Math.hypot(p.x - o.x, p.y - 22 - o.y);
         if (d < magnetRadius(p) * (o.lost ? 1.6 : 1) && d < best) {
           best = d;
@@ -362,6 +381,8 @@ function spawner(w: World): void {
     const x = clamp(p.x + side * w.rng.range(tide ? 500 : 560, 900), 3 * TILE, (w.level.arena.col - 3) * TILE);
     // Coop : jamais sous les yeux d'un autre joueur vivant.
     if (coop && alive.some((q) => Math.abs(q.x - x) < COOP.SPAWN_SAFE)) continue;
+    // Coop : aucun renfort près d'un duel.
+    if (w.duels && w.duels.some((d) => Math.abs(d.x - x) < DUEL.NO_SPAWN_RANGE)) continue;
     const gy = findGround(w.level, x, p.y);
     if (gy === null) continue;
     // Pas de renfort perché à plus de 4 tuiles au-dessus du joueur (ex. sommet d'un bloc de tunnel).

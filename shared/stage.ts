@@ -1,5 +1,6 @@
 import { COOP, COOP_CLEARED_TICKS, COOP_READY_AFTER, TICK_RATE, TILE } from './constants';
 import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
+import { interruptDuels } from './duel';
 import { spawnEnemy } from './enemy';
 import { addScore, emptyStageStats, gainHonor, stageStatsOf } from './interactions';
 import { BTN } from './input';
@@ -171,6 +172,7 @@ function resetArena(w: World): void {
 }
 
 function clearStage(w: World): void {
+  interruptDuels(w); // duels arrêtés sans résultat (sans effet en solo)
   const st = w.stage;
   st.state = 'cleared';
   st.t = 0;
@@ -223,7 +225,8 @@ export function stepCleared(w: World, inputs: Map<number, number>): void {
   let proceed = false;
   let ready = 0;
   for (const p of w.players) {
-    const b = inputs.get(p.id) ?? 0;
+    // Solo : le bouton DUEL n'existe pas (prevButtons identique au bit près).
+    const b = (inputs.get(p.id) ?? 0) & (coop ? ~0 : ~BTN.DUEL);
     const pressed = b & ~p.prevButtons;
     p.prevButtons = b;
     handlePicks(w, p, pressed);
@@ -246,6 +249,7 @@ export function stepCleared(w: World, inputs: Map<number, number>): void {
 
 /** Retour à l'étape 1, une boucle plus loin. Améliorations et Honneur sont conservés. */
 export function nextStage(w: World): void {
+  interruptDuels(w); // sans effet en solo
   const loop = w.stage.loop + 1;
   Object.assign(w.level, buildStage(loop, w.seed));
   w.enemies = [];

@@ -1,5 +1,6 @@
 import { ATTACKS, type AttackDef, type AttackId, activeAttackBox } from './combat';
 import { DT, PLAYER as P, TILE } from './constants';
+import { duelOf, stepDuelist } from './duel';
 import { findGround } from './enemy';
 import { BTN } from './input';
 import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
@@ -34,8 +35,15 @@ export function createPlayer(id: number, name: string, x: number, y: number): Pl
 const dirOf = (b: number): number => ((b & BTN.RIGHT) ? 1 : 0) - ((b & BTN.LEFT) ? 1 : 0);
 
 export function stepPlayer(w: World, p: Player, buttons: number): void {
+  // Solo : le bouton DUEL n'existe pas (état identique au bit près, prevButtons compris).
+  if (w.mode === 'solo') buttons &= ~BTN.DUEL;
   const pressed = buttons & ~p.prevButtons;
   p.prevButtons = buttons;
+  // Duel en cours (coop, dojo) : le duelliste a sa propre machine (w.duels absent en solo).
+  if (w.duels) {
+    const d = duelOf(w, p.id);
+    if (d && stepDuelist(w, d, p, buttons, pressed)) return;
+  }
 
   // Tampons d'entrée : une pression légèrement anticipée n'est jamais perdue.
   if (pressed & BTN.JUMP) p.jumpBuffer = P.JUMP_BUFFER;

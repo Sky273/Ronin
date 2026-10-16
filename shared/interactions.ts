@@ -1,5 +1,6 @@
 import { BOSS, COOP, ENEMY, HONOR, honorForLevel, PLAYER as P, SPAWN } from './constants';
 import { DIFFICULTIES, enemyDmgScale, loopScoreMult } from './difficulty';
+import { isDueling } from './duel';
 import { canFit } from './physics';
 import type { Enemy, Player, PlayerStageStats, World } from './types';
 import { leechHeal, parryWindow, rollOffer } from './upgrades';
@@ -45,6 +46,7 @@ export type DamageResult = 'parried' | 'hit' | 'ignored';
 
 export function damagePlayer(w: World, p: Player, dmg: number, srcX: number): DamageResult {
   if (p.state === 'dead') return 'ignored';
+  if (w.duels && isDueling(w, p.id)) return 'ignored'; // duelliste : intouchable (absent en solo)
   const srcSide = srcX >= p.x ? 1 : -1;
 
   // Parade : fenêtre courte, il faut faire face à l'attaque.

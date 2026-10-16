@@ -1,6 +1,7 @@
 import { bodyRect, boxFromFacing } from './combat';
 import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from './constants';
 import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
+import { isDueling } from './duel';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
 import { meleeStrike } from './lagcomp';
 import { arenaInside, kekkaiSplits, type Level, T_EMPTY, tileAt } from './level';
@@ -58,6 +59,7 @@ export function targetPlayer(w: World, e: Enemy): Player | null {
   let bd = Infinity;
   for (const p of w.players) {
     if (p.state === 'dead') continue;
+    if (w.duels && isDueling(w, p.id)) continue; // un duelliste n'est pas une cible
     if (split && arenaInside(w.level, p.x) !== side) continue;
     const d = Math.abs(p.x - e.x) + Math.abs(p.y - e.y) * 1.5;
     if (d < bd) {
@@ -178,7 +180,8 @@ function meleeHit(c: Ctx, box: Rect, dmg: number): void {
   if (w.net) return meleeStrike(w, w.net, e, box, dmg, e.type === 'oni' ? 90 : undefined);
   if (e.hitDone) return;
   for (const p of w.players) {
-    if (p.state === 'dead' || kekkaiSplits(w, e.x, p.x) || !overlaps(box, bodyRect(p))) continue;
+    // Duelliste sauté avant le chevauchement : le coup reste disponible pour un coéquipier.
+    if (p.state === 'dead' || (w.duels && isDueling(w, p.id)) || kekkaiSplits(w, e.x, p.x) || !overlaps(box, bodyRect(p))) continue;
     e.hitDone = true;
     if (damagePlayer(w, p, dmg, e.x) === 'parried') stunEnemy(w, e, -e.facing, e.type === 'oni' ? 90 : undefined);
     return;
