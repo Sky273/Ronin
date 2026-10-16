@@ -245,6 +245,8 @@ function simulate(opts: { seed: number; lagMs: number; jitterMs: number; duratio
     orbs: [],
     events: [],
     away: [],
+    duels: [],
+    invites: [],
   });
   const enemy = (id: number, x: number, vx = 0): Enemy => {
     const e = createEnemy(id, 'ashigaru', x, 500);

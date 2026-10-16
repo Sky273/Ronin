@@ -714,11 +714,11 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
 
     const { s: s2, pids: p2, push: push2, step: step2 } = rig(2);
     step2(COOP_AWAY_TICKS + 10, (pid, i) => (pid === p2[0] ? wiggle(i) : 0));
-    for (const bad of [0x1000, 0x10000, 2 ** 40, -4096, 0x7fff000]) {
+    for (const bad of [0x2000, 0x10000, 2 ** 40, -8192, 0x7ffe000]) {
       push2(p2[1], bad);
       step2(1, (pid, i) => (pid === p2[0] ? wiggle(i) : null));
     }
-    check('absents : bits hors BUTTON_MASK (0x1000, 2^40, -4096…) ne rendent pas actif', s2.isAway(p2[1]) && away(s2).includes(p2[1]));
+    check('absents : bits hors BUTTON_MASK (0x2000, 2^40, -8192…) ne rendent pas actif', s2.isAway(p2[1]) && away(s2).includes(p2[1]));
     push2(p2[1], BTN.PICK3);
     step2(1, (pid, i) => (pid === p2[0] ? wiggle(i) : null));
     check('absents : PICK3 seul (sans effet hors bilan) suffit à rester actif — tout bit du masque compte', !s2.isAway(p2[1]));

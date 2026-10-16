@@ -1,7 +1,7 @@
 // Protocole réseau du mode en ligne (partagé client/serveur).
 // Messages msgpack explicites (pas de synchronisation d'état Colyseus/Schema).
 // v2 (M2) : instantanés compacts (voir codec.ts), tick de vue dans les entrées, compensation de latence.
-import type { Enemy, GameEvent, Orb, Player, Projectile, StageState, WaveState } from '../types';
+import type { Duel, DuelInvite, Enemy, GameEvent, Orb, Player, Projectile, StageState, WaveState } from '../types';
 
 /** Types de messages (courts : envoyés 20 à 60 fois par seconde). */
 export const MSG = {
@@ -20,11 +20,11 @@ export const INTEREST_PX = 1500;
 /** Nombre de couleurs de joueur (et taille maximale d'une salle). */
 export const PLAYER_COLORS = 12;
 export const MAX_NAME = 12;
-/** Masque des boutons valides (12 bits : déplacements, actions, choix 1/2/3). */
-export const BUTTON_MASK = 0xfff;
+/** Masque des boutons valides (13 bits : déplacements, actions, choix 1/2/3, duel). */
+export const BUTTON_MASK = 0x1fff;
 
 /** Version du protocole : client et serveur doivent être identiques (vérifiée à l'accueil). */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 /** Fermeture d'un joueur renvoyé pour absence prolongée (hors des codes réservés par Colyseus, 4000–4099). */
 export const AWAY_CLOSE_CODE = 4100;
 /** Recul d'affichage des entités distantes (ticks) : ~100 ms, ajusté de 5 à 12 selon la gigue. */
@@ -103,6 +103,8 @@ export interface Snapshot {
   orbs: Orb[];
   events: GameEvent[]; // depuis le précédent instantané, filtrés par distance quand ils ont une position
   away: number[]; // coop : ids des joueurs absents (ni vote ni force du gardien)
+  duels: Duel[]; // duels en cours (coop)
+  invites: DuelInvite[]; // défis en attente et délais (coop)
 }
 
 /** Pseudo affichable : lettres, chiffres, espace, . _ - ; 12 caractères ; « Ronin » si vide. */

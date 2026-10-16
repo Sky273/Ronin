@@ -13,6 +13,7 @@ export const BTN = {
   PICK1: 1 << 9,
   PICK2: 1 << 10,
   PICK3: 1 << 11,
+  DUEL: 1 << 12, // défier / accepter un duel (coop), tenir pour abandonner
 } as const;
 
 export type Buttons = number;

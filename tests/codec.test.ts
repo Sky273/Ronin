@@ -371,6 +371,57 @@ function viewDiff<T extends object>(got: T, ref: T, keys: readonly (keyof T)[], 
   check('away : instantané solo away = []', JSON.stringify(roundTrip(encodeSnapshot(snapshotFor(solo, sp.id, [], 0))).away) === '[]');
 }
 
+// ─── M4 : duels et invitations dans l'instantané ────────────────────────────
+{
+  const w = createWorld(5, { mode: 'coop' });
+  const a = addPlayer(w, 'a');
+  const b = addPlayer(w, 'b');
+  const duel = {
+    id: 900, a: { pid: a.id, wins: 1, strikeT: 1234, parryT: -1, foul: false, react: 14 },
+    b: { pid: b.id, wins: 0, strikeT: -1, parryT: 1230, foul: true, react: -1 },
+    x: 640.5, y: 576, gap: 240, phase: 'resolve' as const, t: 33, round: 2, played: 2, sigTick: 1220, stage: 0,
+    last: 0, winner: a.id, firstTo: 2, maxRounds: 5, draw: true,
+  };
+  w.duels = [duel];
+  w.duelInvites = [{ from: a.id, to: b.id, until: 4000, cd: false }, { from: b.id, to: a.id, until: 9000, cd: true }];
+  const got = roundTrip(makeSnapshot(w, a.id, [], 0));
+  check('duels : aller-retour exact (duel en cours et ses deux côtés)', JSON.stringify(got.duels) === JSON.stringify([duel]), JSON.stringify(got.duels));
+  check('duels : invitations et délais transmis', JSON.stringify(got.invites) === JSON.stringify(w.duelInvites));
+  // Monde sans duel : listes vides.
+  const v = createWorld(6, { mode: 'coop' });
+  const c = addPlayer(v, 'c');
+  const none = roundTrip(makeSnapshot(v, c.id, [], 0));
+  check('duels : listes vides sans duel', none.duels.length === 0 && none.invites.length === 0);
+  // Décodage tolérant : ancien format (13 éléments), valeurs mal formées.
+  const base = unpack(pack(makeSnapshot(w, a.id, [], 0))) as unknown[];
+  const variants: unknown[][] = [
+    base.slice(0, 13),
+    [...base.slice(0, 13), 'x', null],
+    [...base.slice(0, 13), [[1, 2, 3]], [[1]]],
+    [...base.slice(0, 13), [[...(base[13] as unknown[][])[0].slice(0, 6), 'phase?', ...(base[13] as unknown[][])[0].slice(7)]], [[1, 2, 'x', 0]]],
+  ];
+  let ok = true;
+  for (const t of variants) {
+    try {
+      const d = decodeSnapshot(t as unknown as SnapshotWire);
+      ok &&= d.duels.length === 0 && d.invites.length === 0;
+    } catch {
+      ok = false;
+    }
+  }
+  check('duels : entrées mal formées ignorées sans plantage', ok);
+  // Événements de duel : aller-retour exact.
+  const evs: GameEvent[] = [
+    { type: 'duelInvite', from: a.id, to: b.id },
+    { type: 'duelCancel', from: a.id, to: b.id, why: 10 },
+    { type: 'duelStart', id: 900, a: a.id, b: b.id },
+    { type: 'duelRound', id: 900, round: 2, winner: a.id, why: 0, ra: 14, rb: -1, wa: 2, wb: 0 },
+    { type: 'duelEnd', id: 900, winner: a.id, wa: 2, wb: 0, why: 15 },
+  ];
+  const back = roundTrip(makeSnapshot(w, a.id, evs, 0)).events;
+  check('duels : événements transmis à l’identique (sans position : visibles par toute la salle)', JSON.stringify(back) === JSON.stringify(evs), JSON.stringify(back));
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

@@ -212,6 +212,49 @@ export interface StageState {
 }
 
 /** Événements émis par la simulation et consommés par le client (FX, sons). */
+// ─── Duels iaidō (coop : consentis ; réutilisés par le dojo-tournoi) ─────────
+
+/** Phase d'une manche : mise en place, garde (構え), signal ouvert (斬), dénouement, fin de série. */
+export type DuelPhase = 'enter' | 'kamae' | 'open' | 'resolve' | 'end';
+
+/** Un duelliste. Les ticks valent -1 tant que l'action n'a pas eu lieu dans la manche. */
+export interface DuelSide {
+  pid: number;
+  wins: number;
+  strikeT: number; // tick serveur de la frappe (relâchement de l'iai ou attaque)
+  parryT: number; // tick serveur de la parade
+  foul: boolean; // action avant le signal (+ ANTICIPATE)
+  react: number; // temps de réaction de la manche (ticks après le signal), -1 si aucun
+}
+
+export interface Duel {
+  id: number;
+  a: DuelSide;
+  b: DuelSide;
+  x: number; // centre du duel
+  y: number; // sol
+  gap: number; // écart entre les deux marques (px)
+  phase: DuelPhase;
+  t: number; // ticks dans la phase
+  round: number; // numéro de la manche en cours (1, 2…)
+  played: number; // manches jouées (rejouées comprises)
+  sigTick: number; // tick serveur du signal 斬, publié dès le début de la garde (-1 avant)
+  stage: number; // étape où le duel a commencé (interrompu à l'étape suivante)
+  last: number; // issue de la dernière manche (code DUEL_WHY), -1 si aucune
+  winner: number; // pid du vainqueur de la dernière manche, puis de la série ; -1 si aucun ou nul
+  firstTo: number; // manches à gagner (2 = BO3)
+  maxRounds: number; // manches jouées au-delà desquelles on départage
+  draw: boolean; // nul possible (coop) ; sinon mort subite (dojo)
+}
+
+/** Défi en attente d'une réponse (ou délai entre deux défis d'une même paire si `cd`). */
+export interface DuelInvite {
+  from: number;
+  to: number;
+  until: number; // tick d'expiration
+  cd: boolean; // délai anti-harcèlement (et non une invitation en cours)
+}
+
 export type GameEvent =
   | { type: 'swing'; pid: number; attack: AttackId; x: number; y: number; dir: number }
   // pid (coop seulement) : joueur auteur du coup ; absent en solo (empreintes inchangées).
@@ -274,7 +317,13 @@ export type GameEvent =
   | { type: 'arenaReset' }
   | { type: 'gateOpen'; x: number; y: number }
   | { type: 'stageClear'; loop: number; grade: number; bonus: number }
-  | { type: 'stageStart'; loop: number };
+  | { type: 'stageStart'; loop: number }
+  // Duels : événements de salle (sans position), montrés à réception. `why` : code DUEL_WHY.
+  | { type: 'duelInvite'; from: number; to: number }
+  | { type: 'duelCancel'; from: number; to: number; why: number }
+  | { type: 'duelStart'; id: number; a: number; b: number }
+  | { type: 'duelRound'; id: number; round: number; winner: number; why: number; ra: number; rb: number; wa: number; wb: number }
+  | { type: 'duelEnd'; id: number; winner: number; wa: number; wb: number; why: number };
 
 export type GameMode = 'solo' | 'coop';
 
@@ -319,4 +368,8 @@ export interface World {
    */
   guardianPool?: number[];
   guardianFor?: number;
+  /** Duels en cours (coop, dojo). Absent en solo. */
+  duels?: Duel[];
+  /** Défis en attente et délais entre défis (coop). Absent en solo. */
+  duelInvites?: DuelInvite[];
 }

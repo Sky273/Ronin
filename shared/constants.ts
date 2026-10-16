@@ -198,5 +198,54 @@ export const COOP_AWAY_TICKS = 30 * 60;
 /** Coop en ligne : absent depuis ce temps, il est renvoyé de la salle pour libérer sa place (ticks, 3 min). */
 export const COOP_KICK_TICKS = 3 * 60 * 60;
 
+/** Duels iaidō (ticks à 60 Hz, distances en px). */
+export const DUEL = {
+  GAP: 240, // écart entre les deux marques
+  ENTER_TICKS: 45, // mise en place
+  KAMAE_MIN: 90, // durée de la garde avant le signal : entre MIN et MAX (tirée d'un hachage du duel)
+  KAMAE_MAX: 240,
+  ANTICIPATE: 6, // une action consommée avant signal + ANTICIPATE est une faute (100 ms)
+  STRIKE_TRAVEL: 8, // temps de lame de l'iai relâché : impact à t + STRIKE_TRAVEL
+  SLASH_EXTRA: 6, // une attaque sans charge arrive SLASH_EXTRA ticks plus tard
+  TIE_TICKS: 1, // impacts à ±TIE_TICKS : 相打ち (manche rejouée)
+  ROUND_MAX: 240, // personne ne frappe avant signal + ROUND_MAX : manche rejouée
+  RESOLVE_TICKS: 120, // dénouement d'une manche
+  END_TICKS: 150, // fin de série
+  END_IFRAMES: 90, // invulnérabilité à la sortie du duel
+  FIRST_TO: 2, // BO3
+  MAX_ROUNDS: 5, // au-delà : départage (nul en coop)
+  SUDDEN_MAX: 9, // mort subite (dojo) plafonnée, puis départage par la somme des réactions
+  FORFEIT_HOLD: 60, // tenir DUEL pour abandonner
+  INVITE_RANGE: 260, // portée d'un défi
+  INVITE_BREAK: 520, // au-delà, l'invitation tombe
+  INVITE_TICKS: 600, // expiration d'une invitation (10 s)
+  PAIR_COOLDOWN: 1800, // après refus, annulation ou expiration : même paire bloquée (30 s)
+  AFTER_COOLDOWN: 600, // après un duel terminé
+  ENGAGED_RANGE: 400, // aucun ennemi engagé à moins de cette distance pour défier
+  NO_SPAWN_RANGE: 600, // aucun renfort à moins de cette distance d'un duel
+  SPOT_SCAN_TILES: 6, // recherche d'un sol plat autour du point médian
+  SUSPECT_REACT: 8, // réaction < 130 ms : journalisée par le serveur
+} as const;
+
+/** Issues d'une manche, d'une série ou d'une invitation (événements `why`). */
+export const DUEL_WHY = {
+  IPPON: 0, // première frappe
+  PARRY: 1, // frappe parée (弾)
+  FOUL: 2, // faux départ (反則)
+  AIUCHI: 3, // frappes simultanées (相打ち) : rejouée
+  TIMEOUT: 4, // personne ne frappe : rejouée
+  DOUBLE_FOUL: 5, // deux fautes : rejouée
+  FORFEIT: 6, // abandon (降参)
+  DISCONNECT: 7, // déconnexion (不戦勝)
+  INTERRUPT: 8, // étape suivante : sans résultat
+  TERRAIN: 9, // pas de sol plat pour le duel
+  EXPIRED: 10, // invitation expirée
+  CANCEL: 11, // annulée par le défieur
+  DISTANCE: 12, // trop éloignés
+  HIT: 13, // l'un des deux touché ou mort
+  DRAW: 14, // série nulle
+  WIN: 15, // série gagnée
+} as const;
+
 /** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */
 export const COOP_READY_AFTER = 90;

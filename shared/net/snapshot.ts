@@ -37,6 +37,8 @@ export function snapshotFor(w: World, viewerId: number, events: GameEvent[], ack
     orbs: w.orbs.filter((o) => near(o.x, cx)),
     events: events.filter((ev) => eventVisible(ev, cx)),
     away: w.away ?? [],
+    duels: w.duels ?? [],
+    invites: w.duelInvites ?? [],
   };
 }
 
@@ -108,7 +110,11 @@ export function applySnapshot(w: World, snap: Snapshot): { stageChanged: boolean
   w.enemies = snap.enemies;
   w.projectiles = snap.projectiles;
   w.orbs = snap.orbs;
-  if (w.mode === 'coop') w.away = snap.away;
+  if (w.mode === 'coop') {
+    w.away = snap.away;
+    w.duels = snap.duels;
+    w.duelInvites = snap.invites;
+  }
   setBarrier(w, snap.stageInfo.state === 'arena');
   return { stageChanged };
 }

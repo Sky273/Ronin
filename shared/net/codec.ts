@@ -11,6 +11,10 @@ import type { AttackId } from '../combat';
 import { createEnemy } from '../enemy';
 import { createPlayer } from '../player';
 import type {
+  Duel,
+  DuelInvite,
+  DuelPhase,
+  DuelSide,
   Enemy,
   EnemyMove,
   EnemyState,
@@ -356,6 +360,11 @@ export const EVENT_KEYS = {
   gateOpen: ['x', 'y'],
   stageClear: ['loop', 'grade', 'bonus'],
   stageStart: ['loop'],
+  duelInvite: ['from', 'to'],
+  duelCancel: ['from', 'to', 'why'],
+  duelStart: ['id', 'a', 'b'],
+  duelRound: ['id', 'round', 'winner', 'why', 'ra', 'rb', 'wa', 'wb'],
+  duelEnd: ['id', 'winner', 'wa', 'wb', 'why'],
 } as const satisfies { [K in EventType]: readonly EventFields<K>[] };
 
 type MissingEventKeys = { [K in EventType]: Exclude<EventFields<K>, (typeof EVENT_KEYS)[K][number]> }[EventType];
@@ -431,8 +440,76 @@ export const DIRECT_ENCODER: ViewEncoder = {
   event: encodeEvent,
 };
 
-/** Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events, away]. */
-type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[], number[]];
+// ─── Duels ──────────────────────────────────────────────────────────────────
+
+const DUEL_PHASES = enumTable<DuelPhase>()(['enter', 'kamae', 'open', 'resolve', 'end']);
+const DUEL_SIDE_KEYS = ['pid', 'wins', 'strikeT', 'parryT', 'foul', 'react'] as const satisfies readonly (keyof DuelSide)[];
+export const DUEL_SIDE_KEYS_COMPLETE: [Exclude<keyof DuelSide, (typeof DUEL_SIDE_KEYS)[number]>] extends [never] ? true : never = true;
+const DUEL_KEYS = [
+  'id', 'a', 'b', 'x', 'y', 'gap', 'phase', 't', 'round', 'played', 'sigTick', 'stage', 'last', 'winner', 'firstTo', 'maxRounds', 'draw',
+] as const satisfies readonly (keyof Duel)[];
+export const DUEL_KEYS_COMPLETE: [Exclude<keyof Duel, (typeof DUEL_KEYS)[number]>] extends [never] ? true : never = true;
+const INVITE_KEYS = ['from', 'to', 'until', 'cd'] as const satisfies readonly (keyof DuelInvite)[];
+export const INVITE_KEYS_COMPLETE: [Exclude<keyof DuelInvite, (typeof INVITE_KEYS)[number]>] extends [never] ? true : never = true;
+
+const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+const bool = (v: unknown): boolean => v === 1 || v === true;
+
+function encodeSide(s: DuelSide): unknown[] {
+  return DUEL_SIDE_KEYS.map((k) => (k === 'foul' ? (s.foul ? 1 : 0) : s[k]));
+}
+function decodeSide(a: unknown): DuelSide | null {
+  if (!Array.isArray(a) || a.length !== DUEL_SIDE_KEYS.length) return null;
+  const s = {} as Record<string, unknown>;
+  DUEL_SIDE_KEYS.forEach((k, i) => (s[k] = k === 'foul' ? bool(a[i]) : num(a[i])));
+  return Object.values(s).some((v) => typeof v === 'number' && Number.isNaN(v)) ? null : (s as unknown as DuelSide);
+}
+export function encodeDuel(d: Duel): unknown[] {
+  return DUEL_KEYS.map((k) => {
+    if (k === 'a' || k === 'b') return encodeSide(d[k]);
+    if (k === 'phase') return encEnum(DUEL_PHASES, d.phase);
+    if (k === 'draw') return d.draw ? 1 : 0;
+    return d[k];
+  });
+}
+/** Duel décodé, ou null s'il est mal formé (il est alors ignoré). */
+export function decodeDuel(a: unknown): Duel | null {
+  if (!Array.isArray(a) || a.length !== DUEL_KEYS.length) return null;
+  const d = {} as Record<string, unknown>;
+  for (let i = 0; i < DUEL_KEYS.length; i++) {
+    const k = DUEL_KEYS[i];
+    const v = a[i];
+    if (k === 'a' || k === 'b') {
+      const side = decodeSide(v);
+      if (!side) return null;
+      d[k] = side;
+    } else if (k === 'phase') {
+      const ph = decEnum(DUEL_PHASES, v);
+      if (!(DUEL_PHASES as readonly string[]).includes(ph)) return null;
+      d[k] = ph;
+    } else if (k === 'draw') d[k] = bool(v);
+    else {
+      const n = num(v);
+      if (Number.isNaN(n)) return null;
+      d[k] = n;
+    }
+  }
+  return d as unknown as Duel;
+}
+function encodeInvite(v: DuelInvite): unknown[] {
+  return [v.from, v.to, v.until, v.cd ? 1 : 0];
+}
+function decodeInvite(a: unknown): DuelInvite | null {
+  if (!Array.isArray(a) || a.length !== INVITE_KEYS.length) return null;
+  const from = num(a[0]), to = num(a[1]), until = num(a[2]);
+  if ([from, to, until].some(Number.isNaN)) return null;
+  return { from, to, until, cd: bool(a[3]) };
+}
+const listOf = <T>(x: unknown, dec: (a: unknown) => T | null): T[] =>
+  Array.isArray(x) ? x.map(dec).filter((v): v is T => v !== null) : [];
+
+/** Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events, away, duels, invites]. */
+type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[], number[], unknown[], unknown[]];
 
 /** Encode avec des encodeurs de vues donnés (snapshot.ts les met en cache par tick). */
 export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire {
@@ -451,6 +528,8 @@ export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire 
     s.orbs.map((o) => enc.orb(o)),
     s.events.map((ev) => enc.event(ev)),
     s.away,
+    s.duels.map(encodeDuel),
+    s.invites.map(encodeInvite),
   ];
   return wire as unknown as SnapshotWire;
 }
@@ -542,6 +621,8 @@ export function decodeSnapshot(wire: SnapshotWire): Snapshot {
     orbs: tuples(w[10]).map(safe(decodeOrb)).filter(kept),
     events: (Array.isArray(w[11]) ? (w[11] as unknown[]) : []).map(decodeEvent).filter((ev): ev is GameEvent => ev !== null),
     away: Array.isArray(w[12]) ? (w[12] as unknown[]).filter((id): id is number => Number.isFinite(id)) : [],
+    duels: listOf(w[13], decodeDuel),
+    invites: listOf(w[14], decodeInvite),
   };
 }
 
