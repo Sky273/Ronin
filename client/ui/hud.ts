@@ -164,7 +164,8 @@ export class Hud {
     // Dash et charge d'iai
     gBlob(g, x0 + 5, 101, 5, p.dashCd <= 0 ? C.ink : C.washLight, p.dashCd <= 0 ? 0.85 : 0.4, r);
     // Vies restantes : une goutte d'encre pleine par vie, vide pour les vies perdues.
-    const maxLives = Math.max(p.lives, DIFFICULTIES[w.difficulty].lives);
+    // En coopération, pas de vies : on renaît sans fin.
+    const maxLives = w.mode === 'coop' ? 0 : Math.max(p.lives, DIFFICULTIES[w.difficulty].lives);
     for (let i = 0; i < maxLives; i++) {
       const lx = x0 + 6 + i * 15;
       if (i < p.lives) gBlob(g, lx, 124, 5, C.red, 0.85, r, 0.25);

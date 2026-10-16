@@ -209,7 +209,11 @@ function stepOrbs(w: World): void {
       if (best < HONOR.PICKUP) {
         gainHonor(w, target, o.value);
         w.events.push({ type: 'orb', x: o.x, y: o.y, value: o.value, lost: o.lost, pid: target.id });
-        if (o.lost && !w.orbs.some((q) => q !== o && q.lost && q.life > 0)) target.lostX = NaN;
+        if (o.lost && !w.orbs.some((q) => q !== o && q.lost && q.life > 0)) {
+          // Plus aucun Honneur perdu au sol : en coop, le repère de chacun s'efface (les orbes n'ont pas de propriétaire).
+          if (w.mode === 'coop') for (const q of w.players) q.lostX = NaN;
+          else target.lostX = NaN;
+        }
         continue;
       }
       const dx = (target.x - o.x) / best;

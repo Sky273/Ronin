@@ -3,9 +3,11 @@
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { BUTTON_MASK, MSG, PLAYER_COLORS, type SnapshotMsg, type WelcomeMsg } from '../shared/net/protocol';
-import { startServer } from '../server/app';
+import { matchMaker } from '@colyseus/core';
+import { MAX_PAYLOAD, startServer } from '../server/app';
+import type { CoopRoom } from '../server/rooms/CoopRoom';
 import { LagLine } from '../server/lag';
-import { MAX_INPUT_QUEUE, MAX_STEPS_PER_UPDATE, CoopSession } from '../server/session';
+import { IDLE_RELEASE_TICKS, MAX_INPUT_QUEUE, MAX_STEPS_PER_UPDATE, CoopSession } from '../server/session';
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -27,9 +29,9 @@ async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean>
 
 // Garde-fou : un test réseau bloqué ne doit pas bloquer npm test.
 setTimeout(() => {
-  console.log('✘ délai global dépassé (60 s)');
+  console.log('✘ délai global dépassé (120 s)');
   process.exit(1);
-}, 60_000).unref();
+}, 120_000).unref();
 
 // ─── (a) CoopSession seule ──────────────────────────────────────────────────
 
@@ -121,6 +123,8 @@ const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id
   u.update(STEP_MS * 5 + 0.01);
   check('file vide : derniers boutons tenus réutilisés', player(u, up)!.prevButtons === BTN.RIGHT && player(u, up)!.x > x0, `x ${x0.toFixed(1)} → ${player(u, up)!.x.toFixed(1)}`);
   check('accusé inchangé sans nouvelle entrée', u.ackFor(up) === 3);
+  for (let i = 0; i < IDLE_RELEASE_TICKS; i++) u.update(STEP_MS + 0.01);
+  check('client muet : boutons relâchés après IDLE_RELEASE_TICKS', player(u, up)!.prevButtons === 0);
 
   // Instantané : ack et événements accumulés.
   const snap = u.snapshotFor(up);
@@ -159,6 +163,94 @@ const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id
   on.clear();
 }
 
+// 5. Session : fuzz d'arrivées, départs, entrées et durées étranges — jamais d'exception, invariants tenus.
+{
+  // Générateur déterministe (pas de Math.random dans les tests).
+  let seed = 12345;
+  const rnd = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const pick = <T>(a: readonly T[]): T => a[Math.floor(rnd() * a.length)];
+  const weirdS = [NaN, Infinity, -Infinity, -1, -0, 0.5, 2 ** 53, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1e300];
+  const weirdB = [NaN, -1, 2 ** 31, 2 ** 52, -(2 ** 53) + 1, Infinity, 0xffffffff];
+  const weirdMs = [0, -1, NaN, 1e-9, 0.001, 16.7, 33, 100, 5000, 1e9];
+  const s = new CoopSession(777);
+  const seqs = new Map<number, number>();
+  const bad: string[] = [];
+  let err = '';
+  try {
+    for (let i = 0; i < 6000; i++) {
+      const r = rnd();
+      if (r < 0.03 && s.playerCount < PLAYER_COLORS) {
+        const { pid } = s.join(pick(['A', '', null, 42, { x: 1 }, 'x'.repeat(500), '\u0000‮💥', undefined]));
+        seqs.set(pid, 0);
+      } else if (r < 0.05 && s.playerCount > 0) {
+        const pid = pick([...seqs.keys()]);
+        s.leave(pid);
+        s.leave(pid); // double départ
+        seqs.delete(pid);
+      } else if (r < 0.07) {
+        s.leave(Math.floor(rnd() * 1e6)); // inconnu
+      }
+      for (const [pid, q] of seqs) {
+        const k = rnd();
+        if (k < 0.1) s.pushInput(pid, { s: pick(weirdS), b: pick(weirdB) });
+        else if (k < 0.15) s.pushInput(pid, { s: q - Math.floor(rnd() * 5), b: Math.floor(rnd() * 0xffff) }); // rejouée
+        else if (k < 0.95) {
+          const n = rnd() < 0.05 ? 20 : 1; // parfois une rafale
+          for (let j = 0; j < n; j++) {
+            seqs.set(pid, seqs.get(pid)! + 1);
+            s.pushInput(pid, { s: seqs.get(pid)!, b: Math.floor(rnd() * 0x1000) });
+          }
+        }
+        if (s.queueLength(pid) > MAX_INPUT_QUEUE) bad.push(`file ${s.queueLength(pid)} pour ${pid}`);
+      }
+      const steps = s.update(rnd() < 0.05 ? pick(weirdMs) : STEP_MS);
+      if (steps > MAX_STEPS_PER_UPDATE) bad.push(`${steps} pas`);
+      if (i % 50 === 0) {
+        for (const pid of seqs.keys()) s.snapshotFor(pid);
+        s.flushEvents();
+      }
+      const ps = s.world.players;
+      if (ps.length !== s.playerCount) bad.push(`monde ${ps.length} ≠ session ${s.playerCount}`);
+      if (new Set(ps.map((p) => p.color)).size !== ps.length) bad.push('couleurs en double');
+      if (ps.some((p) => p.color < 0 || p.color >= PLAYER_COLORS)) bad.push('couleur hors plage');
+      if (ps.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y) || p.name.length > 12)) bad.push('joueur invalide');
+      if (bad.length) break;
+    }
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x);
+  }
+  check('fuzz de session (6000 appels) : aucune exception', err === '', err.slice(0, 300));
+  check('fuzz de session : invariants (file ≤ 8, couleurs uniques, monde = session)', bad.length === 0, bad.slice(0, 3).join(' ; '));
+  check('fuzz de session : la simulation a avancé', s.world.tick > 4000 && !s.world.over, `tick ${s.world.tick}`);
+}
+
+// 6. Durée démesurée (horloge folle) : la session ne doit pas rester figée.
+{
+  const s = new CoopSession(5);
+  s.join('a');
+  s.update(Infinity);
+  const t0 = s.world.tick;
+  let steps = 0;
+  for (let i = 0; i < 10; i++) steps += s.update(STEP_MS + 0.01);
+  check('après update(Infinity), la simulation continue', steps >= 9 && s.world.tick > t0, `${steps} pas sur 10 appels`);
+  const u = new CoopSession(5);
+  u.join('a');
+  u.update(1e308); // 1e308 × 60 déborde en Infinity
+  check('après update(1e308), la simulation continue', u.update(STEP_MS + 0.01) === 1);
+}
+
+// 7. Séquence géante acceptée : le client se bloque lui-même, sans gêner les autres.
+{
+  const s = new CoopSession(6);
+  const a = s.join('a').pid;
+  const b = s.join('b').pid;
+  s.pushInput(a, { s: Number.MAX_SAFE_INTEGER, b: 0 });
+  check('séquence MAX_SAFE_INTEGER : entrées suivantes de ce client ignorées', !s.pushInput(a, { s: 1, b: BTN.RIGHT }));
+  check('… celles des autres clients restent acceptées', s.pushInput(b, { s: 1, b: BTN.RIGHT }));
+  s.update(STEP_MS);
+  check('… et la simulation avance', s.world.tick === 1 && s.ackFor(b) === 1);
+}
+
 // ─── (b) Serveur réel + clients SDK ─────────────────────────────────────────
 
 interface TestClient {
@@ -178,7 +270,7 @@ async function connect(url: string, name: string): Promise<TestClient> {
     c.snaps.push(s);
     c.snapTimes.push(performance.now());
   });
-  room.onMessage(MSG.ping, (t: number) => c.pings.push(t));
+  room.onMessage(MSG.ping, (m: { t: number }) => c.pings.push(m.t));
   room.onLeave(() => (c.left = true));
   return c;
 }
@@ -238,7 +330,7 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     check('entrées malformées ignorées, la salle continue', b.snaps.length > nb && !a.left);
 
     // Ping (mesure de RTT) : écho du même message.
-    a.room.send(MSG.ping, 12345.5);
+    a.room.send(MSG.ping, { t: 12345.5 });
     await waitFor(() => a.pings.length > 0, 2000);
     check('ping renvoyé à l’identique', a.pings[0] === 12345.5);
 
@@ -268,6 +360,194 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
   }
   await srv.stop();
   check('serveur arrêté proprement', true);
+}
+
+// ─── (c) Robustesse du serveur réel : salle pleine, messages malformés, départs rapides ─
+{
+  const crashes: string[] = [];
+  const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
+  process.on('uncaughtException', onCrash);
+  process.on('unhandledRejection', onCrash);
+  const srv = await startServer({ port: 0 });
+  const url = `ws://localhost:${srv.port}`;
+  const roomOf = (id: string) => matchMaker.getLocalRoomById(id) as unknown as CoopRoom | undefined;
+  /** Un client « témoin » reçoit-il encore des instantanés ? */
+  const flowing = async (c: TestClient) => {
+    const n = c.snaps.length;
+    return waitFor(() => c.snaps.length >= n + 3, 2000);
+  };
+  try {
+    // 12 clients en parallèle : même salle, 12 couleurs distinctes.
+    const cs = await Promise.all(Array.from({ length: PLAYER_COLORS }, (_, i) => connect(url, `p${i}`)));
+    await waitFor(() => cs.every((c) => !!c.welcome), 5000);
+    const roomId = cs[0].room.roomId;
+    const colors = new Set(cs.map((c) => c.welcome?.color));
+    check('12 clients : même salle, 12 couleurs distinctes', cs.every((c) => c.room.roomId === roomId) && colors.size === PLAYER_COLORS && [...colors].every((k) => k! >= 0 && k! < PLAYER_COLORS), [...colors].join(','));
+    const room = roomOf(roomId);
+    check('12 clients : session à 12 joueurs', room?.coop.playerCount === PLAYER_COLORS, `${room?.coop.playerCount}`);
+
+    // 13e client vers la salle pleine : refusé.
+    let refused = false;
+    try {
+      const r = await new Client(url).joinById(roomId, { name: 'treize' });
+      await r.leave();
+    } catch {
+      refused = true;
+    }
+    check('13e client (joinById sur la salle pleine) refusé', refused && room?.coop.playerCount === PLAYER_COLORS);
+    // 13e client via joinOrCreate (chemin du jeu) : jamais dans la salle pleine.
+    const extra = await connect(url, 'treize');
+    await waitFor(() => !!extra.welcome, 2000);
+    check('13e client (joinOrCreate) placé dans une autre salle', extra.room.roomId !== roomId && !!extra.welcome && room?.coop.playerCount === PLAYER_COLORS, extra.room.roomId);
+    await extra.room.leave();
+    // On libère 7 places pour la suite (restent les clients 0 à 4).
+    for (const c of cs.slice(5)) await c.room.leave();
+    await waitFor(() => room?.coop.playerCount === 5, 2000);
+
+    const witness = cs[0];
+    const bad = cs[1];
+    // Entrées et pings de types inattendus.
+    const junk: unknown[] = [
+      { s: -5, b: 1 }, { s: 2 ** 53, b: 1 }, { s: '1', b: 1 }, { s: 1, b: 'x' }, { s: 1, b: {} }, { s: NaN, b: NaN },
+      { s: Infinity, b: 1 }, { s: 1.5, b: 1 }, 'chaîne', 42, true, [], [[[[]]]], { s: { valueOf: 1 } }, { __proto__: { s: 1 } },
+      { s: 1.25, b: 1, extra: 'x'.repeat(2000) }, { s: -1e308, b: -1e308 },
+    ];
+    for (const m of junk) bad.room.send(MSG.input, m as never);
+    for (const m of [null, 'x', 5, [], { t: NaN }, { t: 'x' }, { t: Infinity }, { t: -1 }, { t: { a: 1 } }]) bad.room.send(MSG.ping, m as never);
+    await waitFor(() => bad.pings.length >= 9, 2000);
+    check('pings malformés : écho t = 0 si non fini, sinon t inchangé', bad.pings.length === 9 && bad.pings.join() === '0,0,0,0,0,0,0,-1,0', bad.pings.join());
+    const pidBad = bad.welcome!.pid;
+    const slotOk = room?.coop.queueLength(pidBad) === 0 && room?.coop.ackFor(pidBad) === -1;
+    check('entrées malformées : aucune acceptée', slotOk, `file=${room?.coop.queueLength(pidBad)} ack=${room?.coop.ackFor(pidBad)}`);
+    // Après les entrées malformées, une entrée valide est toujours acceptée.
+    bad.room.send(MSG.input, { s: 1000, b: BTN.RIGHT });
+    check('après les entrées malformées, une entrée valide est acceptée', await waitFor(() => room?.coop.ackFor(pidBad) === 1000, 1000));
+
+    // Octets bruts : msgpack invalide, tronqué, imbrication profonde, message vide, code de protocole inconnu.
+    const raw = [
+      new Uint8Array([]),
+      new Uint8Array([13]),
+      new Uint8Array([13, 0xa1, 0x69, 0xc1]), // type « i » + octet msgpack interdit
+      new Uint8Array([13, 0xa1, 0x69, 0xdf, 0xff, 0xff, 0xff, 0xff]), // map annoncée à 4 milliards d'entrées
+      new Uint8Array([13, 0xa1, 0x69, 0xdd, 0x7f, 0xff, 0xff, 0xff]), // tableau annoncé à 2 milliards d'éléments
+      new Uint8Array([13, 0xa1, 0x69, ...new Array(3500).fill(0x91), 0x00]), // 3500 tableaux imbriqués
+      new Uint8Array([13, 0xa1, 0x70, 0xc7, 0x05, 0x7f, 1, 2, 3, 4, 5]), // ping : extension inconnue
+      new Uint8Array([99, 1, 2, 3]),
+      new Uint8Array([13, 0xff]),
+      new Uint8Array([13, 0xd9, 0xff, 0x41]), // type déclaré sur 255 octets, tronqué
+    ];
+    // Un client neuf par charge utile (le framework coupe le client au premier msgpack invalide).
+    // Par lots de 5 dans la même salle que le témoin (joinById).
+    let rogueErr = '';
+    for (let i0 = 0; i0 < raw.length; i0 += 5) {
+      const batch = raw.slice(i0, i0 + 5);
+      const rogues = await Promise.all(batch.map(async (_, i) => {
+        const rm = await new Client(url).joinById(roomId, { name: `rogue${i0 + i}` });
+        const c = { room: rm, left: false };
+        rm.onLeave(() => (c.left = true));
+        return c;
+      })).catch((x) => ((rogueErr = String(x)), []));
+      rogues.forEach((r, i) => r.room.connection.send(batch[i]));
+      await sleep(300);
+      for (const r of rogues) if (!r.left) await r.room.leave().catch(() => undefined);
+      await waitFor(() => room?.coop.playerCount === 5, 2000);
+    }
+    check('octets bruts : clients voyous bien entrés dans la salle du témoin', rogueErr === '', rogueErr);
+    check('octets bruts malformés : la salle continue (témoin)', await flowing(witness) && !witness.left);
+    const steadyTick = room?.coop.world.tick ?? 0;
+    await sleep(200);
+    check('octets bruts malformés : la simulation avance', (room?.coop.world.tick ?? 0) > steadyTick + 6);
+
+    // Message trop gros (> MAX_PAYLOAD) : seul l'émetteur est coupé.
+    const big = cs[3];
+    big.room.send(MSG.input, { s: 1, b: 1, pad: 'x'.repeat(MAX_PAYLOAD * 3) } as never);
+    const bigCut = await waitFor(() => big.left, 3000);
+    check('message de 12 Kio : l’émetteur est déconnecté', bigCut);
+    check('message de 12 Kio : les autres restent', await flowing(witness) && !witness.left && !cs[4].left);
+    check('message de 12 Kio : son joueur est retiré de la session', await waitFor(() => !room?.coop.world.players.some((p) => p.id === big.welcome!.pid), 2000));
+
+    // Client légitime à 60 Hz + pings pendant 3 s, avec une rafale de rattrapage : jamais expulsé.
+    const legit = cs[4];
+    let ls = 1;
+    const lt = setInterval(() => legit.room.send(MSG.input, { s: ls++, b: BTN.RIGHT }), STEP_MS);
+    const pt = setInterval(() => legit.room.send(MSG.ping, { t: 1 }), 500);
+    await sleep(1500);
+    for (let i = 0; i < 100; i++) legit.room.send(MSG.input, { s: ls++, b: 0 }); // rafale (réseau qui se débloque)
+    await sleep(1500);
+    clearInterval(lt);
+    clearInterval(pt);
+    await sleep(100);
+    check('client à 60 Hz avec une rafale ponctuelle : pas expulsé', !legit.left, `${ls} entrées`);
+
+    // Départs et arrivées rapides : 8 clients rejoignent et repartent aussitôt, certains sans attendre l'accueil.
+    await waitFor(() => room?.coop.playerCount === 4, 2000); // restent 0, 1, 2 et 4 (3 a été coupé)
+    const churn = await Promise.all(
+      Array.from({ length: 8 }, async (_, i) => {
+        const c = await connect(url, `churn${i}`);
+        if (i % 2) await waitFor(() => !!c.welcome, 1000);
+        await c.room.leave();
+        return c;
+      }),
+    );
+    void churn;
+    const expected = [cs[0], cs[1], cs[2], cs[4]].filter((c) => !c.left).length;
+    const settled = await waitFor(() => room?.coop.playerCount === expected && room.coop.world.players.length === expected, 3000);
+    check('départs/arrivées rapides : la session revient au bon nombre de joueurs', settled, `${room?.coop.playerCount} au lieu de ${expected}`);
+    const late = await connect(url, 'late');
+    await waitFor(() => !!late.welcome, 2000);
+    const used = new Set(room?.coop.world.players.filter((p) => p.id !== late.welcome?.pid).map((p) => p.color));
+    let lowest = 0;
+    while (used.has(lowest)) lowest++;
+    check('départs/arrivées rapides : couleurs libérées (le nouveau prend la plus basse libre)', late.room.roomId === roomId && late.welcome?.color === lowest, `couleur ${late.welcome?.color}, attendu ${lowest}`);
+    check('départs/arrivées rapides : la salle continue', await flowing(witness));
+
+    // Pseudo démesuré dans les options d'arrivée.
+    let hugeErr = '';
+    try {
+      const h = await connect(url, 'N'.repeat(200_000));
+      await waitFor(() => !!h.welcome, 2000);
+      const p = room?.coop.world.players.find((q) => q.id === h.welcome?.pid);
+      check('pseudo de 200 000 caractères : tronqué à 12', !!p && p.name.length === 12, `${p?.name.length}`);
+      await h.room.leave();
+    } catch (x) {
+      hugeErr = String(x);
+    }
+    check('pseudo démesuré : pas de plantage du serveur', await flowing(witness), hugeErr);
+
+    for (const c of [...cs, late]) if (!c.left) await c.room.leave().catch(() => undefined);
+  } catch (err) {
+    check('scénario de robustesse sans exception', false, String((err as Error)?.stack ?? err).slice(0, 400));
+  }
+  await srv.stop();
+
+  // Latence simulée : départ alors que des messages sont encore en attente dans les deux sens.
+  process.env.LAG_MS = '60';
+  process.env.JITTER_MS = '20';
+  const srv2 = await startServer({ port: 0 });
+  delete process.env.LAG_MS;
+  delete process.env.JITTER_MS;
+  try {
+    const url2 = `ws://localhost:${srv2.port}`;
+    const w = await connect(url2, 'witness');
+    await waitFor(() => !!w.welcome, 3000);
+    for (let k = 0; k < 5; k++) {
+      const c = await connect(url2, `lag${k}`);
+      for (let i = 1; i <= 30; i++) c.room.send(MSG.input, { s: i, b: BTN.RIGHT });
+      c.room.send(MSG.ping, { t: 1 });
+      await c.room.leave(); // les entrées retardées arrivent après le départ
+    }
+    await sleep(300);
+    const room2 = roomOf(w.room.roomId);
+    check('latence simulée + départs : session cohérente', room2?.coop.playerCount === 1 && room2.coop.world.players.length === 1, `${room2?.coop.playerCount}`);
+    check('latence simulée + départs : la salle continue', await flowing(w) && !w.left);
+    await w.room.leave();
+  } catch (err) {
+    check('scénario de latence sans exception', false, String(err));
+  }
+  await srv2.stop();
+  check('aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
+  process.off('uncaughtException', onCrash);
+  process.off('unhandledRejection', onCrash);
 }
 
 if (failures) {

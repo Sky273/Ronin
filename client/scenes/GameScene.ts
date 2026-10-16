@@ -29,13 +29,15 @@ import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
 import { Scoreboard } from '../ui/scoreboard';
 import { stageTitle, UPGRADE_TEXT } from '../ui/texts';
+import { OnlineMenu } from '../ui/onlineMenu';
 import { TitleScreen } from '../ui/title';
+import { RemoteSource } from '../net/remoteSource';
 import { LocalSource } from '../world/localSource';
 import type { WorldSource } from '../world/source';
 
 type Layer = 'bg' | 'world' | 'ui';
-/** Écran courant : menus, partie, fin de partie, saisie du nom, tableau des scores. */
-type Screen = 'title' | 'select' | 'play' | 'over' | 'name' | 'scores';
+/** Écran courant : menus, partie, fin de partie, saisie du nom, tableau des scores, menu en ligne. */
+type Screen = 'title' | 'select' | 'play' | 'over' | 'name' | 'scores' | 'online';
 type GameOverInfo = { score: number; loop: number; kills: number };
 
 const MENU_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyS', 'KeyA', 'KeyD', 'Enter', 'NumpadEnter', 'Space', 'Escape'];
@@ -76,6 +78,11 @@ export class GameScene extends Phaser.Scene {
   private diffSelect!: DifficultySelect;
   private nameEntry!: NameEntry;
   private scoreboard!: Scoreboard;
+  private onlineMenu!: OnlineMenu;
+  /** Salle rejointe dont on attend le premier instantané (le menu en ligne reste affiché). */
+  private pending: RemoteSource | null = null;
+  /** Jeton de tentative de connexion : une réponse arrivée après un retour en arrière est abandonnée. */
+  private joinToken = 0;
   private deathText!: Phaser.GameObjects.Text;
   private deathSub!: Phaser.GameObjects.Text;
 
@@ -195,9 +202,9 @@ export class GameScene extends Phaser.Scene {
     for (const code of MENU_KEYS) this.controls.onKey(code, () => this.menuKey(code));
     if (import.meta.env.DEV) {
       // Raccourcis de test : F2 phase de Marée suivante, F3 arène du gardien, F4 +100 Honneur.
-      this.controls.onKey('F2', () => this.screen === 'play' && skipWavePhase(this.world));
-      this.controls.onKey('F3', () => this.screen === 'play' && warpToArena(this.world, this.me.id));
-      this.controls.onKey('F4', () => this.screen === 'play' && gainHonor(this.world, this.me, 100));
+      this.controls.onKey('F2', () => this.screen === 'play' && this.src === this.local && skipWavePhase(this.world));
+      this.controls.onKey('F3', () => this.screen === 'play' && this.src === this.local && warpToArena(this.world, this.me.id));
+      this.controls.onKey('F4', () => this.screen === 'play' && this.src === this.local && gainHonor(this.world, this.me, 100));
       // F8 : ajoute un « Kage », écho retardé du joueur local, pour tester le rendu de N joueurs.
       this.controls.onKey('F8', () => {
         if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
@@ -205,7 +212,7 @@ export class GameScene extends Phaser.Scene {
       });
       // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
       this.controls.onKey('F7', () => {
-        if (this.screen !== 'play' || this.world.over) return;
+        if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
         nextStage(this.world);
         for (const ev of this.world.events) this.onEvent(ev);
         this.world.events.length = 0;
@@ -220,6 +227,11 @@ export class GameScene extends Phaser.Scene {
     this.titleScreen = new TitleScreen(this, this.put, {
       onPlay: () => this.goSelect(),
       onScores: () => this.goScores(this.difficulty, -1),
+      onOnline: () => this.goOnline(),
+    });
+    this.onlineMenu = new OnlineMenu(this, this.put, {
+      onJoin: (name) => void this.joinOnline(name),
+      onBack: () => this.leaveOnline(null),
     });
     this.diffSelect = new DifficultySelect(this, this.put, {
       onPick: (d) => this.newRun(d),
@@ -253,16 +265,21 @@ export class GameScene extends Phaser.Scene {
 
   /** Aiguillage des touches de menu vers l'écran actif (sans effet en jeu). */
   private menuKey(code: string): void {
-    if (this.screen === 'play') return;
+    if (this.screen === 'play') {
+      // En ligne, Échap quitte la salle (pas de pause : le monde continue sans nous).
+      if (code === 'Escape' && this.src !== this.local) this.leaveOnline(null);
+      return;
+    }
     this.ensureAudio();
     if (this.screen === 'title') this.titleScreen.key(code);
     else if (this.screen === 'select') this.diffSelect.key(code);
     else if (this.screen === 'scores') this.scoreboard.key(code);
+    else if (this.screen === 'online') this.onlineMenu.key(code);
     else if (this.screen === 'over' && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
   }
 
   private hideScreens(): void {
-    for (const s of [this.titleScreen, this.diffSelect, this.nameEntry, this.scoreboard]) if (s.visible) s.hide();
+    for (const s of [this.titleScreen, this.diffSelect, this.nameEntry, this.scoreboard, this.onlineMenu]) if (s.visible) s.hide();
   }
 
   private goTitle(): void {
@@ -282,6 +299,76 @@ export class GameScene extends Phaser.Scene {
     this.hideScreens();
     this.screen = 'scores';
     this.scoreboard.show(this.scores, focus, highlight);
+  }
+
+  // ─── Mode en ligne (la route partagée) ───────────────────────────────────
+
+  private goOnline(): void {
+    this.ensureAudio();
+    this.hideScreens();
+    this.screen = 'online';
+    this.onlineMenu.show(this.prefs.name);
+    this.controls.setTextMode((key, code) => this.onlineMenu.keyText(key, code));
+  }
+
+  /** Connexion à une salle : le SDK réseau n'est chargé qu'ici (le solo n'en a pas besoin). */
+  private async joinOnline(name: string): Promise<void> {
+    const token = ++this.joinToken;
+    this.prefs = { ...this.prefs, name };
+    savePrefs(this.prefs);
+    try {
+      const net = await import('../net/connection');
+      const conn = await net.connect(net.defaultServerUrl(), name);
+      if (token !== this.joinToken || this.screen !== 'online') {
+        conn.leave();
+        return;
+      }
+      const src = new RemoteSource(conn);
+      this.pending = src;
+      src.onReady(() => this.pending === src && this.startOnline(src));
+      src.onClose((reason) => this.leaveOnline(reason));
+    } catch (e) {
+      if (token === this.joinToken && this.screen === 'online') this.onlineMenu.setStatus((e as Error).message, true);
+    }
+  }
+
+  /** Premier instantané appliqué : la salle devient le monde affiché. */
+  private startOnline(src: RemoteSource): void {
+    this.pending = null;
+    this.controls.setTextMode(null);
+    this.hideScreens();
+    this.useSource(src);
+    src.consumeStageChanged(); // le niveau vient d'être appliqué par useSource
+    this.flash = this.shake = this.zoomPunch = this.wipe = 0;
+    this.orbStreak = this.orbStreakT = this.lastLost = 0;
+    this.best = 0;
+    this.overInfo = null;
+    this.results.hide();
+    this.hud.reset();
+    this.controls.reset();
+    this.deathText.setAlpha(0);
+    this.deathSub.setAlpha(0);
+    this.screen = 'play';
+    this.sfx.taiko(false);
+    const n = this.world.players.length;
+    this.hud.banner('縁', 'The shared road', `${n} ronin on the road · Esc to leave`, '#15120e', 2400);
+  }
+
+  /** Quitte la salle (Échap, retour du menu, connexion perdue) ; `reason` : message d'erreur à afficher. */
+  private leaveOnline(reason: string | null): void {
+    ++this.joinToken;
+    const p = this.pending;
+    this.pending = null;
+    p?.dispose();
+    this.controls.setTextMode(null);
+    if (this.src !== this.local) this.useSource(this.local); // libère la source en ligne
+    this.results.hide();
+    this.deathText.setAlpha(0);
+    this.deathSub.setAlpha(0);
+    if (reason) {
+      this.goOnline();
+      this.onlineMenu.setStatus(reason, true);
+    } else this.goTitle();
   }
 
   /** Nouvelle partie : le monde est réinitialisé sur place, tout l'état client aussi. */
@@ -423,6 +510,8 @@ export class GameScene extends Phaser.Scene {
     this.scoreboard.update(dt);
     // Menus à la manette (fronts montants traduits en codes clavier).
     for (const code of this.controls.padMenu()) {
+      // En jeu, les boutons de la manette sont des actions (B = dash), jamais des touches de menu.
+      if (this.screen === 'play') continue;
       if (this.screen === 'name') {
         if (code === 'Enter') this.nameEntry.keyText('Enter', 'Enter');
       } else this.menuKey(code);
@@ -433,6 +522,8 @@ export class GameScene extends Phaser.Scene {
       if (this.controls.sample() !== 0 && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
     }
     if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
+    // Salle rejointe : on applique ses instantanés jusqu'au premier (startOnline prend alors le relais).
+    if (this.screen === 'online' && this.pending) this.pending.advance(dt, () => 0, () => undefined);
     if (this.screen === 'play' || this.screen === 'over') {
       const src = this.src;
       const events = src.advance(dt, () => this.controls.sample(), () => this.snapshot());
@@ -441,6 +532,8 @@ export class GameScene extends Phaser.Scene {
         // En local, chaque événement garde le tick du pas qui l'a produit (rattrapage de plusieurs pas).
         this.onEvent(events[i], src === this.local ? this.local.eventTicks[i] : this.world.tick);
       }
+      // En ligne, une étape a pu changer sans que son événement nous parvienne (arrivée en cours de route).
+      if (src instanceof RemoteSource && src.consumeStageChanged() && !events.some((e) => e.type === 'stageStart')) this.resetView();
     }
     this.renderFrame(dt, time);
   }
@@ -529,7 +622,11 @@ export class GameScene extends Phaser.Scene {
     this.deathText.setAlpha(da);
     this.deathSub.setAlpha(da);
     if (dead) {
-      if (this.me.out) {
+      if (this.world.mode === 'coop') {
+        const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
+        const where = this.world.stage.state === 'arena' ? 'at the arena gate' : 'at the shrine';
+        this.deathSub.setText(`${foesLabel(this.me.kills)}${lost}\nyou will be reborn ${where}…`);
+      } else if (this.me.out) {
         const skip = this.screen === 'over' && this.overT > GAME_OVER_SKIP ? '\n\npress any key' : '';
         this.deathSub.setText(`Your journey ends\nscore ${fmtScore(this.me.score)} · ${foesLabel(this.me.runKills)}${skip}`);
       } else {
@@ -1187,6 +1284,7 @@ export class GameScene extends Phaser.Scene {
         this.backdrop.prewarm(biomeForStage(this.world.level.stage + 1));
         break;
       case 'gameOver':
+        if (this.src !== this.local) break; // pas de fin de partie en coopération
         this.onGameOver({ score: ev.score, loop: ev.loop, kills: ev.kills });
         break;
       case 'stageStart':

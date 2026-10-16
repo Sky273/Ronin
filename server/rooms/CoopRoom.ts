@@ -1,7 +1,7 @@
 // Salle coopérative « la route partagée » : 12 joueurs, serveur autoritaire.
 // Aucun état Schema : le serveur envoie des instantanés msgpack explicites (MSG.snap).
-import { CloseCode, getMessageBytes, Protocol, Room, type Client } from '@colyseus/core';
-import { MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg } from '../../shared/net/protocol';
+import { CloseCode, getMessageBytes, matchMaker, Protocol, Room, type Client, type RoomException, type RoomMethodName } from '@colyseus/core';
+import { MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg, type PingMsg } from '../../shared/net/protocol';
 import { LagLine, lagFromEnv } from '../lag';
 import { CoopSession } from '../session';
 import { Samples } from '../stats';
@@ -12,6 +12,8 @@ export const RATE_LIMIT_PER_S = 120;
 export const RATE_LIMIT_SECONDS = 2;
 /** Intervalle des statistiques dans les logs (ms) ; 0 pour les désactiver. */
 const STATS_EVERY_MS = Number(process.env.STATS_EVERY_MS ?? 10_000);
+/** Plafond de salles par processus (création de salles en masse par le matchmaking anonyme). */
+export const MAX_ROOMS = Math.max(1, Number(process.env.MAX_ROOMS) || 50);
 
 interface RateState {
   start: number; // début de la fenêtre d'une seconde
@@ -41,6 +43,8 @@ export class CoopRoom extends Room {
   private lastTickAt = 0;
 
   onCreate(): void {
+    // La salle en cours de création est déjà comptée.
+    if (matchMaker.stats.local.roomCount > MAX_ROOMS) throw new Error('server full');
     // Graine aléatoire : Math.random est permis côté serveur (jamais dans shared/).
     // Les options de création viennent du client : elles sont volontairement ignorées.
     const seed = Math.floor(Math.random() * 0x7fffffff);
@@ -60,8 +64,9 @@ export class CoopRoom extends Room {
 
     this.onMessage(MSG.ping, (client: Client, msg: unknown) => {
       if (!this.allow(client)) return;
-      // Écho pour la mesure du RTT : seul un nombre fini est renvoyé (sinon 0).
-      const echo = typeof msg === 'number' && Number.isFinite(msg) ? msg : 0;
+      // Écho pour la mesure du RTT : seul `{ t }` avec un nombre fini est renvoyé (sinon t = 0).
+      const t = (msg as { t?: unknown } | null)?.t;
+      const echo: PingMsg = { t: typeof t === 'number' && Number.isFinite(t) ? t : 0 };
       this.lag.run(`in:${client.sessionId}`, () => this.deliver(client, MSG.ping, echo));
     });
 
@@ -97,6 +102,15 @@ export class CoopRoom extends Room {
     if (pid === undefined) return;
     this.session.leave(pid);
     console.log(`[coop ${this.roomId}] - pid ${pid} — ${this.session.playerCount} joueur(s)`);
+  }
+
+  /**
+   * Exception dans un rappel de la salle (tick, message…) : sans ce gestionnaire, Colyseus la laisse
+   * remonter au processus, qui s'arrête avec toutes ses salles. On ne ferme que la salle fautive.
+   */
+  onUncaughtException(error: RoomException, methodName: RoomMethodName): void {
+    console.error(`[coop ${this.roomId}] exception dans ${methodName} : salle fermée`, error);
+    this.disconnect(CloseCode.WITH_ERROR).catch(() => undefined);
   }
 
   onDispose(): void {
@@ -142,8 +156,11 @@ export class CoopRoom extends Room {
 
   private tick(): void {
     const t0 = performance.now();
-    const steps = this.session.update(t0 - this.lastTickAt);
+    const elapsed = t0 - this.lastTickAt;
     this.lastTickAt = t0;
+    // Salle vide (places réservées, dernier départ) : le monde attend sans consommer de CPU.
+    if (this.session.playerCount === 0) return;
+    const steps = this.session.update(elapsed);
     if (!steps) return;
     const t1 = performance.now();
     const perStep = (t1 - t0) / steps;

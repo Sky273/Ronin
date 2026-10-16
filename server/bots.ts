@@ -55,8 +55,8 @@ class Bot {
       this.snaps++;
       this.lastAck = s.ack;
     });
-    room.onMessage(MSG.ping, (t: number) => {
-      this.rtt.push(performance.now() - t);
+    room.onMessage(MSG.ping, (m: { t: number }) => {
+      this.rtt.push(performance.now() - m.t);
     });
   }
 
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
   }, 1000 / NET_TICK);
 
   const pingTimer = setInterval(() => {
-    for (const b of live) b.room?.send(MSG.ping, performance.now());
+    for (const b of live) b.room?.send(MSG.ping, { t: performance.now() });
   }, 1000);
 
   // Statistiques périodiques.

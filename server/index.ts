@@ -4,9 +4,10 @@
 import { lagFromEnv } from './lag';
 import { startServer } from './app';
 
-const port = Number(process.env.PORT ?? 2567);
+const envPort = Number(process.env.PORT || 2567);
+const port = Number.isInteger(envPort) && envPort > 0 && envPort <= 65535 ? envPort : 2567;
 
-const running = await startServer({ port: Number.isInteger(port) && port >= 0 ? port : 2567, handleSignals: true });
+const running = await startServer({ port, handleSignals: true });
 // L'arrêt propre (SIGINT/SIGTERM) est géré par Colyseus : verrouillage et fermeture des salles, puis sortie.
 running.server.onBeforeShutdown(() => console.log('[serveur] arrêt en cours…'));
 running.server.onShutdown(() => console.log('[serveur] arrêté'));

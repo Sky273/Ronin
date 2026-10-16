@@ -42,7 +42,7 @@ You are a lone ronin with a katana, cutting through hordes along the Tōkaidō r
 
 ## Getting started
 
-Requires **Node.js 18+**.
+Requires **Node.js 22+** (the game server uses Colyseus 0.18).
 
 ```bash
 npm install
@@ -52,10 +52,26 @@ npm run dev      # http://localhost:5180
 Other scripts:
 
 ```bash
-npm test         # headless simulation tests + high-score tests
+npm test         # headless tests: simulation, scores, co-op rules, network, server
 npm run build    # type-check and production build (dist/)
 npm run preview  # serve the production build
 ```
+
+## Online co-op (work in progress)
+
+**The shared road**: up to twelve ronin, one ink color each, walk the same stages together against the hordes. No lives, no game over: fallen players are reborn at the furthest shrine anyone has reached, and the whole room moves to the next stage together.
+
+```bash
+npm run dev:server   # authoritative game server on ws://localhost:2567
+npm run dev          # then choose "Online" on the title screen
+```
+
+- `VITE_SERVER_URL` (client, see `.env.example`) points the game at another server.
+- `PORT` sets the server port. `LAG_MS` and `JITTER_MS` simulate network latency (per direction) for testing.
+- `npm run bots -- 12` fills a room with 12 bots and prints traffic statistics.
+- `npm run build:server` and `npm run start:server` build and run the production server.
+
+This first milestone sends inputs and renders server snapshots as they arrive. Client-side prediction, iaidō duels between players and a 1v1 tournament dojo come next.
 
 ## Controls
 
@@ -86,12 +102,13 @@ client/   Phaser 3 rendering, fully procedural
           fx/      ink particles, halved corpses, afterimages
           audio/   synthesized sound effects and adaptive music
           ui/      HUD, banners, results screen
+server/   Colyseus game server: rooms run the same shared/ simulation
 tests/    headless tests (bundled with esbuild, run with Node)
 ```
 
-The client only sends **inputs** (a button bitmask) to the simulation and renders the events it emits. The same `shared/` code will run on the server for multiplayer, with client-side prediction.
+The client only sends **inputs** (a button bitmask) to the simulation and renders the events it emits. Online, the same `shared/` code runs on the server; clients send their inputs at 60 Hz and receive snapshots at 20 Hz, filtered around each player.
 
-**Stack**: TypeScript (strict), Phaser 3, Vite, Web Audio API.
+**Stack**: TypeScript (strict), Phaser 3, Vite, Web Audio API, Colyseus (online).
 
 ## License
 

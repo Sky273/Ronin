@@ -28,6 +28,11 @@ export interface InputMsg {
   b: number;
 }
 
+/** Client → serveur → client : mesure de la latence (le serveur renvoie le message tel quel). */
+export interface PingMsg {
+  t: number;
+}
+
 /** Serveur → client, à l'arrivée dans la salle. */
 export interface WelcomeMsg {
   pid: number;
@@ -53,7 +58,8 @@ export interface SnapshotMsg {
 
 /** Pseudo affichable : lettres, chiffres, espace, . _ - ; 12 caractères ; « Ronin » si vide. */
 export function sanitizePlayerName(raw: unknown): string {
-  const s = typeof raw === 'string' ? raw : '';
+  // Tronqué d'abord : le nom vient du client et peut être très long (corps HTTP du matchmaking).
+  const s = typeof raw === 'string' ? raw.slice(0, 64) : '';
   const cleaned = s
     .normalize('NFC')
     .replace(/\s+/gu, ' ')

@@ -14,6 +14,10 @@ export const SNAP_INTERVAL_MS = (1000 * SNAP_EVERY) / NET_TICK;
 const MAX_INPUTS_PER_FRAME = 4;
 /** Période des pings de mesure de latence (s). */
 const PING_EVERY = 2;
+/** File d'instantanés en attente (onglet en arrière-plan : la scène ne tourne plus). */
+const MAX_QUEUED = 20;
+/** Événements conservés des instantanés abandonnés. */
+const MAX_CARRIED_EVENTS = 200;
 
 export interface RemoteSourceOptions {
   /** Horloge en ms (injectable pour les tests). */
@@ -123,7 +127,17 @@ export class RemoteSource implements WorldSource {
   /** Instantané reçu : mis en file, appliqué au prochain `advance` (public pour les tests). */
   receive(msg: SnapshotMsg): void {
     if (!this.welcomed || this.disposed) return; // avant l'accueil, rien à quoi l'appliquer
+    // Doublon ou retardataire : ignoré dès la réception, pour que la file reste strictement
+    // croissante (sinon des événements reportés sur lui seraient écartés avec lui).
+    const newest = this.queue.length ? this.queue[this.queue.length - 1].t : this.lastT;
+    if (msg.t <= newest) return;
     this.queue.push(msg);
+    if (this.queue.length > MAX_QUEUED) {
+      // Seul l'état le plus récent compte ; les événements des instantanés abandonnés sont reportés (bornés).
+      const dropped = this.queue.shift()!;
+      const next = this.queue[0];
+      next.events = dropped.events.concat(next.events).slice(-MAX_CARRIED_EVENTS);
+    }
   }
 
   advance(dt: number, sample: () => number, beforeStep: () => void): GameEvent[] {

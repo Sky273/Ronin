@@ -21,6 +21,8 @@ export const MAX_STEPS_PER_UPDATE = 5;
 // L'accumulateur compte en « millisecondes × NET_TICK » : un pas vaut exactement 1000 unités,
 // ce qui évite les erreurs d'arrondi de 1000/60 (10 × 10 ms donnent bien 6 pas).
 const STEP_UNITS = 1000;
+/** Au-delà de ce nombre de pas sans entrée (0,5 s), les boutons d'un joueur sont relâchés. */
+export const IDLE_RELEASE_TICKS = 30;
 
 interface PlayerSlot {
   pid: number;
@@ -33,6 +35,8 @@ interface PlayerSlot {
   ack: number;
   /** Boutons tenus : réutilisés quand la file est vide. */
   held: number;
+  /** Pas consécutifs sans entrée reçue. */
+  starved: number;
 }
 
 export class CoopSession {
@@ -59,7 +63,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0 });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0 });
     return { pid: p.id, color };
   }
 
@@ -112,7 +116,8 @@ export class CoopSession {
    * Renvoie le nombre de pas simulés.
    */
   update(elapsedMs: number): number {
-    if (!(elapsedMs > 0)) return 0;
+    // Durées nulles, négatives ou non finies ignorées (Infinity figerait l'accumulateur en NaN).
+    if (!(elapsedMs > 0) || !Number.isFinite(elapsedMs * NET_TICK)) return 0;
     this.acc += elapsedMs * NET_TICK;
     let steps = 0;
     while (this.acc >= STEP_UNITS && steps < MAX_STEPS_PER_UPDATE) {
@@ -133,6 +138,10 @@ export class CoopSession {
       if (next) {
         slot.held = next.b;
         slot.ack = next.s;
+        slot.starved = 0;
+      } else if (++slot.starved > IDLE_RELEASE_TICKS) {
+        // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.
+        slot.held = 0;
       }
       this.inputs.set(slot.pid, slot.held);
     }

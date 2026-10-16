@@ -244,6 +244,105 @@ const now = (): number => clock;
   src.dispose();
 }
 
+// 5. File d'instantanés saturée (onglet en arrière-plan) : ordre, report des événements, doublons.
+{
+  const server = createWorld(SEED + 4, { mode: 'coop' });
+  const a = addPlayer(server, 'a');
+  run(server, 2, () => 0);
+  const base = makeSnapshot(server, a.id, [], 0);
+  /** Instantané au tick t portant des événements marqueurs (tideWarn n = identifiant unique). */
+  const mk = (t: number, ids: number[]): SnapshotMsg => wire({ ...base, t, ack: t, events: ids.map((n) => ({ type: 'tideWarn' as const, n })) });
+  const ids = (evs: GameEvent[]): number[] => evs.filter((e) => e.type === 'tideWarn').map((e) => (e as { n: number }).n);
+  const fresh = () => {
+    const t = new FakeTransport();
+    const src = new RemoteSource(t, { now });
+    src.welcome({ pid: a.id, seed: SEED + 4, stage: server.level.stage, tick: 0, color: 0 });
+    return src;
+  };
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+  // 5a. 30 instantanés sans image : file plafonnée, aucun événement perdu ni dupliqué, ordre conservé.
+  {
+    const src = fresh();
+    for (let t = 1; t <= 30; t++) src.receive(mk(t, [t]));
+    let steps = 0;
+    const got = ids(src.advance(0, () => 0, () => steps++));
+    check('file saturée : événements de tous les instantanés, une fois, dans l’ordre', got.join() === range(1, 30).join(), got.join());
+    check('file saturée : état du dernier instantané, au plus 20 applications', src.world.tick === 30 && src.ack === 30 && steps <= 20 && steps > 0, `tick=${src.world.tick} pas=${steps}`);
+    check('file saturée : plus rien ensuite', src.advance(0, () => 0, () => undefined).length === 0);
+    src.dispose();
+  }
+
+  // 5b. Débordement massif : report borné, mais jamais de doublon ni de désordre, les plus récents gardés.
+  {
+    const src = fresh();
+    let n = 0;
+    for (let t = 1; t <= 60; t++) src.receive(mk(t, range(n + 1, (n += 15))));
+    const got = ids(src.advance(0, () => 0, () => undefined));
+    const sorted = got.every((v, i) => i === 0 || v > got[i - 1]);
+    check('débordement massif : aucun doublon, ordre croissant', sorted && new Set(got).size === got.length, `${got.length} événements`);
+    check('débordement massif : les événements les plus récents sont tous là', got.slice(-15 * 19).join() === range(n - 15 * 19 + 1, n).join());
+    src.dispose();
+  }
+
+  // 5c. Doublon (même tick) en tête de file au moment du débordement : ses événements ne doivent pas sortir deux fois.
+  {
+    const src = fresh();
+    const dup = mk(1, [1]);
+    src.receive(dup);
+    src.receive(wire(dup)); // même instantané reçu deux fois
+    for (let t = 2; t <= 21; t++) src.receive(mk(t, [t]));
+    const got = ids(src.advance(0, () => 0, () => undefined));
+    check('doublon puis débordement : chaque événement une seule fois', got.join() === range(1, 21).join(), got.join());
+    src.dispose();
+  }
+
+  // 5d. Retardataire (tick déjà appliqué) derrière l'instantané abandonné : les événements reportés ne doivent pas se perdre.
+  {
+    const src = fresh();
+    src.receive(mk(100, [100]));
+    src.advance(0, () => 0, () => undefined);
+    src.receive(mk(120, [120])); // sera abandonné (débordement)…
+    src.receive(mk(90, [90])); // … et reporté sur ce retardataire, qui est ignoré
+    for (let t = 121; t <= 139; t++) src.receive(mk(t, [t]));
+    const got = ids(src.advance(0, () => 0, () => undefined));
+    check('retardataire derrière un instantané abandonné : événements reportés non perdus', got.includes(120) && got.filter((v) => v === 120).length === 1, got.slice(0, 5).join());
+    src.dispose();
+  }
+
+  // 5e. Changement d'étape pendant le débordement : niveau reconstruit, stageStart transmis une fois.
+  {
+    const w2 = createWorld(SEED + 5, { mode: 'coop' });
+    const p = addPlayer(w2, 'p');
+    const t = new FakeTransport();
+    const src = new RemoteSource(t, { now });
+    src.welcome({ pid: p.id, seed: SEED + 5, stage: w2.level.stage, tick: w2.tick, color: 0 });
+    src.receive(wire(makeSnapshot(w2, p.id, run(w2, 3, () => 0), 0)));
+    src.advance(0, () => 0, () => undefined);
+    src.consumeStageChanged();
+    const levelRef = src.world.level;
+    const snaps: SnapshotMsg[] = [];
+    for (let i = 0; i < 30; i++) {
+      let evs = run(w2, 3, () => 0);
+      if (i === 2 || i === 6) {
+        nextStage(w2); // deux changements d'étape, tous deux dans des instantanés abandonnés
+        evs = evs.concat(w2.events);
+        w2.events.length = 0;
+      }
+      snaps.push(wire(makeSnapshot(w2, p.id, evs, i)));
+    }
+    for (const s of snaps) src.receive(s);
+    const got = src.advance(0, () => 0, () => undefined);
+    const L = src.world.level;
+    const starts = got.filter((e) => e.type === 'stageStart');
+    check('débordement + changements d’étape : stageChanged signalé', src.consumeStageChanged());
+    check('débordement + changements d’étape : niveau final identique au serveur, même référence', L === levelRef && L.stage === w2.level.stage && L.tiles.every((x, i) => x === w2.level.tiles[i]), `${L.stage} / ${w2.level.stage}`);
+    check('débordement + changements d’étape : deux stageStart, une fois chacun, dans l’ordre', starts.length === 2 && (starts[0] as { loop: number }).loop < (starts[1] as { loop: number }).loop, `${starts.length}`);
+    check('débordement + changements d’étape : état final du serveur', src.world.tick === w2.tick && src.world.stage.loop === w2.stage.loop);
+    src.dispose();
+  }
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);
