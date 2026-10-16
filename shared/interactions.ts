@@ -1,4 +1,4 @@
-import { BOSS, ENEMY, HONOR, honorForLevel, PLAYER as P, SPAWN } from './constants';
+import { BOSS, COOP, ENEMY, HONOR, honorForLevel, PLAYER as P, SPAWN } from './constants';
 import { DIFFICULTIES, enemyDmgScale, loopScoreMult } from './difficulty';
 import { canFit } from './physics';
 import type { Enemy, Player, World } from './types';
@@ -10,7 +10,11 @@ import { leechHeal, parryWindow, rollOffer } from './upgrades';
 export function takeToken(w: World, e: Enemy): boolean {
   if (e.token) return true;
   if (e.type === 'boss') return true; // le boss ne partage pas
-  if (w.attackTokens >= ENEMY.MAX_ATTACKERS) return false;
+  // Coop : chaque joueur vivant a droit à son propre lot d'assaillants.
+  const cap = w.mode === 'coop'
+    ? ENEMY.MAX_ATTACKERS * Math.max(1, w.players.filter((p) => p.state !== 'dead').length)
+    : ENEMY.MAX_ATTACKERS;
+  if (w.attackTokens >= cap) return false;
   e.token = true;
   w.attackTokens++;
   return true;
@@ -72,6 +76,17 @@ function killPlayer(w: World, p: Player): void {
   p.stateT = 0;
   p.respawnT = P.RESPAWN_TICKS;
   w.stage.deaths++;
+  // Coop : pas de vies, on renaît toujours ; la moitié de l'Honneur tombe au sol.
+  if (w.mode === 'coop') {
+    const dropped = Math.floor(p.honor * HONOR.DEATH_DROP);
+    if (dropped > 0) {
+      spawnOrbs(w, p.x, p.y - 20, dropped, true);
+      p.lostX = p.x;
+      p.lostY = p.y;
+    }
+    w.events.push({ type: 'playerDeath', x: p.x, y: p.y, pid: p.id, lost: dropped, livesLeft: -1 });
+    return;
+  }
   p.lives--;
   // Plus de vie : le joueur sort de la partie, il ne laisse pas d'Honneur à ramasser.
   if (p.lives <= 0) {
@@ -92,16 +107,20 @@ function killPlayer(w: World, p: Player): void {
  * Renaissance du joueur : la horde qui l'a vaincu se dissipe. Les ennemis engagés contre
  * lui, ou proches du lieu de sa mort ou du sanctuaire, disparaissent ; une Marée en cours
  * se retire (sans bonus) et l'accalmie reprend. Le gardien et son arène ne sont pas concernés
- * (l'arène a sa propre réinitialisation).
+ * (l'arène a sa propre réinitialisation). spawnX : lieu de renaissance (par défaut le sanctuaire).
  */
-export function calmHordeOnRespawn(w: World, p: Player, deathX: number): void {
+export function calmHordeOnRespawn(w: World, p: Player, deathX: number, spawnX: number = p.spawnX): void {
+  if (w.mode === 'coop') {
+    calmAroundSpawnCoop(w, p, spawnX);
+    return;
+  }
   const engaged = new Set(['chase', 'windup', 'attack', 'recover', 'hitstun', 'stunned', 'hidden']);
   const keep = [];
   for (const e of w.enemies) {
     const gone =
       e.type !== 'boss' &&
       e.state !== 'doomed' &&
-      (engaged.has(e.state) || Math.abs(e.x - deathX) < SPAWN.CLEAR_AROUND_DEATH || Math.abs(e.x - p.spawnX) < SPAWN.CLEAR_AROUND_SPAWN);
+      (engaged.has(e.state) || Math.abs(e.x - deathX) < SPAWN.CLEAR_AROUND_DEATH || Math.abs(e.x - spawnX) < SPAWN.CLEAR_AROUND_SPAWN);
     if (gone) {
       releaseToken(w, e);
       w.events.push({ type: 'despawn', x: e.x, y: e.y - e.h / 2 });
@@ -115,6 +134,26 @@ export function calmHordeOnRespawn(w: World, p: Player, deathX: number): void {
     w.events.push({ type: 'tideEnd', n: w.wave.n, bonus: 0 });
   }
   w.spawnTimer = Math.max(w.spawnTimer, 180); // quelques secondes de répit
+}
+
+/**
+ * Coop : la renaissance d'un joueur ne doit pas perturber les autres. La Marée et le spawner
+ * continuent ; seuls disparaissent les ennemis (et projectiles ennemis) proches du point de
+ * renaissance qui ne sont à portée d'aucun autre joueur vivant.
+ */
+function calmAroundSpawnCoop(w: World, p: Player, spawnX: number): void {
+  const others = w.players.filter((q) => q !== p && q.state !== 'dead');
+  const clears = (x: number) =>
+    Math.abs(x - spawnX) < SPAWN.CLEAR_AROUND_SPAWN && others.every((q) => Math.abs(q.x - x) > COOP.KEEP_NEAR_OTHERS);
+  const keep = [];
+  for (const e of w.enemies) {
+    if (e.type !== 'boss' && e.state !== 'doomed' && clears(e.x)) {
+      releaseToken(w, e);
+      w.events.push({ type: 'despawn', x: e.x, y: e.y - e.h / 2 });
+    } else keep.push(e);
+  }
+  w.enemies = keep;
+  w.projectiles = w.projectiles.filter((a) => a.owner !== 'enemy' || !clears(a.x));
 }
 
 export function stunEnemy(w: World, e: Enemy, pushDir: number, ticks: number = ENEMY.STUN_TICKS): void {

@@ -170,3 +170,24 @@ export const WAVES = {
   WARN: 200,
   TIDE_MAX: 3600,
 } as const;
+
+// ─── Mode coopératif en ligne (« la route partagée ») ───────────────────────
+// Ces valeurs ne concernent que les mondes créés avec mode: 'coop'.
+
+/** Durée du bilan avant le passage automatique à l'étape suivante (≈ 8 s). */
+export const COOP_CLEARED_TICKS = 480;
+
+export const COOP = {
+  // Aucun renfort n'apparaît à moins de cette distance (horizontale) d'un joueur vivant.
+  SPAWN_SAFE: 700,
+  // À la renaissance, un ennemi à moins de cette distance d'un autre joueur vivant reste en place.
+  KEEP_NEAR_OTHERS: 700,
+  // Population de la horde : × (1 + POP_PER_PLAYER × (vivants − 1)), plafonnée à POP_CAP.
+  POP_PER_PLAYER: 0.4,
+  POP_CAP: 32,
+  // Tentatives de placement d'un renfort (plus de contraintes qu'en solo).
+  SPAWN_ATTEMPTS: 10,
+  // Invulnérabilité d'un nouvel arrivant et d'un joueur amené dans l'arène.
+  JOIN_IFRAMES: 120,
+  ARENA_PULL_IFRAMES: 60,
+} as const;

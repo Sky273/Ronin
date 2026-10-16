@@ -1,5 +1,6 @@
 import { ATTACKS, type AttackDef, type AttackId, activeAttackBox, bodyRect } from './combat';
-import { DT, PLAYER as P } from './constants';
+import { DT, PLAYER as P, TILE } from './constants';
+import { findGround } from './enemy';
 import { BTN } from './input';
 import { calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
@@ -593,9 +594,11 @@ function stepDead(w: World, p: Player): void {
     return;
   }
   if (--p.respawnT <= 0) {
-    calmHordeOnRespawn(w, p, p.x);
-    p.x = p.spawnX;
-    p.y = p.spawnY;
+    // Coop : pendant le combat contre le gardien, on renaît à l'entrée de l'arène pour rejoindre la salle.
+    const at = w.mode === 'coop' && w.stage.state === 'arena' ? arenaEntrance(w) : { x: p.spawnX, y: p.spawnY };
+    calmHordeOnRespawn(w, p, p.x, at.x);
+    p.x = at.x;
+    p.y = at.y;
     p.vx = 0;
     p.vy = 0;
     // Mort = nouvelle vie : améliorations et Honneur repartent de zéro.
@@ -669,6 +672,10 @@ function windSlash(w: World, p: Player): void {
 /** Sanctuaires : point de réapparition + soins complets. */
 function touchCheckpoints(w: World, p: Player): void {
   const cps = w.level.checkpoints;
+  if (w.mode === 'coop') {
+    touchSharedShrine(w, p);
+    return;
+  }
   for (let i = 0; i < cps.length; i++) {
     if (i === p.checkpoint) continue;
     const c = cps[i];
@@ -680,4 +687,33 @@ function touchCheckpoints(w: World, p: Player): void {
       w.events.push({ type: 'checkpoint', x: c.x, y: c.y, index: i, pid: p.id });
     }
   }
+}
+
+/**
+ * Coop : sanctuaire commun. Le premier qui atteint un sanctuaire plus avancé que w.shrine
+ * l'active pour toute la salle (point de renaissance de chacun) et se soigne ; les
+ * sanctuaires déjà dépassés n'ont plus d'effet.
+ */
+function touchSharedShrine(w: World, p: Player): void {
+  const cps = w.level.checkpoints;
+  for (let i = w.shrine + 1; i < cps.length; i++) {
+    const c = cps[i];
+    if (Math.abs(p.x - c.x) < 40 && Math.abs(p.y - c.y) < 50) {
+      w.shrine = i;
+      for (const q of w.players) {
+        q.checkpoint = i;
+        q.spawnX = c.x;
+        q.spawnY = c.y;
+      }
+      p.hp = p.maxHp;
+      w.events.push({ type: 'checkpoint', x: c.x, y: c.y, index: i, pid: p.id });
+    }
+  }
+}
+
+/** Entrée de l'arène du gardien : juste après la barrière, au sol. */
+export function arenaEntrance(w: World): { x: number; y: number } {
+  const a = w.level.arena;
+  const x = (a.col + 1.5) * TILE;
+  return { x, y: findGround(w.level, x, a.guardianY) ?? a.guardianY };
 }

@@ -1,11 +1,11 @@
 import { bodyRect } from './combat';
-import { DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
+import { COOP, DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { addScore, damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
-import { createPlayer, stepPlayer } from './player';
+import { arenaEntrance, createPlayer, stepPlayer } from './player';
 import { buildStage } from './stagebuild';
 import { newStageState, populateStage, stepCleared, stepStage } from './stage';
 import type { Body, Enemy, EnemyType, GameMode, Player, World } from './types';
@@ -39,6 +39,7 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
     stage: newStageState(0, 0),
     difficulty: opts.difficulty ?? 'normal',
     mode: opts.mode ?? 'solo',
+    shrine: 0,
     over: false,
     overT: 0,
   };
@@ -60,11 +61,32 @@ export function addPlayer(w: World, name: string, opts: { color?: number } = {})
   const p = createPlayer(w.nextId++, name, w.level.spawn.x, w.level.spawn.y);
   p.lives = DIFFICULTIES[w.difficulty].lives;
   p.color = opts.color ?? 0;
+  if (w.mode === 'coop') placeNewcomer(w, p);
   w.players.push(p);
   return p;
 }
 
-/** Retire un joueur (déconnexion). Les références restantes (doomBy, ownerId) se résolvent à vide. */
+/**
+ * Coop : un joueur qui rejoint en cours d'étape arrive au sanctuaire commun (ou à l'entrée
+ * de l'arène si le combat contre le gardien est en cours), brièvement invulnérable.
+ */
+function placeNewcomer(w: World, p: Player): void {
+  const c = w.shrine > 0 ? w.level.checkpoints[w.shrine] : undefined;
+  const spawn = c ?? w.level.spawn;
+  p.checkpoint = c ? w.shrine : 0;
+  p.spawnX = spawn.x;
+  p.spawnY = spawn.y;
+  const at = w.stage.state === 'arena' ? arenaEntrance(w) : spawn;
+  p.x = at.x;
+  p.y = at.y;
+  p.iframes = COOP.JOIN_IFRAMES;
+}
+
+/**
+ * Retire un joueur (déconnexion). Les références restantes se résolvent à vide : doomBy et
+ * ownerId (projectile renvoyé) ne retrouvent plus personne, les jetons d'attaque sont portés
+ * par les ennemis (pas par les joueurs), w.shrine est un index de sanctuaire indépendant des joueurs.
+ */
 export function removePlayer(w: World, id: number): void {
   w.players = w.players.filter((p) => p.id !== id);
 }
@@ -98,6 +120,8 @@ export function stepWorld(w: World, inputs: Map<number, number>): void {
 
 /** Tous les joueurs sont sortis : la simulation continue un instant, puis la partie se termine. */
 function stepGameOver(w: World): void {
+  // Coop : la route partagée n'a pas de fin (personne ne sort jamais de la partie).
+  if (w.mode === 'coop') return;
   if (!w.players.length || !w.players.every((p) => p.out)) return;
   if (++w.overT < PLAYER.GAME_OVER_DELAY) return;
   w.over = true;
@@ -301,18 +325,24 @@ function spawner(w: World): void {
   if (!alive.length) return;
   const extra = extraEnemiesFor(w);
   // Plancher : même en très facile, la horde garde au moins 2 ennemis.
-  const target = Math.max(2, tide
+  const coop = w.mode === 'coop';
+  let target = Math.max(2, tide
     ? Math.min(26 + extra, 10 + 3 * wv.n + extra)
     : Math.min(SPAWN.MAX + extra, SPAWN.BASE + extra + Math.floor(w.stage.kills / SPAWN.PER_KILLS)));
+  // Coop : la horde grossit avec le nombre de joueurs vivants (plafonnée).
+  if (coop) target = Math.min(COOP.POP_CAP, Math.round(target * (1 + COOP.POP_PER_PLAYER * (alive.length - 1))));
   if (w.enemies.length >= target) {
     if (!tide) trimHorde(w, alive, target);
     return;
   }
   const p = alive[Math.floor(w.rng.next() * alive.length)];
-  for (let attempt = 0; attempt < 6; attempt++) {
+  const attempts = coop ? COOP.SPAWN_ATTEMPTS : 6;
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const side = w.rng.next() < 0.5 ? -1 : 1;
     // Jamais dans l'arène du gardien.
     const x = clamp(p.x + side * w.rng.range(tide ? 500 : 560, 900), 3 * TILE, (w.level.arena.col - 3) * TILE);
+    // Coop : jamais sous les yeux d'un autre joueur vivant.
+    if (coop && alive.some((q) => Math.abs(q.x - x) < COOP.SPAWN_SAFE)) continue;
     const gy = findGround(w.level, x, p.y);
     if (gy === null) continue;
     // Pas de renfort perché à plus de 4 tuiles au-dessus du joueur (ex. sommet d'un bloc de tunnel).
