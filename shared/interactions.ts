@@ -1,4 +1,4 @@
-import { BOSS, ENEMY, HONOR, honorForLevel, PLAYER as P } from './constants';
+import { BOSS, ENEMY, HONOR, honorForLevel, PLAYER as P, SPAWN } from './constants';
 import { DIFFICULTIES, enemyDmgScale, loopScoreMult } from './difficulty';
 import { canFit } from './physics';
 import type { Enemy, Player, World } from './types';
@@ -86,6 +86,35 @@ function killPlayer(w: World, p: Player): void {
     p.lostY = p.y;
   }
   w.events.push({ type: 'playerDeath', x: p.x, y: p.y, pid: p.id, lost, livesLeft: p.lives });
+}
+
+/**
+ * Renaissance du joueur : la horde qui l'a vaincu se dissipe. Les ennemis engagés contre
+ * lui, ou proches du lieu de sa mort ou du sanctuaire, disparaissent ; une Marée en cours
+ * se retire (sans bonus) et l'accalmie reprend. Le gardien et son arène ne sont pas concernés
+ * (l'arène a sa propre réinitialisation).
+ */
+export function calmHordeOnRespawn(w: World, p: Player, deathX: number): void {
+  const engaged = new Set(['chase', 'windup', 'attack', 'recover', 'hitstun', 'stunned', 'hidden']);
+  const keep = [];
+  for (const e of w.enemies) {
+    const gone =
+      e.type !== 'boss' &&
+      e.state !== 'doomed' &&
+      (engaged.has(e.state) || Math.abs(e.x - deathX) < SPAWN.CLEAR_AROUND_DEATH || Math.abs(e.x - p.spawnX) < SPAWN.CLEAR_AROUND_SPAWN);
+    if (gone) {
+      releaseToken(w, e);
+      w.events.push({ type: 'despawn', x: e.x, y: e.y - e.h / 2 });
+    } else keep.push(e);
+  }
+  w.enemies = keep;
+  w.projectiles = w.projectiles.filter((a) => a.owner !== 'enemy');
+  if (w.wave.phase !== 'calm') {
+    w.wave.phase = 'calm';
+    w.wave.t = 0;
+    w.events.push({ type: 'tideEnd', n: w.wave.n, bonus: 0 });
+  }
+  w.spawnTimer = Math.max(w.spawnTimer, 180); // quelques secondes de répit
 }
 
 export function stunEnemy(w: World, e: Enemy, pushDir: number, ticks: number = ENEMY.STUN_TICKS): void {

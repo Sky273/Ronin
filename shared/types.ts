@@ -135,6 +135,7 @@ export interface Enemy extends Body {
   dodgeCd: number;
   phase2: boolean;
   hornStage: number;
+  horde: boolean; // renfort amené par la horde (peut être retiré), sinon ennemi placé dans le niveau
 }
 
 export type ProjectileKind = 'arrow' | 'shuriken' | 'wave';
@@ -232,6 +233,7 @@ export type GameEvent =
   | { type: 'pick'; upgrade: UpgradeId; level: number; pid: number }
   | { type: 'checkpoint'; x: number; y: number; index: number; pid: number }
   | { type: 'spawn'; x: number; y: number; enemyType: EnemyType }
+  | { type: 'despawn'; x: number; y: number }
   | { type: 'windup'; id: number; x: number; y: number; enemyType: EnemyType; move: EnemyMove }
   | { type: 'arrowFire'; x: number; y: number }
   | { type: 'throw'; x: number; y: number }

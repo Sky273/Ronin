@@ -135,6 +135,11 @@ export const BOSS = {
 } as const;
 
 export const SPAWN = {
+  // À la renaissance, l'encre se dissipe autour du lieu de la mort et du sanctuaire.
+  CLEAR_AROUND_DEATH: 700,
+  CLEAR_AROUND_SPAWN: 900,
+  // En accalmie, un renfort en surnombre qui patrouille au-delà de cette distance s'efface.
+  TRIM_DISTANCE: 1100,
   BASE: 6,
   PER_KILLS: 6,
   MAX: 16,

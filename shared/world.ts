@@ -8,7 +8,7 @@ import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
 import { createPlayer, stepPlayer } from './player';
 import { newStageState, populateStage, stepCleared, stepStage } from './stage';
-import type { Body, EnemyType, Player, World } from './types';
+import type { Body, Enemy, EnemyType, Player, World } from './types';
 import { magnetRadius } from './upgrades';
 
 export { spawnEnemy };
@@ -295,7 +295,10 @@ function spawner(w: World): void {
   const target = Math.max(2, tide
     ? Math.min(26 + extra, 10 + 3 * wv.n + extra)
     : Math.min(SPAWN.MAX + extra, SPAWN.BASE + extra + Math.floor(w.stage.kills / SPAWN.PER_KILLS)));
-  if (w.enemies.length >= target) return;
+  if (w.enemies.length >= target) {
+    if (!tide) trimHorde(w, alive, target);
+    return;
+  }
   const p = alive[Math.floor(w.rng.next() * alive.length)];
   for (let attempt = 0; attempt < 6; attempt++) {
     const side = w.rng.next() < 0.5 ? -1 : 1;
@@ -304,7 +307,28 @@ function spawner(w: World): void {
     const gy = findGround(w.level, x, p.y);
     if (gy === null) continue;
     const e = spawnEnemy(w, pickType(w), x, gy, true, hpMult(w));
+    e.horde = true;
     if (tide) e.state = 'chase'; // la Marée vient droit sur vous
     return;
   }
+}
+
+/**
+ * Accalmie après une Marée : la population redescend vers sa cible. On retire un seul
+ * renfort par passage du spawner, le plus éloigné, et seulement s'il patrouille loin de tous
+ * les joueurs (jamais un ennemi placé dans le niveau, jamais à l'écran).
+ */
+function trimHorde(w: World, alive: Player[], target: number): void {
+  if (w.enemies.length <= target) return;
+  let pick: Enemy | null = null;
+  let best: number = SPAWN.TRIM_DISTANCE;
+  for (const e of w.enemies) {
+    if (!e.horde || e.state !== 'patrol') continue;
+    const d = Math.min(...alive.map((p) => Math.abs(p.x - e.x)));
+    if (d > best) {
+      best = d;
+      pick = e;
+    }
+  }
+  if (pick) w.enemies = w.enemies.filter((e) => e !== pick);
 }

@@ -924,6 +924,9 @@ export class GameScene extends Phaser.Scene {
         fx.ring(ev.x, ev.y - 40, 6, 50, 0.6, C.red, 3);
         this.hud.banner('社', 'Shrine', 'rebirth point · life restored', '#15120e', 1100);
         break;
+      case 'despawn':
+        fx.mist(ev.x, ev.y, 8, { color: C.ink, size: 8, alpha: 0.25, spread: 20, vy: -30, life: 0.8 });
+        break;
       case 'spawn':
         fx.mist(ev.x, ev.y - 22, 10, { color: C.ink, size: 9, alpha: 0.22, spread: 24, vy: -20, life: 0.9 });
         break;

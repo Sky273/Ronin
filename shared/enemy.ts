@@ -17,7 +17,7 @@ export function createEnemy(id: number, type: EnemyType, x: number, y: number, h
     id, type, x, y, vx: 0, vy: 0, w: d.w, h: d.h, onGround: false,
     facing: -1, hp, maxHp: hp, state: 'patrol', stateT: 0, move: 'none', freeze: 0, flash: 0,
     token: false, cd: 30, patrolDir: -1, hitDone: false, stunLen: 20, doomBy: 0, aimAng: 0,
-    aux: 0, tx: x, dodgeCd: 0, phase2: false, hornStage: 0,
+    aux: 0, tx: x, dodgeCd: 0, phase2: false, hornStage: 0, horde: false,
   };
 }
 

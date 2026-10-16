@@ -1,7 +1,7 @@
 import { ATTACKS, type AttackDef, type AttackId, activeAttackBox, bodyRect } from './combat';
 import { DT, PLAYER as P } from './constants';
 import { BTN } from './input';
-import { doomEnemy, hitEnemy } from './interactions';
+import { calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
 import { canFit, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
@@ -593,6 +593,7 @@ function stepDead(w: World, p: Player): void {
     return;
   }
   if (--p.respawnT <= 0) {
+    calmHordeOnRespawn(w, p, p.x);
     p.x = p.spawnX;
     p.y = p.spawnY;
     p.vx = 0;

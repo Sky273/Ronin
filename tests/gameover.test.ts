@@ -1,6 +1,7 @@
 // Tests headless : difficulté, vies, score et fin de partie (simulation partagée, aucun rendu).
 // Lancer : npm run test:gameover
-import { PLAYER, SPAWN } from '../shared/constants';
+import { PLAYER, SPAWN, TILE } from '../shared/constants';
+import { spawnEnemy } from '../shared/enemy';
 import { damagePlayer, killEnemy } from '../shared/interactions';
 import { BTN } from '../shared/input';
 import { T_SOLID } from '../shared/level';
@@ -427,6 +428,84 @@ for (const d of DIFFICULTY_ORDER) {
     p.out && p.score === score && p.runKills === kills && !!go && go.type === 'gameOver' && go.score === score,
     `score=${p.score} (avant ${score}) kills=${p.runKills}`,
   );
+}
+
+// 12. Renaissance : la horde qui a vaincu le joueur se dissipe (plus d'accumulation).
+{
+  const w = createWorld(31);
+  w.spawnTimer = 1e9;
+  const p = addPlayer(w, 'reborn');
+  p.x = 150 * TILE;
+  p.y = 18 * TILE;
+  step(w, p, 2);
+  w.enemies = [];
+  // 4 poursuivants autour du joueur, 1 ennemi du niveau qui patrouille loin, 1 renfort qui patrouille près du sanctuaire
+  for (let i = 0; i < 4; i++) {
+    const e = spawnEnemy(w, 'ashigaru', p.x + 60 + i * 30, p.y, false);
+    e.state = 'chase';
+    e.horde = true;
+  }
+  const keeper = spawnEnemy(w, 'archer', 100 * TILE, 8 * TILE, false);
+  const nearShrine = spawnEnemy(w, 'ashigaru', p.spawnX + 300, p.spawnY, false);
+  nearShrine.horde = true;
+  w.wave.phase = 'tide';
+  w.wave.n = 2;
+  w.wave.t = 0;
+  w.wave.kills = 0;
+  w.wave.quota = 999; // la Marée ne doit se retirer qu'à cause de la renaissance
+  const deathX = p.x;
+  kill(w, p);
+  w.spawnTimer = 1e9;
+  const evs = step(w, p, PLAYER.RESPAWN_TICKS + 5);
+  const engaged = w.enemies.filter((e) => e.state !== 'patrol').length;
+  const nearDeath = w.enemies.filter((e) => Math.abs(e.x - deathX) < SPAWN.CLEAR_AROUND_DEATH).length;
+  const nearSpawn = w.enemies.filter((e) => Math.abs(e.x - p.spawnX) < SPAWN.CLEAR_AROUND_SPAWN).length;
+  check(
+    'renaissance : poursuivants et ennemis proches dissipés, ennemis lointains du niveau gardés',
+    p.state !== 'dead' && engaged === 0 && nearDeath === 0 && nearSpawn === 0 && w.enemies.includes(keeper) && count(evs, 'despawn') === 5,
+    `restants=${w.enemies.length} engagés=${engaged} près mort=${nearDeath} près sanctuaire=${nearSpawn} dissipés=${count(evs, 'despawn')}`,
+  );
+  check('renaissance : la Marée se retire sans bonus', (w.wave.phase as string) === 'calm' && evs.some((ev) => ev.type === 'tideEnd' && ev.bonus === 0));
+}
+
+// 13. Morts répétées au même endroit : la population ne grossit pas au fil des vies.
+{
+  const w = createWorld(32, { difficulty: 'veryEasy' });
+  const p = addPlayer(w, 'stubborn');
+  const counts: number[] = [];
+  for (let d = 0; d < 8; d++) {
+    p.x = 150 * TILE;
+    p.y = 18 * TILE;
+    // la horde se rassemble sur le joueur : 6 poursuivants frais à chaque vie
+    for (let i = 0; i < 6; i++) {
+      const e = spawnEnemy(w, 'ashigaru', p.x + 80 + i * 25, p.y, false);
+      e.state = 'chase';
+      e.horde = true;
+    }
+    step(w, p, 300);
+    kill(w, p);
+    step(w, p, PLAYER.RESPAWN_TICKS + 5);
+    counts.push(w.enemies.filter((e) => e.state !== 'patrol').length);
+  }
+  check('morts répétées : aucun poursuivant ne survit à la renaissance', counts.every((c) => c === 0), counts.join(','));
+}
+
+// 14. Accalmie : les renforts en surnombre qui patrouillent au loin s'effacent, pas les ennemis du niveau.
+{
+  const w = createWorld(33);
+  const p = addPlayer(w, 'calm');
+  step(w, p, 2);
+  const placed = w.enemies.length;
+  for (let i = 0; i < 20; i++) {
+    const e = spawnEnemy(w, 'ashigaru', (150 + (i % 10) * 6) * TILE, 18 * TILE, false);
+    e.horde = true;
+  }
+  step(w, p, 4000, 0, () => {
+    p.hp = p.maxHp;
+  });
+  const horde = w.enemies.filter((e) => e.horde).length;
+  const levelLeft = w.enemies.filter((e) => !e.horde).length;
+  check('accalmie : le surnombre de renforts lointains se résorbe', horde < 20 && levelLeft === placed, `renforts=${horde}/20 niveau=${levelLeft}/${placed}`);
 }
 
 if (failures) {
