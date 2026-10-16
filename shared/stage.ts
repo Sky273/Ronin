@@ -1,10 +1,10 @@
-import { COOP_CLEARED_TICKS, TICK_RATE, TILE } from './constants';
+import { COOP, COOP_CLEARED_TICKS, COOP_READY_AFTER, TICK_RATE, TILE } from './constants';
 import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { spawnEnemy } from './enemy';
-import { addScore, gainHonor } from './interactions';
+import { addScore, emptyStageStats, gainHonor, stageStatsOf } from './interactions';
 import { BTN } from './input';
 import { arenaInside, T_KEKKAI, T_SOLID } from './level';
-import { handlePicks, resetForStage } from './player';
+import { handlePicks, resetAfterDeath, resetForStage } from './player';
 import { buildStage } from './stagebuild';
 import type { StageState, World } from './types';
 
@@ -16,6 +16,16 @@ export function newStageState(loop: number, tick: number): StageState {
     loop, state: 'playing', t: 0, startTick: tick, kills: 0, parries: 0, deaths: 0,
     honor: 0, bestCombo: 0, guardianId: 0, grade: 2, bonus: 0, time: 0,
   };
+}
+
+/**
+ * Coop : ouvre les statistiques d'étape par joueur (vierges) pour tous les joueurs présents.
+ * Sans effet en solo : la clé byPlayer reste absente.
+ */
+export function openStageStats(w: World): void {
+  if (w.mode !== 'coop') return;
+  w.stage.byPlayer = {};
+  for (const p of w.players) w.stage.byPlayer[p.id] = emptyStageStats();
 }
 
 /** Peuple l'étape avec ses ennemis de départ. */
@@ -40,7 +50,11 @@ const inArena = (w: World, x: number) => arenaInside(w.level, x);
 export function stepStage(w: World): void {
   const st = w.stage;
   st.t++;
-  for (const p of w.players) st.bestCombo = Math.max(st.bestCombo, p.combo);
+  for (const p of w.players) {
+    st.bestCombo = Math.max(st.bestCombo, p.combo);
+    const ps = stageStatsOf(w, p);
+    if (ps) ps.bestCombo = Math.max(ps.bestCombo, p.combo);
+  }
   const a = w.level.arena;
 
   switch (st.state) {
@@ -89,7 +103,11 @@ function lockArena(w: World): void {
   w.projectiles = [];
   w.wave.phase = 'calm';
   w.wave.t = 0;
-  const g = spawnEnemy(w, 'boss', a.guardianX, a.guardianY, false, guardianHpScale(w));
+  // Coop : le gardien est plus robuste selon les joueurs présents (morts compris), fixé à la fermeture.
+  const hpMult = w.mode === 'coop'
+    ? guardianHpScale(w) * (1 + COOP.GUARDIAN_HP_PER_PLAYER * Math.max(0, w.players.length - 1))
+    : guardianHpScale(w);
+  const g = spawnEnemy(w, 'boss', a.guardianX, a.guardianY, false, hpMult);
   g.state = 'intro';
   g.facing = -1;
   st.guardianId = g.id;
@@ -114,29 +132,70 @@ function clearStage(w: World): void {
   st.state = 'cleared';
   st.t = 0;
   st.time = w.tick - st.startTick;
-  st.grade = st.deaths === 0 && st.time < 6 * 60 * TICK_RATE ? 0 : st.deaths <= 1 ? 1 : 2;
-  st.bonus = clearBonus(st.grade, st.loop);
-  for (const p of w.players) {
-    gainHonor(w, p, st.bonus);
-    if (!p.out) addScore(w, p, st.bonus);
+  if (w.mode === 'coop' && st.byPlayer && w.players.length > 0) clearStageCoop(w);
+  else {
+    st.grade = gradeOf(st.deaths, st.time);
+    st.bonus = clearBonus(st.grade, st.loop);
+    for (const p of w.players) {
+      gainHonor(w, p, st.bonus);
+      if (!p.out) addScore(w, p, st.bonus);
+    }
   }
   w.events.push({ type: 'stageClear', loop: st.loop, grade: st.grade, bonus: st.bonus });
+}
+
+/** Note d'étape : 0 = 優 (aucune mort et moins de 6 min), 1 = 良 (au plus une mort), 2 = 可. */
+const gradeOf = (deaths: number, time: number): number => (deaths === 0 && time < 6 * 60 * TICK_RATE ? 0 : deaths <= 1 ? 1 : 2);
+
+/**
+ * Coop : chaque joueur reçoit sa note (selon ses propres morts) et le bonus correspondant ;
+ * la « note de la salle » (st.grade, st.bonus, portée par stageClear) est la note médiane
+ * (pour un nombre pair de joueurs, la meilleure des deux notes centrales).
+ */
+function clearStageCoop(w: World): void {
+  const st = w.stage;
+  const grades: number[] = [];
+  for (const p of w.players) {
+    const ps = stageStatsOf(w, p);
+    const grade = gradeOf(ps ? ps.deaths : 0, st.time);
+    const bonus = clearBonus(grade, st.loop);
+    if (ps) {
+      ps.grade = grade;
+      ps.bonus = bonus;
+    }
+    grades.push(grade);
+    gainHonor(w, p, bonus);
+    if (!p.out) addScore(w, p, bonus);
+  }
+  grades.sort((x, y) => x - y);
+  st.grade = grades[(grades.length - 1) >> 1];
+  st.bonus = clearBonus(st.grade, st.loop);
 }
 
 /** Pendant le bilan : seuls les choix d'amélioration et « reprendre la route » comptent. */
 export function stepCleared(w: World, inputs: Map<number, number>): void {
   const st = w.stage;
   st.t++;
+  const coop = w.mode === 'coop';
   let proceed = false;
+  let ready = 0;
   for (const p of w.players) {
     const b = inputs.get(p.id) ?? 0;
     const pressed = b & ~p.prevButtons;
     p.prevButtons = b;
     handlePicks(w, p, pressed);
-    if (st.t > 90 && pressed & (BTN.JUMP | BTN.ATTACK)) proceed = true;
+    if (coop) {
+      // Coop : un appui vaut un vote « prêt », définitif (les morts votent aussi).
+      const ps = stageStatsOf(w, p);
+      if (!ps) continue;
+      if (st.t > COOP_READY_AFTER && pressed & (BTN.JUMP | BTN.ATTACK)) ps.ready = true;
+      if (ps.ready) ready++;
+    } else if (st.t > 90 && pressed & (BTN.JUMP | BTN.ATTACK)) proceed = true;
   }
-  // Coop : personne ne bloque la salle, la route reprend d'elle-même.
-  if (w.mode === 'coop' && st.t >= COOP_CLEARED_TICKS) proceed = true;
+  if (coop) {
+    // Majorité stricte des joueurs présents ; sinon, personne ne bloque la salle : la route reprend d'elle-même.
+    if (ready * 2 > w.players.length || st.t >= COOP_CLEARED_TICKS) proceed = true;
+  }
   if (proceed) nextStage(w);
 }
 
@@ -152,7 +211,12 @@ export function nextStage(w: World): void {
   w.wave = { n: 0, phase: 'calm', t: 0, kills: 0, quota: 0 };
   w.stage = newStageState(loop, w.tick);
   w.shrine = 0;
-  for (const p of w.players) resetForStage(p, w.level.spawn.x, w.level.spawn.y);
+  openStageStats(w);
+  for (const p of w.players) {
+    // Coop : un joueur encore mort au passage d'étape repart comme après une renaissance.
+    if (w.mode === 'coop' && p.state === 'dead') resetAfterDeath(p);
+    resetForStage(p, w.level.spawn.x, w.level.spawn.y);
+  }
   populateStage(w);
   w.events.push({ type: 'stageStart', loop });
 }

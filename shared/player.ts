@@ -612,22 +612,29 @@ function stepDead(w: World, p: Player): void {
     p.y = at.y;
     p.vx = 0;
     p.vy = 0;
-    // Mort = nouvelle vie : améliorations et Honneur repartent de zéro.
-    p.up = emptyUpgrades();
-    p.maxHp = P.MAX_HP;
-    p.hp = P.MAX_HP;
-    p.honor = 0;
-    p.level = 0;
-    p.picks = 0;
-    p.offer = [];
-    p.h = P.H;
-    p.crouch = false;
-    p.kills = 0; // comme dans tout bon .io : on repart de zéro
-    p.combo = 0;
+    resetAfterDeath(p);
     p.iframes = 90;
     toNormal(p);
     w.events.push({ type: 'respawn', x: p.x, y: p.y, pid: p.id });
   }
+}
+
+/**
+ * Mort = nouvelle vie : améliorations et Honneur repartent de zéro. Appelé à la renaissance
+ * (stepDead) et, en coop, pour un joueur encore mort au passage d'étape (nextStage).
+ */
+export function resetAfterDeath(p: Player): void {
+  p.up = emptyUpgrades();
+  p.maxHp = P.MAX_HP;
+  p.hp = P.MAX_HP;
+  p.honor = 0;
+  p.level = 0;
+  p.picks = 0;
+  p.offer = [];
+  p.h = P.H;
+  p.crouch = false;
+  p.kills = 0; // comme dans tout bon .io : on repart de zéro
+  p.combo = 0;
 }
 
 // ─── Divers ─────────────────────────────────────────────────────────────────
