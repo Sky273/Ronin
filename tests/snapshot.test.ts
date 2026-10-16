@@ -4,7 +4,8 @@ import { pack, unpack } from 'msgpackr';
 import { TILE } from '../shared/constants';
 import { BTN } from '../shared/input';
 import { T_SOLID } from '../shared/level';
-import { INTEREST_PX, sanitizePlayerName, type SnapshotMsg } from '../shared/net/protocol';
+import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { INTEREST_PX, sanitizePlayerName, type Snapshot } from '../shared/net/protocol';
 import { applySnapshot, makeSnapshot } from '../shared/net/snapshot';
 import { spawnEnemy } from '../shared/enemy';
 import type { GameEvent, World } from '../shared/types';
@@ -16,8 +17,8 @@ function check(name: string, ok: boolean, info = ''): void {
   if (!ok) failures++;
 }
 
-/** Passe un instantané par le vrai encodage réseau (msgpack). */
-const wire = (s: SnapshotMsg): SnapshotMsg => unpack(pack(s)) as SnapshotMsg;
+/** Passe un instantané par le vrai encodage réseau (msgpack) puis le décode. */
+const wire = (s: SnapshotWire): Snapshot => decodeSnapshot(unpack(pack(s)) as SnapshotWire);
 
 function run(w: World, ticks: number, input: (t: number, id: number) => number): GameEvent[] {
   const evs: GameEvent[] = [];
@@ -66,8 +67,8 @@ function run(w: World, ticks: number, input: (t: number, id: number) => number):
     { type: 'spawn', x: a.x + 5000, y: 576, enemyType: 'archer' },
     { type: 'tideWarn', n: 1 },
   ];
-  const s = makeSnapshot(w, a.id, events, 0);
-  check('tous les joueurs envoyés, même lointains', s.players.length === 2);
+  const s = wire(makeSnapshot(w, a.id, events, 0));
+  check('tous les joueurs envoyés, même lointains', s.self?.id === a.id && s.others.length === 1 && s.others[0].id === far.id);
   check('ennemis lointains filtrés', s.enemies.every((e) => Math.abs(e.x - a.x) <= INTEREST_PX));
   check('événements : proches et globaux gardés, lointains filtrés', s.events.length === 2 && s.events.some((e) => e.type === 'tideWarn'));
 }

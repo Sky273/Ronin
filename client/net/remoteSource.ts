@@ -1,10 +1,14 @@
-// Source de monde du mode en ligne : le serveur simule, le client envoie ses boutons à 60 Hz
-// et applique les instantanés reçus (~20 Hz). M1 : ni prédiction ni interpolation fine.
-import { NET_TICK, SNAP_EVERY, type SnapshotMsg, type WelcomeMsg } from '../../shared/net/protocol';
+// Source de monde du mode en ligne : le serveur simule ; le client envoie ses boutons à 60 Hz,
+// prédit son propre joueur (Predictor) et affiche les autres entités avec un léger recul (Interpolator).
+// Le monde exposé à la scène est un « monde d'affichage » reconstruit à chaque image.
+import { decodeSnapshot, type SnapshotWire } from '../../shared/net/codec';
+import { NET_TICK, SNAP_EVERY, type Snapshot, type WelcomeMsg } from '../../shared/net/protocol';
 import { applySnapshot } from '../../shared/net/snapshot';
 import type { GameEvent, World } from '../../shared/types';
 import { createWorld } from '../../shared/world';
 import type { WorldSource } from '../world/source';
+import { Interpolator } from './interpolator';
+import { type PredictionContext, Predictor } from './predictor';
 import type { Transport } from './transport';
 
 const INPUT_DT = 1 / NET_TICK;
@@ -29,9 +33,8 @@ export class RemoteSource implements WorldSource {
   private w: World;
   private pid = -1;
   private welcomed = false;
-  private queue: SnapshotMsg[] = [];
+  private queue: Snapshot[] = [];
   private lastT = -1;
-  private lastSnapAt = -Infinity;
   private snapsApplied = 0;
   private stageDirty = false;
   private acc = 0;
@@ -42,10 +45,16 @@ export class RemoteSource implements WorldSource {
   private closeCbs: ((reason: string) => void)[] = [];
   private readyCbs: (() => void)[] = [];
   private lastAck = 0;
+  private ctx: PredictionContext | null = null;
   private readonly now: () => number;
+  /** Prédiction du joueur local (créée à l'accueil, quand son id est connu). */
+  predictor: Predictor = new Predictor(-1);
+  /** Interpolation des entités distantes. */
+  readonly interp: Interpolator;
 
   constructor(private transport: Transport, opts: RemoteSourceOptions = {}) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
+    this.interp = new Interpolator(this.now);
     // Monde provisoire jusqu'à l'accueil (lire `world` à chaque image : la référence change à l'accueil).
     this.w = createWorld(0, { mode: 'coop' });
     transport.onWelcome((m) => this.welcome(m));
@@ -57,6 +66,7 @@ export class RemoteSource implements WorldSource {
     });
   }
 
+  /** Monde d'affichage : joueur local prédit, autres entités interpolées. */
   get world(): World {
     return this.w;
   }
@@ -120,13 +130,15 @@ export class RemoteSource implements WorldSource {
     this.pid = msg.pid;
     this.w = createWorld(msg.seed, { mode: 'coop' });
     this.w.tick = msg.tick;
+    this.predictor = new Predictor(msg.pid);
     this.stageDirty = true;
     this.transport.ping();
   }
 
-  /** Instantané reçu : mis en file, appliqué au prochain `advance` (public pour les tests). */
-  receive(msg: SnapshotMsg): void {
+  /** Instantané reçu (forme filaire) : décodé et mis en file, appliqué au prochain `advance` (public pour les tests). */
+  receive(wire: SnapshotWire): void {
     if (!this.welcomed || this.disposed) return; // avant l'accueil, rien à quoi l'appliquer
+    const msg = decodeSnapshot(wire);
     // Doublon ou retardataire : ignoré dès la réception, pour que la file reste strictement
     // croissante (sinon des événements reportés sur lui seraient écartés avec lui).
     const newest = this.queue.length ? this.queue[this.queue.length - 1].t : this.lastT;
@@ -140,17 +152,22 @@ export class RemoteSource implements WorldSource {
     }
   }
 
-  advance(dt: number, sample: () => number, beforeStep: () => void): GameEvent[] {
+  advance(dt: number, sample: () => number, _beforeStep: () => void): GameEvent[] {
     const events: GameEvent[] = [];
     if (!this.welcomed || this.disposed || this.closeReason !== null) return events;
+    const now = this.now();
 
-    // Entrées à cadence fixe (60 Hz), séquence strictement croissante.
+    // Entrées à cadence fixe (60 Hz), séquence strictement croissante, avec le tick de vue.
     this.acc += Math.max(0, dt);
     let sent = 0;
     while (this.acc >= INPUT_DT) {
       this.acc -= INPUT_DT;
       if (sent < MAX_INPUTS_PER_FRAME) {
-        this.transport.sendInput({ s: ++this.seq, b: sample() });
+        const b = sample();
+        const v = Math.max(0, Math.floor(this.interp.renderTick(now)));
+        const s = ++this.seq;
+        this.transport.sendInput({ s, b, v });
+        if (this.ctx) for (const ev of this.predictor.step(s, b, v, this.interp.enemiesAt(v), this.ctx)) events.push(ev);
         sent++;
       }
     }
@@ -163,21 +180,24 @@ export class RemoteSource implements WorldSource {
       this.transport.ping();
     }
 
-    // Instantanés arrivés depuis la dernière image, dans l'ordre (doublons et retardataires ignorés).
+    // Instantanés arrivés depuis la dernière image, dans l'ordre.
     const queued = this.queue;
     this.queue = [];
     const wasReady = this.ready;
     for (const snap of queued) {
-      if (snap.t <= this.lastT) continue;
       this.lastT = snap.t;
-      beforeStep();
-      const r = applySnapshot(this.w, snap);
-      if (r.stageChanged) this.stageDirty = true;
+      // Le niveau, l'étape et la barrière suivent le serveur (les entités sont remplacées plus bas).
+      if (applySnapshot(this.w, snap).stageChanged) this.stageDirty = true;
+      this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t };
+      this.interp.push(snap, now);
+      this.predictor.reconcile(snap.self, snap.ack, this.ctx, (v) => this.interp.enemiesAt(v));
       this.lastAck = snap.ack;
-      this.lastSnapAt = this.now();
       this.snapsApplied++;
       for (const ev of snap.events) events.push(ev);
     }
+
+    // Monde d'affichage : soi prédit, les autres au tick de rendu.
+    if (this.snapsApplied > 0) this.compose(now, dt);
     if (!wasReady && this.ready) {
       const cbs = this.readyCbs;
       this.readyCbs = [];
@@ -186,10 +206,22 @@ export class RemoteSource implements WorldSource {
     return events;
   }
 
-  /** Interpolation naïve : fraction de l'intervalle entre instantanés écoulée depuis le dernier (0..1). */
+  /** Recompose les entités du monde d'affichage. */
+  private compose(now: number, dt: number): void {
+    const w = this.w;
+    const r = this.interp.renderTick(now);
+    const s = this.interp.sample(r, this.pid);
+    const me = this.predictor.display(this.acc / INPUT_DT, dt * 1000);
+    w.tick = Math.max(w.tick, this.predictor.tick);
+    w.players = me ? [me, ...s.players] : s.players;
+    w.enemies = s.enemies;
+    w.projectiles = s.projectiles;
+    w.orbs = s.orbs;
+  }
+
+  /** En ligne, les positions affichées sont déjà lissées : pas d'interpolation supplémentaire dans la scène. */
   alpha(): number {
-    const a = (this.now() - this.lastSnapAt) / SNAP_INTERVAL_MS;
-    return a >= 1 || !Number.isFinite(a) ? 1 : a <= 0 ? 0 : a;
+    return 1;
   }
 
   dispose(): void {

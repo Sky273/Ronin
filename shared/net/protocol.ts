@@ -1,5 +1,6 @@
 // Protocole réseau du mode en ligne (partagé client/serveur).
-// M1 : messages msgpack explicites (pas de synchronisation d'état Colyseus/Schema).
+// Messages msgpack explicites (pas de synchronisation d'état Colyseus/Schema).
+// v2 (M2) : instantanés compacts (voir codec.ts), tick de vue dans les entrées, compensation de latence.
 import type { Enemy, GameEvent, Orb, Player, Projectile, StageState, WaveState } from '../types';
 
 /** Types de messages (courts : envoyés 20 à 60 fois par seconde). */
@@ -22,13 +23,46 @@ export const MAX_NAME = 12;
 /** Masque des boutons valides (12 bits : déplacements, actions, choix 1/2/3). */
 export const BUTTON_MASK = 0xfff;
 
+/** Version du protocole : client et serveur doivent être identiques (vérifiée à l'accueil). */
+export const PROTOCOL_VERSION = 2;
+/** Recul d'affichage des entités distantes (ticks) : ~100 ms, ajusté de 5 à 12 selon la gigue. */
+export const INTERP_TICKS = 6;
+export const INTERP_MIN_TICKS = 5;
+export const INTERP_MAX_TICKS = 12;
+/** Compensation de latence : recul maximal du jugement des coups (ticks, ~333 ms). */
+export const MAX_REWIND_TICKS = 20;
+/** Correction de prédiction au-delà de laquelle on se recale d'un coup (px). */
+export const CORRECTION_SNAP_PX = 120;
+/** Constante de temps du lissage des petites corrections de prédiction (ms). */
+export const CORRECTION_TAU_MS = 100;
+
+/**
+ * Champs d'un autre joueur transmis (vue d'affichage, quantifiable) : contrat entre le codec,
+ * l'interpolation et le rendu. Les champs absents prennent la valeur de `createPlayer`.
+ */
+export const PLAYER_VIEW_KEYS = [
+  'id', 'name', 'color', 'x', 'y', 'vx', 'vy', 'w', 'h', 'onGround', 'facing', 'state', 'stateT',
+  'hp', 'maxHp', 'crouch', 'wallDir', 'iframes', 'freeze', 'attack', 'iaiCharge', 'plungeLanded',
+  'respawnT', 'out', 'doubleJumpTick', 'parryTick', 'kills', 'score', 'level',
+] as const satisfies readonly (keyof Player)[];
+export type PlayerView = Pick<Player, (typeof PLAYER_VIEW_KEYS)[number]>;
+
+/** Champs d'un ennemi transmis (vue d'affichage et de prédiction des coups). Le reste vient de `createEnemy`. */
+export const ENEMY_VIEW_KEYS = [
+  'id', 'type', 'x', 'y', 'vx', 'vy', 'w', 'h', 'onGround', 'facing', 'state', 'stateT', 'move',
+  'freeze', 'flash', 'hp', 'maxHp', 'aimAng', 'phase2',
+] as const satisfies readonly (keyof Enemy)[];
+export type EnemyView = Pick<Enemy, (typeof ENEMY_VIEW_KEYS)[number]>;
+
 /** Client → serveur : boutons tenus à ce tick, avec un numéro de séquence croissant. */
 export interface InputMsg {
   s: number;
   b: number;
+  /** Tick de vue : tick serveur des entités distantes affichées par le client (compensation de latence). */
+  v?: number;
 }
 
-/** Client → serveur → client : mesure de la latence (le serveur renvoie le message tel quel). */
+/** Ping : le serveur renvoie le message tel quel (mesure de la latence). */
 export interface PingMsg {
   t: number;
 }
@@ -40,17 +74,24 @@ export interface WelcomeMsg {
   stage: number;
   tick: number;
   color: number;
+  /** PROTOCOL_VERSION du serveur. */
+  v: number;
 }
 
-/** Serveur → client : état visible du monde autour du joueur. */
-export interface SnapshotMsg {
+/**
+ * Instantané décodé : état visible du monde autour d'un joueur (serveur → client).
+ * Sur le fil, il circule sous une forme compacte et opaque (`SnapshotWire`, voir codec.ts).
+ */
+export interface Snapshot {
   t: number; // tick serveur
-  ack: number; // dernière séquence d'entrée traitée pour ce client
+  ack: number; // dernière séquence d'entrée traitée pour ce client (-1 : aucune)
   stage: number; // numéro d'étape (le client reconstruit le niveau à partir de la graine)
   stageInfo: StageState;
   wave: WaveState;
-  players: Player[]; // tous les joueurs de la salle
-  enemies: Enemy[]; // filtrés par distance
+  shrine: number; // sanctuaire commun
+  self: Player | null; // le joueur destinataire, complet et exact (réconciliation)
+  others: Player[]; // les autres joueurs de la salle (vues : seuls PLAYER_VIEW_KEYS sont fidèles)
+  enemies: Enemy[]; // filtrés par distance (vues : seuls ENEMY_VIEW_KEYS sont fidèles)
   projectiles: Projectile[];
   orbs: Orb[];
   events: GameEvent[]; // depuis le précédent instantané, filtrés par distance quand ils ont une position

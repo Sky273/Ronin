@@ -2,7 +2,7 @@ import { ATTACKS, type AttackDef, type AttackId, activeAttackBox, bodyRect } fro
 import { DT, PLAYER as P, TILE } from './constants';
 import { findGround } from './enemy';
 import { BTN } from './input';
-import { calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
+import { byPlayer, calmHordeOnRespawn, doomEnemy, hitEnemy } from './interactions';
 import { airJumps, applyUpgrade, dashCooldown, dmgMult, emptyUpgrades, iaiDistMult, iaiRate, rollOffer, runSpeed } from './upgrades';
 import { approach, overlaps, type Rect } from './math';
 import { canFit, fitsAt, moveBody, type MoveResult, standingOnOneWay, touchingWall } from './physics';
@@ -419,7 +419,7 @@ function doHits(w: World, p: Player, d: AttackDef): void {
       a.life = 120;
       a.damage = 30;
       a.hits = [];
-      w.events.push({ type: 'deflect', x: a.x, y: a.y });
+      w.events.push({ type: 'deflect', x: a.x, y: a.y, ...byPlayer(w, p) });
     }
   }
   if (p.hitList.length > before) {
@@ -666,7 +666,7 @@ function windSlash(w: World, p: Player): void {
     id: w.nextId++, kind: 'wave', x: p.x + p.facing * 30, y: p.y - 26, vx: p.facing * 640, vy: 0,
     owner: 'player', ownerId: p.id, damage: 10 + 7 * lvl, life: 26 + 8 * lvl, hits: [], dead: false,
   });
-  w.events.push({ type: 'windSlash', x: p.x + p.facing * 30, y: p.y - 26, dir: p.facing });
+  w.events.push({ type: 'windSlash', x: p.x + p.facing * 30, y: p.y - 26, dir: p.facing, ...byPlayer(w, p) });
 }
 
 /** Sanctuaires : point de réapparition + soins complets. */

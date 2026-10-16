@@ -19,6 +19,7 @@ const HELP = [
   'J / click   katana (combo ×3) · ↑+J   rising cut · ↓+J in the air   plunge',
   'Shift   dash · K / right click   parry · L (hold)   iai, draw-and-strike',
   '1 2 3   choose an upgrade · H   help · M   sound · N   music · F1   hitboxes',
+  'Online: Esc or hold Select (gamepad)   leave the room',
 ];
 
 interface Card {

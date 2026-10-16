@@ -196,7 +196,8 @@ export interface StageState {
 /** Événements émis par la simulation et consommés par le client (FX, sons). */
 export type GameEvent =
   | { type: 'swing'; pid: number; attack: AttackId; x: number; y: number; dir: number }
-  | { type: 'hit'; x: number; y: number; dir: number; damage: number; heavy: boolean; targetId: number }
+  // pid (coop seulement) : joueur auteur du coup ; absent en solo (empreintes inchangées).
+  | { type: 'hit'; x: number; y: number; dir: number; damage: number; heavy: boolean; targetId: number; pid?: number }
   | {
       type: 'kill';
       id: number;
@@ -212,9 +213,9 @@ export type GameEvent =
     }
   | { type: 'doom'; id: number; x: number; y: number }
   | { type: 'parry'; x: number; y: number; pid: number }
-  | { type: 'deflect'; x: number; y: number }
-  | { type: 'block'; x: number; y: number; dir: number }
-  | { type: 'guardBreak'; x: number; y: number }
+  | { type: 'deflect'; x: number; y: number; pid?: number }
+  | { type: 'block'; x: number; y: number; dir: number; pid?: number }
+  | { type: 'guardBreak'; x: number; y: number; pid?: number }
   | { type: 'playerHit'; x: number; y: number; dir: number; damage: number; pid: number }
   | { type: 'playerDeath'; x: number; y: number; pid: number; lost: number; livesLeft: number }
   | { type: 'gameOver'; pid: number; score: number; loop: number; kills: number; deaths: number }
@@ -228,7 +229,7 @@ export type GameEvent =
   | { type: 'iaiReady'; x: number; y: number; pid: number }
   | { type: 'iai'; x0: number; x1: number; y: number; full: boolean; count: number; pid: number }
   | { type: 'plungeLand'; x: number; y: number; pid: number }
-  | { type: 'windSlash'; x: number; y: number; dir: number }
+  | { type: 'windSlash'; x: number; y: number; dir: number; pid?: number }
   | { type: 'orb'; x: number; y: number; value: number; lost: boolean; pid: number }
   | { type: 'levelUp'; level: number; pid: number }
   | { type: 'pick'; upgrade: UpgradeId; level: number; pid: number }

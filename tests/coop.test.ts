@@ -577,6 +577,35 @@ function nonFinite(w: World): string[] {
   }
 }
 
+// ─── 14. Auteur des événements de combat : pid en coop, clé absente en solo ──
+{
+  const COMBAT = new Set(['hit', 'block', 'deflect', 'guardBreak', 'windSlash']);
+  const collect = (mode: 'solo' | 'coop'): { out: GameEvent[]; ids: Set<number> } => {
+    const w = createWorld(11, { mode, difficulty: 'veryEasy' });
+    const n = mode === 'coop' ? 3 : 1;
+    for (let i = 0; i < n; i++) addPlayer(w, `p${i}`, { color: i });
+    const input = scripted(99);
+    const m = new Map<number, number>();
+    const out: GameEvent[] = [];
+    for (let t = 0; t < 6000; t++) {
+      for (const p of w.players) m.set(p.id, input(t, p.id));
+      stepWorld(w, m);
+      for (const ev of w.events) if (COMBAT.has(ev.type)) out.push(ev);
+      w.events.length = 0;
+    }
+    return { out, ids: new Set(w.players.map((p) => p.id)) };
+  };
+  const coop = collect('coop');
+  const solo = collect('solo');
+  const pidOf = (ev: GameEvent): unknown => (ev as { pid?: unknown }).pid;
+  check(
+    'coop : chaque événement de combat porte le pid de son auteur',
+    coop.out.length > 0 && coop.out.every((ev) => typeof pidOf(ev) === 'number' && coop.ids.has(pidOf(ev) as number)),
+    `${coop.out.length} événements`,
+  );
+  check('solo : aucun événement de combat ne porte de clé pid', solo.out.length > 0 && solo.out.every((ev) => !('pid' in ev)), `${solo.out.length} événements`);
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

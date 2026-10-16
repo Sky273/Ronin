@@ -115,6 +115,13 @@ export class Controls {
     return PAD_MENU.filter((m) => pressed & m.bit).map((m) => m.code);
   }
 
+  /** Bouton Select / View (8) d'une manette standard tenu (quitter la salle en ligne, en le maintenant). */
+  padQuitHeld(): boolean {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const gp of pads) if (gp && gp.mapping === 'standard' && gp.buttons[8]?.pressed) return true;
+    return false;
+  }
+
   sample(): number {
     const b = this.held | this.mouse | this.latched | gamepadButtons();
     this.latched = 0;

@@ -179,6 +179,14 @@ export interface HitInfo {
 
 export type HitResult = 'none' | 'blocked' | 'hit' | 'kill';
 
+/**
+ * Auteur d'un événement de combat : `{ pid }` en coop, rien en solo (la clé reste absente,
+ * pour que les événements solo soient identiques au bit près).
+ */
+export function byPlayer(w: World, p: Player): { pid?: number } {
+  return w.mode === 'coop' ? { pid: p.id } : {};
+}
+
 /** Oni en garde, frappé de face et pas depuis le dessus ? */
 function guards(e: Enemy, h: HitInfo): boolean {
   if (e.type !== 'oni') return false;
@@ -198,11 +206,11 @@ export function hitEnemy(w: World, p: Player, e: Enemy, h: HitInfo): HitResult {
       e.freeze = 3;
       p.freeze = Math.max(p.freeze, 4);
       p.vx = -Math.sign(e.x - p.x) * 220;
-      w.events.push({ type: 'block', x: e.x + e.facing * 14, y: e.y - e.h * 0.55, dir: -e.facing });
+      w.events.push({ type: 'block', x: e.x + e.facing * 14, y: e.y - e.h * 0.55, dir: -e.facing, ...byPlayer(w, p) });
       return 'blocked';
     }
     stunEnemy(w, e, Math.sign(e.x - h.fromX) || 1, 80);
-    w.events.push({ type: 'guardBreak', x: e.x + e.facing * 14, y: e.y - e.h * 0.55 });
+    w.events.push({ type: 'guardBreak', x: e.x + e.facing * 14, y: e.y - e.h * 0.55, ...byPlayer(w, p) });
   }
 
   const mult = e.state === 'stunned' ? 1.5 : 1; // punition après parade
@@ -217,7 +225,7 @@ export function hitEnemy(w: World, p: Player, e: Enemy, h: HitInfo): HitResult {
   }
   if (p.state !== 'dead') p.hp = Math.min(p.maxHp, p.hp + leechHeal(p));
   bumpCombo(p);
-  w.events.push({ type: 'hit', x: e.x, y: e.y - e.h * 0.55, dir: h.kbx >= 0 ? 1 : -1, damage: dmg, heavy: h.heavy, targetId: e.id });
+  w.events.push({ type: 'hit', x: e.x, y: e.y - e.h * 0.55, dir: h.kbx >= 0 ? 1 : -1, damage: dmg, heavy: h.heavy, targetId: e.id, ...byPlayer(w, p) });
 
   if (e.hp <= 0) {
     killEnemy(w, e, p, h.cut, false);

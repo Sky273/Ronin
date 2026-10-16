@@ -10,8 +10,10 @@ import { createPlayer } from '../../shared/player';
 import { addPlayer, createWorld, nextStage, resetWorld, skipWavePhase, warpToArena } from '../../shared/world';
 import { type Mood, Music } from '../audio/music';
 import { Sfx } from '../audio/sfx';
+import { isMine, shakeFor } from '../fx/eventPolicy';
 import { Fx } from '../fx/fx';
 import { Controls } from '../input/controls';
+import { HoldTrigger } from '../input/hold';
 import { Backdrop, makeGrainOverlay, makeVignette } from '../render/backdrop';
 import { gBlob, gFill, gStroke, hash2, type Pt, ringPoints, seeded } from '../render/brush';
 import {
@@ -83,6 +85,8 @@ export class GameScene extends Phaser.Scene {
   private pending: RemoteSource | null = null;
   /** Jeton de tentative de connexion : une réponse arrivée après un retour en arrière est abandonnée. */
   private joinToken = 0;
+  /** Select maintenu 1 s à la manette : quitter la salle en ligne. */
+  private padQuit = new HoldTrigger(1000);
   private deathText!: Phaser.GameObjects.Text;
   private deathSub!: Phaser.GameObjects.Text;
 
@@ -522,6 +526,9 @@ export class GameScene extends Phaser.Scene {
       if (this.controls.sample() !== 0 && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
     }
     if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
+    // En ligne, Select maintenu à la manette quitte la salle (B sert au dash, Échap au clavier).
+    const online = this.screen === 'play' && this.src !== this.local;
+    if (this.padQuit.update(online && this.controls.padQuitHeld(), time) && online) this.leaveOnline(null);
     // Salle rejointe : on applique ses instantanés jusqu'au premier (startOnline prend alors le relais).
     if (this.screen === 'online' && this.pending) this.pending.advance(dt, () => 0, () => undefined);
     if (this.screen === 'play' || this.screen === 'over') {
@@ -1006,16 +1013,19 @@ export class GameScene extends Phaser.Scene {
     const mine = 'pid' in ev && ev.pid === this.src.meId;
     // Son d'une action de joueur : toujours pour le joueur local, à portée d'oreille pour les autres.
     const hear = (x: number) => mine || this.near(x);
+    // Coups : sans auteur (solo) ou du joueur local → toujours entendus ; ceux des autres, de près.
+    const hearHit = (x: number) => isMine(ev, this.src.meId) || this.near(x);
+    const shake = () => this.addShake(shakeFor(ev, this.src.meId, this.me, this.world.mode === 'coop'));
     switch (ev.type) {
       case 'swing':
         if (hear(ev.x)) this.sfx.swing(ATTACKS[ev.attack].heavy);
         if (ev.attack === 'slash3') fx.dust(ev.x, ev.y, -ev.dir, 5);
         break;
       case 'hit':
-        this.sfx.hit(ev.heavy);
+        if (hearHit(ev.x)) this.sfx.hit(ev.heavy);
         fx.inkBurst(ev.x, ev.y, ev.dir, ev.heavy ? 16 : 10, ev.heavy ? 420 : 300);
         fx.sparks(ev.x, ev.y, 5, C.ink, 300);
-        this.addShake(ev.heavy ? 9 : 4);
+        shake();
         break;
       case 'kill': {
         const pose = this.lastPose.get(ev.id);
@@ -1055,21 +1065,21 @@ export class GameScene extends Phaser.Scene {
         }
         break;
       case 'deflect':
-        this.sfx.deflect();
+        if (hearHit(ev.x)) this.sfx.deflect();
         fx.sparks(ev.x, ev.y, 8, C.red, 380);
         break;
       case 'block':
-        this.sfx.block();
+        if (hearHit(ev.x)) this.sfx.block();
         fx.sparks(ev.x, ev.y, 10, C.ink, 360);
         fx.ring(ev.x, ev.y, 4, 22, 0.18, C.ink, 2.5);
-        this.addShake(3);
+        shake();
         break;
       case 'guardBreak':
-        this.sfx.guardBreak();
+        if (hearHit(ev.x)) this.sfx.guardBreak();
         fx.sparks(ev.x, ev.y, 16, C.red, 480);
         fx.inkBurst(ev.x, ev.y, 1, 8, 260, C.wood);
         this.popKanji('破', ev.x, ev.y - 30, '#b8321f', 44);
-        this.addShake(8);
+        shake();
         break;
       case 'playerHit':
         if (mine) this.sfx.hurt();
@@ -1229,7 +1239,7 @@ export class GameScene extends Phaser.Scene {
           fx.ring(ev.x, ev.y - 4, 10, ev.w, 0.35, C.ink, 5);
           for (const d of [-1, 1]) fx.line([{ x: ev.x, y: ev.y - 2 }, { x: ev.x + d * ev.w * 0.5, y: ev.y - 3 }, { x: ev.x + d * ev.w, y: ev.y - 2 }], 5, C.ink, 0.8, 0.4, true);
         }
-        this.addShake(big ? 14 : 5);
+        shake();
         break;
       }
       case 'charge':

@@ -3,7 +3,8 @@
 import { setBarrier } from '../stage';
 import { buildStage } from '../stagebuild';
 import type { GameEvent, World } from '../types';
-import { INTEREST_PX, type SnapshotMsg } from './protocol';
+import { encodeSnapshot, type SnapshotWire } from './codec';
+import { INTEREST_PX, type Snapshot } from './protocol';
 
 const near = (x: number, cx: number) => Math.abs(x - cx) <= INTEREST_PX;
 
@@ -14,9 +15,9 @@ function eventVisible(ev: GameEvent, cx: number): boolean {
   return true;
 }
 
-/** Instantané pour le joueur `viewerId` : tous les joueurs, le reste filtré autour de lui. */
-export function makeSnapshot(w: World, viewerId: number, events: GameEvent[], ack: number): SnapshotMsg {
-  const viewer = w.players.find((p) => p.id === viewerId);
+/** Contenu d'un instantané pour `viewerId` (forme décodée) : soi exact, le reste filtré autour de lui. */
+export function snapshotFor(w: World, viewerId: number, events: GameEvent[], ack: number): Snapshot {
+  const viewer = w.players.find((p) => p.id === viewerId) ?? null;
   const cx = viewer ? viewer.x : w.level.spawn.x;
   return {
     t: w.tick,
@@ -24,7 +25,9 @@ export function makeSnapshot(w: World, viewerId: number, events: GameEvent[], ac
     stage: w.level.stage,
     stageInfo: w.stage,
     wave: w.wave,
-    players: w.players,
+    shrine: w.shrine,
+    self: viewer,
+    others: w.players.filter((p) => p !== viewer),
     enemies: w.enemies.filter((e) => near(e.x, cx)),
     projectiles: w.projectiles.filter((a) => near(a.x, cx)),
     orbs: w.orbs.filter((o) => near(o.x, cx)),
@@ -32,11 +35,17 @@ export function makeSnapshot(w: World, viewerId: number, events: GameEvent[], ac
   };
 }
 
+/** Instantané encodé pour le joueur `viewerId` (prêt à être envoyé). */
+export function makeSnapshot(w: World, viewerId: number, events: GameEvent[], ack: number): SnapshotWire {
+  return encodeSnapshot(snapshotFor(w, viewerId, events, ack));
+}
+
 /**
- * Applique un instantané sur le monde local du client (créé avec la même graine).
+ * Applique un instantané décodé sur le monde local du client (créé avec la même graine).
  * La référence `w.level` est conservée ; la barrière de l'arène est réappliquée d'après l'état d'étape.
+ * Le joueur destinataire est placé en tête de `w.players`.
  */
-export function applySnapshot(w: World, snap: SnapshotMsg): { stageChanged: boolean } {
+export function applySnapshot(w: World, snap: Snapshot): { stageChanged: boolean } {
   let stageChanged = false;
   if (snap.stage !== w.level.stage) {
     Object.assign(w.level, buildStage(snap.stage, w.seed));
@@ -45,7 +54,8 @@ export function applySnapshot(w: World, snap: SnapshotMsg): { stageChanged: bool
   w.tick = snap.t;
   w.stage = snap.stageInfo;
   w.wave = snap.wave;
-  w.players = snap.players;
+  w.shrine = snap.shrine;
+  w.players = snap.self ? [snap.self, ...snap.others] : snap.others;
   w.enemies = snap.enemies;
   w.projectiles = snap.projectiles;
   w.orbs = snap.orbs;

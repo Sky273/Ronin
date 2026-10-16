@@ -5,7 +5,8 @@ import { pack, unpack } from 'msgpackr';
 import { RemoteSource, SNAP_INTERVAL_MS } from '../client/net/remoteSource';
 import type { Transport } from '../client/net/transport';
 import { BTN } from '../shared/input';
-import type { InputMsg, SnapshotMsg, WelcomeMsg } from '../shared/net/protocol';
+import { decodeSnapshot, encodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../shared/net/protocol';
 import { makeSnapshot } from '../shared/net/snapshot';
 import type { GameEvent, World } from '../shared/types';
 import { addPlayer, createWorld, nextStage, stepWorld } from '../shared/world';
@@ -26,12 +27,12 @@ class FakeTransport implements Transport {
   left = 0;
   rtt = 0;
   welcomeCb: ((m: WelcomeMsg) => void) | null = null;
-  snapCb: ((m: SnapshotMsg) => void) | null = null;
+  snapCb: ((m: SnapshotWire) => void) | null = null;
   closeCb: ((r: string) => void) | null = null;
   onWelcome(cb: (m: WelcomeMsg) => void): void {
     this.welcomeCb = cb;
   }
-  onSnapshot(cb: (m: SnapshotMsg) => void): void {
+  onSnapshot(cb: (m: SnapshotWire) => void): void {
     this.snapCb = cb;
   }
   onClose(cb: (r: string) => void): void {
@@ -62,6 +63,8 @@ function run(w: World, ticks: number, input: (t: number, id: number) => number):
 }
 
 const SEED = 4242;
+/** Message d'accueil du protocole courant. */
+const hello = (pid: number, seed: number, stage: number, tick: number, color = 0): WelcomeMsg => ({ pid, seed, stage, tick, color, v: PROTOCOL_VERSION });
 let clock = 0;
 const now = (): number => clock;
 
@@ -83,12 +86,13 @@ const now = (): number => clock;
   const evEarly = src.advance(1 / 60, () => 0, () => before++);
   check('instantané avant l’accueil ignoré (rien appliqué, rien envoyé)', evEarly.length === 0 && before === 0 && t.inputs.length === 0 && !src.ready && src.meId === -1);
 
-  t.welcomeCb!(wire<WelcomeMsg>({ pid: a.id, seed: SEED, stage: server.level.stage, tick: server.tick, color: 2 }));
+  t.welcomeCb!(wire<WelcomeMsg>(hello(a.id, SEED, server.level.stage, server.tick, 2)));
   check('accueil : id du joueur, graine, niveau signalé à repeindre', src.meId === a.id && src.world.seed === SEED && src.world.mode === 'coop' && src.consumeStageChanged() && !src.consumeStageChanged());
 
   const evs1 = run(server, 300, (tk, id) => (id === a.id ? BTN.RIGHT | (tk % 40 === 0 ? BTN.ATTACK : 0) : tk % 25 === 0 ? BTN.JUMP : 0));
-  const snap1 = makeSnapshot(server, a.id, evs1, 12);
-  src.receive(wire(snap1));
+  const raw1 = wire(makeSnapshot(server, a.id, evs1, 12));
+  const snap1 = decodeSnapshot(raw1);
+  src.receive(raw1);
   let readyCalls = 0;
   src.onReady(() => readyCalls++);
   before = 0;
@@ -105,29 +109,29 @@ const now = (): number => clock;
   check('ennemis, projectiles et orbes reproduits', sameEnemies && w.projectiles.length === snap1.projectiles.length && w.orbs.length === snap1.orbs.length, `${w.enemies.length} ennemis`);
   check('tick, étape et Marée reproduits', w.tick === server.tick && w.stage.state === server.stage.state && w.wave.phase === server.wave.phase);
   check('événements de l’instantané renvoyés', got1.length === snap1.events.length && JSON.stringify(got1) === JSON.stringify(snap1.events), `${got1.length} événements`);
-  check('beforeStep appelé une fois par instantané appliqué', before === 1);
+  check('en ligne, pas d’interpolation de scène : beforeStep jamais appelé, alpha = 1', before === 0 && src.alpha() === 1);
   check('prêt après le premier instantané (onReady une fois), accusé mémorisé', src.ready && readyCalls === 1 && src.ack === 12);
   check('pas de changement d’étape signalé', !src.consumeStageChanged());
 
   const got2 = src.advance(1 / 60, () => 0, () => before++);
-  check('événements transmis une seule fois (rien sans nouvel instantané)', got2.length === 0 && before === 1);
+  check('événements transmis une seule fois (rien sans nouvel instantané)', got2.length === 0);
 
   // Doublon (même tick) ignoré.
-  src.receive(wire(snap1));
+  src.receive(wire(raw1));
   const got3 = src.advance(1 / 60, () => 0, () => before++);
-  check('instantané dupliqué ignoré', got3.length === 0 && before === 1);
+  check('instantané dupliqué ignoré', got3.length === 0);
 
   // Plusieurs instantanés entre deux images : tous appliqués dans l'ordre, événements concaténés.
   const e2 = run(server, 3, () => BTN.ATTACK);
-  const s2 = makeSnapshot(server, a.id, [...e2, { type: 'tideWarn', n: 1 }], 13);
+  const s2 = decodeSnapshot(wire(makeSnapshot(server, a.id, [...e2, { type: 'tideWarn', n: 1 }], 13)));
   const e3 = run(server, 3, () => 0);
-  const s3 = makeSnapshot(server, a.id, [...e3, { type: 'tideWarn', n: 2 }], 14);
-  src.receive(wire(s2));
-  src.receive(wire(s3));
+  const s3 = decodeSnapshot(wire(makeSnapshot(server, a.id, [...e3, { type: 'tideWarn', n: 2 }], 14)));
+  src.receive(wire(encodeSnapshot(s2)));
+  src.receive(wire(encodeSnapshot(s3)));
   const got4 = src.advance(0, () => 0, () => before++);
   check(
-    'deux instantanés en attente : deux beforeStep, événements des deux, état du dernier',
-    before === 3 && got4.length === s2.events.length + s3.events.length && src.world.tick === server.tick && src.ack === 14,
+    'deux instantanés en attente : événements des deux, état du dernier',
+    got4.length === s2.events.length + s3.events.length && src.world.tick === server.tick && src.ack === 14,
     `${got4.length} événements`,
   );
   src.dispose();
@@ -142,7 +146,7 @@ const now = (): number => clock;
   run(server, 10, () => 0);
   const t = new FakeTransport();
   const src = new RemoteSource(t, { now });
-  src.welcome({ pid: a.id, seed: SEED + 1, stage: server.level.stage, tick: server.tick, color: 0 });
+  src.welcome(hello(a.id, SEED + 1, server.level.stage, server.tick));
   src.consumeStageChanged();
   src.receive(wire(makeSnapshot(server, a.id, [], 0)));
   src.advance(0, () => 0, () => undefined);
@@ -170,7 +174,7 @@ const now = (): number => clock;
   server.events.length = 0;
   const t = new FakeTransport();
   const src = new RemoteSource(t, { now });
-  src.welcome({ pid: a.id, seed: SEED + 2, stage: server.level.stage, tick: server.tick, color: 0 });
+  src.welcome(hello(a.id, SEED + 2, server.level.stage, server.tick));
   src.receive(wire(makeSnapshot(server, a.id, [], 0)));
   src.advance(0, () => 0, () => undefined);
   const L = src.world.level;
@@ -182,7 +186,7 @@ const now = (): number => clock;
 {
   const t = new FakeTransport();
   const src = new RemoteSource(t, { now });
-  src.welcome({ pid: 1, seed: 1, stage: 1, tick: 0, color: 0 });
+  src.welcome(hello(1, 1, 1, 0));
   const pings0 = t.pings;
   let b = 0;
   const sample = () => ++b;
@@ -215,18 +219,14 @@ const now = (): number => clock;
   const src = new RemoteSource(t, { now });
   clock = 1000;
   check('alpha = 1 avant tout instantané', src.alpha() === 1);
-  src.welcome({ pid: a.id, seed: SEED + 3, stage: 1, tick: 0, color: 0 });
+  src.welcome(hello(a.id, SEED + 3, 1, 0));
   run(server, 3, () => 0);
   src.receive(wire(makeSnapshot(server, a.id, [], 0)));
   src.advance(0, () => 0, () => undefined);
   const a0 = src.alpha();
   clock += SNAP_INTERVAL_MS / 2;
   const aHalf = src.alpha();
-  clock += SNAP_INTERVAL_MS * 10;
-  const aLate = src.alpha();
-  clock -= SNAP_INTERVAL_MS * 100; // horloge qui recule : toujours borné
-  const aBack = src.alpha();
-  check('alpha borné dans [0, 1] et croissant', a0 === 0 && Math.abs(aHalf - 0.5) < 1e-9 && aLate === 1 && aBack === 0, `${a0} ${aHalf} ${aLate} ${aBack}`);
+  check('alpha toujours 1 en ligne (positions déjà lissées par la source)', a0 === 1 && aHalf === 1);
 
   const reasons: string[] = [];
   src.onClose((r) => reasons.push(r));
@@ -249,14 +249,14 @@ const now = (): number => clock;
   const server = createWorld(SEED + 4, { mode: 'coop' });
   const a = addPlayer(server, 'a');
   run(server, 2, () => 0);
-  const base = makeSnapshot(server, a.id, [], 0);
+  const base = decodeSnapshot(wire(makeSnapshot(server, a.id, [], 0)));
   /** Instantané au tick t portant des événements marqueurs (tideWarn n = identifiant unique). */
-  const mk = (t: number, ids: number[]): SnapshotMsg => wire({ ...base, t, ack: t, events: ids.map((n) => ({ type: 'tideWarn' as const, n })) });
+  const mk = (t: number, ids: number[]): SnapshotWire => wire(encodeSnapshot({ ...base, t, ack: t, events: ids.map((n) => ({ type: 'tideWarn' as const, n })) }));
   const ids = (evs: GameEvent[]): number[] => evs.filter((e) => e.type === 'tideWarn').map((e) => (e as { n: number }).n);
   const fresh = () => {
     const t = new FakeTransport();
     const src = new RemoteSource(t, { now });
-    src.welcome({ pid: a.id, seed: SEED + 4, stage: server.level.stage, tick: 0, color: 0 });
+    src.welcome(hello(a.id, SEED + 4, server.level.stage, 0));
     return src;
   };
   const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
@@ -265,10 +265,9 @@ const now = (): number => clock;
   {
     const src = fresh();
     for (let t = 1; t <= 30; t++) src.receive(mk(t, [t]));
-    let steps = 0;
-    const got = ids(src.advance(0, () => 0, () => steps++));
+    const got = ids(src.advance(0, () => 0, () => undefined));
     check('file saturée : événements de tous les instantanés, une fois, dans l’ordre', got.join() === range(1, 30).join(), got.join());
-    check('file saturée : état du dernier instantané, au plus 20 applications', src.world.tick === 30 && src.ack === 30 && steps <= 20 && steps > 0, `tick=${src.world.tick} pas=${steps}`);
+    check('file saturée : état du dernier instantané', src.world.tick === 30 && src.ack === 30, `tick=${src.world.tick}`);
     check('file saturée : plus rien ensuite', src.advance(0, () => 0, () => undefined).length === 0);
     src.dispose();
   }
@@ -316,12 +315,12 @@ const now = (): number => clock;
     const p = addPlayer(w2, 'p');
     const t = new FakeTransport();
     const src = new RemoteSource(t, { now });
-    src.welcome({ pid: p.id, seed: SEED + 5, stage: w2.level.stage, tick: w2.tick, color: 0 });
+    src.welcome(hello(p.id, SEED + 5, w2.level.stage, w2.tick));
     src.receive(wire(makeSnapshot(w2, p.id, run(w2, 3, () => 0), 0)));
     src.advance(0, () => 0, () => undefined);
     src.consumeStageChanged();
     const levelRef = src.world.level;
-    const snaps: SnapshotMsg[] = [];
+    const snaps: SnapshotWire[] = [];
     for (let i = 0; i < 30; i++) {
       let evs = run(w2, 3, () => 0);
       if (i === 2 || i === 6) {

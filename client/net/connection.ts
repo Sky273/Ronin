@@ -1,7 +1,8 @@
 // Enveloppe du SDK Colyseus : SEUL fichier du client qui dépend du framework réseau.
 // Aucune logique de jeu ici. La scène charge ce module par import() dynamique (le solo ne le télécharge pas).
 import { Client, MatchMakeError, ServerError, type Room } from '@colyseus/sdk';
-import { MSG, type InputMsg, type SnapshotMsg, type WelcomeMsg } from '../../shared/net/protocol';
+import type { SnapshotWire } from '../../shared/net/codec';
+import { MSG, PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
 import type { Transport } from './transport';
 
 /** Nom de la salle coopérative côté serveur. */
@@ -34,10 +35,10 @@ function closeReason(code: number, reason?: string): string {
 /** Connexion à une salle coopérative. */
 export class Connection implements Transport {
   private welcomeCb: ((msg: WelcomeMsg) => void) | null = null;
-  private snapCb: ((msg: SnapshotMsg) => void) | null = null;
+  private snapCb: ((msg: SnapshotWire) => void) | null = null;
   private closeCb: ((reason: string) => void) | null = null;
   private pendingWelcome: WelcomeMsg | null = null;
-  private pendingSnaps: SnapshotMsg[] = [];
+  private pendingSnaps: SnapshotWire[] = [];
   private pendingClose: string | null = null;
   private left = false;
   private smoothRtt = 0;
@@ -45,10 +46,18 @@ export class Connection implements Transport {
   constructor(private room: Room) {
     // Abonnements immédiats : le serveur envoie l'accueil dès l'arrivée, avant que l'appelant ne s'abonne.
     room.onMessage(MSG.welcome, (msg: WelcomeMsg) => {
+      // Client et serveur de versions différentes : les instantanés seraient illisibles.
+      if (msg?.v !== PROTOCOL_VERSION) {
+        this.closed(`Version mismatch (server ${msg?.v ?? 1}, game ${PROTOCOL_VERSION}) — please reload the page.`);
+        this.left = true;
+        this.room.leave(true).catch(() => undefined);
+        return;
+      }
       if (this.welcomeCb) this.welcomeCb(msg);
       else this.pendingWelcome = msg;
     });
-    room.onMessage(MSG.snap, (msg: SnapshotMsg) => {
+    room.onMessage(MSG.snap, (msg: SnapshotWire) => {
+      if (this.left) return;
       if (this.snapCb) this.snapCb(msg);
       else {
         this.pendingSnaps.push(msg);
@@ -80,7 +89,7 @@ export class Connection implements Transport {
     if (w) cb(w);
   }
 
-  onSnapshot(cb: (msg: SnapshotMsg) => void): void {
+  onSnapshot(cb: (msg: SnapshotWire) => void): void {
     this.snapCb = cb;
     const queued = this.pendingSnaps;
     this.pendingSnaps = [];

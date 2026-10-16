@@ -2,7 +2,9 @@
 // Lancer : npm run test:server
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
-import { BUTTON_MASK, MSG, PLAYER_COLORS, type SnapshotMsg, type WelcomeMsg } from '../shared/net/protocol';
+import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { BUTTON_MASK, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
+import type { Player } from '../shared/types';
 import { matchMaker } from '@colyseus/core';
 import { MAX_PAYLOAD, startServer } from '../server/app';
 import type { CoopRoom } from '../server/rooms/CoopRoom';
@@ -36,6 +38,12 @@ setTimeout(() => {
 // ─── (a) CoopSession seule ──────────────────────────────────────────────────
 
 const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id === pid);
+/** Instantané décodé, avec la liste de tous les joueurs (soi + les autres). */
+type TestSnap = Snapshot & { players: Player[] };
+const view = (w: SnapshotWire): TestSnap => {
+  const d = decodeSnapshot(w);
+  return { ...d, players: d.self ? [d.self, ...d.others] : d.others };
+};
 
 // 1. Arrivées, départs, couleurs.
 {
@@ -127,9 +135,9 @@ const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id
   check('client muet : boutons relâchés après IDLE_RELEASE_TICKS', player(u, up)!.prevButtons === 0);
 
   // Instantané : ack et événements accumulés.
-  const snap = u.snapshotFor(up);
+  const snap = view(u.snapshotFor(up));
   check('instantané : ack = dernière séquence consommée', snap.ack === 3 && snap.t === u.world.tick && snap.players.some((p) => p.id === up));
-  check('pid sans entrée : ack = -1', s.snapshotFor(pid).ack === -1);
+  check('pid sans entrée : ack = -1', view(s.snapshotFor(pid)).ack === -1);
   // Attaques répétées pour produire des événements.
   let seq = 10;
   for (let i = 0; i < 120; i++) {
@@ -138,9 +146,9 @@ const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id
   }
   const pending = u.pendingEvents.length;
   check('événements du monde accumulés puis vidés de w.events', pending > 0 && u.world.events.length === 0, `${pending}`);
-  check('instantané : événements depuis le dernier envoi', u.snapshotFor(up).events.length > 0);
+  check('instantané : événements depuis le dernier envoi', view(u.snapshotFor(up)).events.length > 0);
   u.flushEvents();
-  check('flushEvents : plus d’événements en attente', u.pendingEvents.length === 0 && u.snapshotFor(up).events.length === 0);
+  check('flushEvents : plus d’événements en attente', u.pendingEvents.length === 0 && view(u.snapshotFor(up)).events.length === 0);
 }
 
 // 4. Latence simulée.
@@ -256,7 +264,7 @@ const player = (s: CoopSession, pid: number) => s.world.players.find((p) => p.id
 interface TestClient {
   room: Room;
   welcome: WelcomeMsg | null;
-  snaps: SnapshotMsg[];
+  snaps: TestSnap[];
   snapTimes: number[];
   pings: number[];
   left: boolean;
@@ -266,8 +274,8 @@ async function connect(url: string, name: string): Promise<TestClient> {
   const room = await new Client(url).joinOrCreate('coop', { name });
   const c: TestClient = { room, welcome: null, snaps: [], snapTimes: [], pings: [], left: false };
   room.onMessage(MSG.welcome, (w: WelcomeMsg) => (c.welcome = w));
-  room.onMessage(MSG.snap, (s: SnapshotMsg) => {
-    c.snaps.push(s);
+  room.onMessage(MSG.snap, (s: SnapshotWire) => {
+    c.snaps.push(view(s));
     c.snapTimes.push(performance.now());
   });
   room.onMessage(MSG.ping, (m: { t: number }) => c.pings.push(m.t));

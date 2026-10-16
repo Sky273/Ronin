@@ -4,11 +4,12 @@ import {
   BUTTON_MASK,
   NET_TICK,
   PLAYER_COLORS,
+  PROTOCOL_VERSION,
   sanitizePlayerName,
   type InputMsg,
-  type SnapshotMsg,
   type WelcomeMsg,
 } from '../shared/net/protocol';
+import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
 import type { GameEvent, World } from '../shared/types';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
@@ -154,7 +155,7 @@ export class CoopSession {
   }
 
   /** Instantané pour un joueur : événements depuis le dernier envoi et accusé de réception. */
-  snapshotFor(pid: number): SnapshotMsg {
+  snapshotFor(pid: number): SnapshotWire {
     return makeSnapshot(this.world, pid, this.events, this.ackFor(pid));
   }
 
@@ -170,6 +171,6 @@ export class CoopSession {
 
   welcomeFor(pid: number): WelcomeMsg {
     const w = this.world;
-    return { pid, seed: w.seed, stage: w.level.stage, tick: w.tick, color: this.slots.get(pid)?.color ?? 0 };
+    return { pid, seed: w.seed, stage: w.level.stage, tick: w.tick, color: this.slots.get(pid)?.color ?? 0, v: PROTOCOL_VERSION };
   }
 }

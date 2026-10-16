@@ -2,7 +2,8 @@
 // Lancer : npm run bots -- 12 [--url ws://localhost:2567] [--seconds 20]
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
-import { MSG, NET_TICK, type SnapshotMsg, type WelcomeMsg } from '../shared/net/protocol';
+import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { MSG, NET_TICK, type WelcomeMsg } from '../shared/net/protocol';
 
 interface Args {
   count: number;
@@ -51,7 +52,8 @@ class Bot {
     room.onMessage(MSG.welcome, (w: WelcomeMsg) => {
       this.pid = w.pid;
     });
-    room.onMessage(MSG.snap, (s: SnapshotMsg) => {
+    room.onMessage(MSG.snap, (wire: SnapshotWire) => {
+      const s = decodeSnapshot(wire);
       this.snaps++;
       this.lastAck = s.ack;
     });
