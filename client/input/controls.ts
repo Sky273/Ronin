@@ -26,7 +26,7 @@ const KEYMAP: Record<string, number> = {
   Numpad3: BTN.PICK3,
 };
 
-const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'Escape', 'Backspace', 'Tab']);
+const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F7', 'Escape', 'Backspace', 'Tab']);
 
 // Touches dont le comportement navigateur gênerait la saisie d'un nom (retour arrière, défilement, focus).
 const TEXT_PREVENT = new Set(['Backspace', 'Space', 'Enter', 'NumpadEnter', 'Tab']);

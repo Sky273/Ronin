@@ -307,6 +307,8 @@ function spawner(w: World): void {
     const x = clamp(p.x + side * w.rng.range(tide ? 500 : 560, 900), 3 * TILE, (w.level.arena.col - 3) * TILE);
     const gy = findGround(w.level, x, p.y);
     if (gy === null) continue;
+    // Pas de renfort perché à plus de 4 tuiles au-dessus du joueur (ex. sommet d'un bloc de tunnel).
+    if (gy < p.y - 4 * TILE) continue;
     const e = spawnEnemy(w, pickType(w), x, gy, true, hpMult(w));
     e.horde = true;
     if (tide) e.state = 'chase'; // la Marée vient droit sur vous
