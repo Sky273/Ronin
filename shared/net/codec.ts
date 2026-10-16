@@ -81,7 +81,8 @@ export const AGE_MAX = 120;
 const NEVER_TICK = -999;
 
 const qPos = (v: number): number => Math.round(v * POS_SCALE);
-const dqPos = (q: number): number => q / POS_SCALE;
+// Valeur absente ou d'un autre type : NaN (l'entité sera écartée au décodage).
+const dqPos = (q: number): number => (typeof q === 'number' ? q / POS_SCALE : NaN);
 const qAge = (t: number, v: number): number => {
   const a = t - v;
   return a >= 0 && a < AGE_MAX ? a : AGE_MAX;
@@ -128,6 +129,7 @@ function encodeSelf(p: Player): unknown[] {
 }
 
 function decodeSelf(a: unknown[]): Player {
+  if (a.length !== SELF_KEYS.length) throw new Error('instantané illisible : joueur local tronqué');
   const p = {} as Record<string, unknown>;
   for (let i = 0; i < SELF_KEYS.length; i++) {
     const k = SELF_KEYS[i];
@@ -441,6 +443,53 @@ export function enemyFromView(v: EnemyView): Enemy {
   return { ...createEnemy(v.id, base, v.x, v.y), ...v };
 }
 
+// ─── Robustesse au décodage ──────────────────────────────────────────────────
+// Le client fait confiance au serveur, mais un instantané tronqué ou d'une autre version ne doit
+// ni planter le jeu ni placer des entités en NaN : les entités (et événements) mal formés sont
+// ignorés ; un joueur local mal formé ou une enveloppe illisible rendent l'instantané illisible
+// (la source ferme alors la connexion avec un message).
+
+/** Liste de tuples : tout ce qui n'est pas un tableau est écarté. */
+const tuples = (x: unknown): unknown[][] => (Array.isArray(x) ? x.filter((a): a is unknown[] => Array.isArray(a)) : []);
+/** Entité placée à une position finie. */
+const placed = (o: { id: number; x: number; y: number; vx: number; vy: number }): boolean =>
+  Number.isFinite(o.id) && Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isFinite(o.vx) && Number.isFinite(o.vy);
+/** Décodage d'une entité : null si elle est mal formée (elle est alors ignorée). */
+function safe<T>(fn: (a: unknown[]) => T): (a: unknown[]) => T | null {
+  return (a) => {
+    try {
+      return fn(a);
+    } catch {
+      return null;
+    }
+  };
+}
+const kept = <T extends { id: number; x: number; y: number; vx: number; vy: number }>(o: T | null): o is T => o !== null && placed(o);
+/** Modèle des types attendus pour chaque champ du joueur local. */
+const SELF_TEMPLATE = createPlayer(0, '', 0, 0) as unknown as Record<string, unknown>;
+/** Champs du joueur local qui peuvent légitimement valoir NaN (Honneur perdu : aucun). */
+const NAN_OK: ReadonlySet<string> = new Set(['lostX', 'lostY']);
+
+/** Joueur local : chaque champ du type attendu, nombres finis (sauf lostX/lostY) — sinon illisible. */
+function checkedSelf(p: Player): Player {
+  const r = p as unknown as Record<string, unknown>;
+  for (const k of SELF_KEYS) {
+    const want = SELF_TEMPLATE[k];
+    const v = r[k];
+    // attack / chainNext : null ou chaîne ; tableaux : tableaux ; objets : objets.
+    if (want === null) {
+      if (v !== null && typeof v !== 'string') throw new Error(`instantané illisible : ${k}`);
+    } else if (Array.isArray(want)) {
+      if (!Array.isArray(v)) throw new Error(`instantané illisible : ${k}`);
+    } else if (typeof v !== typeof want) {
+      throw new Error(`instantané illisible : ${k}`);
+    } else if (typeof v === 'number' && !Number.isFinite(v) && !NAN_OK.has(k)) {
+      throw new Error(`instantané illisible : ${k}`);
+    }
+  }
+  return p;
+}
+
 /** Décode un instantané reçu : objets indépendants, prêts à être placés dans un monde. */
 export function decodeSnapshot(wire: SnapshotWire): Snapshot {
   const w = wire as unknown as Wire;
@@ -452,12 +501,12 @@ export function decodeSnapshot(wire: SnapshotWire): Snapshot {
     stageInfo: decodeStage(w[3]),
     wave: decodeWave(w[4]),
     shrine: w[5],
-    self: w[6] ? decodeSelf(w[6]) : null,
-    others: w[7].map((a) => playerFromView(decodeOtherView(a as unknown[], t))),
-    enemies: w[8].map((a) => enemyFromView(decodeEnemyView(a as unknown[]))),
-    projectiles: w[9].map((a) => decodeProjectile(a as unknown[])),
-    orbs: w[10].map((a) => decodeOrb(a as unknown[])),
-    events: (w[11] as unknown[]).map(decodeEvent).filter((ev): ev is GameEvent => ev !== null),
+    self: w[6] ? checkedSelf(decodeSelf(w[6])) : null,
+    others: tuples(w[7]).map(safe((a) => playerFromView(decodeOtherView(a, t)))).filter(kept),
+    enemies: tuples(w[8]).map(safe((a) => enemyFromView(decodeEnemyView(a)))).filter(kept),
+    projectiles: tuples(w[9]).map(safe(decodeProjectile)).filter(kept),
+    orbs: tuples(w[10]).map(safe(decodeOrb)).filter(kept),
+    events: (Array.isArray(w[11]) ? (w[11] as unknown[]) : []).map(decodeEvent).filter((ev): ev is GameEvent => ev !== null),
   };
 }
 

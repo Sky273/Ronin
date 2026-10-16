@@ -99,6 +99,11 @@ export class RemoteSource implements WorldSource {
     return this.transport.rtt;
   }
 
+  /** Gigue mesurée sur l'arrivée des instantanés (ms). */
+  get jitterMs(): number {
+    return (this.interp.clock.jitterTicks * 1000) / NET_TICK;
+  }
+
   /** Dernière séquence d'entrée traitée par le serveur. */
   get ack(): number {
     return this.lastAck;

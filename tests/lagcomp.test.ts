@@ -86,9 +86,12 @@ function dummyScenario(lag: number | null, until: (A: number) => number): { hits
   const comp = dummyScenario(10, moved);
   check('L = 10 : touché, le client voyait le chevauchement au tick v', comp.hits === 1, `${comp.hits} coup(s)`);
   check('… dégâts appliqués à l’ennemi actuel', comp.e.hp < 1e6);
-  const max = dummyScenario(25, (A) => A - 10);
-  check(`L demandé 25 → borné à ${MAX_REWIND_TICKS} : chevauchement vu 14 ticks avant, touché`, max.hits === 1, `${max.hits} coup(s)`);
-  const far = dummyScenario(25, (A) => A - 15);
+  // Retard demandé au-delà du plafond : ramené à MAX_REWIND_TICKS (chevauchement vu juste avant, touché ;
+  // un peu plus tôt, hors de portée du rembobinage, refusé).
+  const over = MAX_REWIND_TICKS + 5;
+  const max = dummyScenario(over, (A) => A + 10 - MAX_REWIND_TICKS);
+  check(`L demandé ${over} → borné à ${MAX_REWIND_TICKS} : chevauchement vu ${MAX_REWIND_TICKS - 6} ticks avant, touché`, max.hits === 1, `${max.hits} coup(s)`);
+  const far = dummyScenario(over, (A) => A + 5 - MAX_REWIND_TICKS);
   check(`S − v > ${MAX_REWIND_TICKS} : refusé (le rembobinage est borné)`, far.hits === 0, `${far.hits} coup(s)`);
   const net = createLagComp();
   setLag(net, 1, 99);
@@ -659,6 +662,235 @@ function meleeLoop(type: EnemyType, lagAt: (S: number) => number, ticks: number,
     err = String((x as Error)?.stack ?? x).slice(0, 300);
   }
   check('fantôme tranché (L = 17) : renvoyé sans doublon, jamais tranché et encaissé', !err && deflects > 0 && both === 0 && dup === 0, err || `${deflects} renvoi(s), ${both} double(s) effet(s), ${dup} doublon(s)`);
+}
+
+// ─── 8. Plafond relevé : retards de 25 à MAX_REWIND_TICKS (QA) ──────────────
+const LMAX = MAX_REWIND_TICKS;
+check(`plafond de la compensation ≥ 30 ticks (${LMAX})`, LMAX >= 30);
+{
+  // 8a. Oscillations et dents de scie jusqu'au plafond : ≤ 1 touche par attaque, aucune perdue.
+  const scheds: [string, (S: number) => number][] = [
+    ['constant 25', () => 25],
+    [`constant ${LMAX}`, () => LMAX],
+    [`0/${LMAX} tous les 7 ticks`, (S) => (((S / 7) | 0) % 2 ? LMAX : 0)],
+    [`0/${LMAX} tous les 3 ticks`, (S) => (((S / 3) | 0) % 2 ? LMAX : 0)],
+    [`0/${LMAX} à chaque tick`, (S) => (S % 2 ? LMAX : 0)],
+    [`dents de scie ${LMAX}→0`, (S) => LMAX - (S % (LMAX + 1))],
+    [`dents de scie 0→${LMAX}`, (S) => S % (LMAX + 1)],
+    [`25/${LMAX} tous les 5 ticks`, (S) => (((S / 5) | 0) % 2 ? LMAX : 25)],
+    [`pseudo-aléatoire 0..${LMAX}`, (S) => (Math.imul(S, 2654435761) >>> 26) % (LMAX + 1)],
+  ];
+  for (const type of ['ashigaru', 'oni', 'ninja'] as EnemyType[]) {
+    const ref = meleeLoop(type, () => 0, 3000);
+    for (const [name, f] of scheds) {
+      const r = meleeLoop(type, f, 3000);
+      check(
+        `${type}, retard ${name} : ≤ 1 touche par attaque, aucune perdue`,
+        !r.err && r.attacks > 5 && r.maxPerAttack <= 1 && r.hits <= r.attacks && r.hits >= ref.hits - 1,
+        r.err || `${r.attacks} attaques, ${r.hits} touches (réf. L = 0 : ${ref.hits}/${ref.attacks}), max ${r.maxPerAttack}/attaque`,
+      );
+    }
+  }
+  for (const lag of [25, LMAX]) {
+    const near = meleeLoop('boss', () => lag, 4000, 70);
+    const far = meleeLoop('boss', () => lag, 4000, 320);
+    check(`boss, L = ${lag}, au contact : ≤ 1 touche par attaque`, !near.err && near.attacks > 3 && near.maxPerAttack <= 1 && near.hits > 0, near.err || `${near.attacks} attaques, ${near.hits} touches`);
+    check(`boss, L = ${lag}, à distance (charge, saut) : ≤ 1 touche par attaque`, !far.err && far.attacks > 3 && far.maxPerAttack <= 1 && far.hits > 0, far.err || `${far.attacks} attaques, ${far.hits} touches`);
+  }
+  const osc = meleeLoop('boss', (S) => (((S / 4) | 0) % 2 ? LMAX : 0), 4000, 70);
+  check(`boss, retard 0/${LMAX} tous les 4 ticks : ≤ 1 touche par attaque`, !osc.err && osc.attacks > 3 && osc.maxPerAttack <= 1 && osc.hits > 0, osc.err || `${osc.attacks} attaques, ${osc.hits} touches`);
+}
+{
+  // 8b. Parade d'une frappe et d'un shuriken vus à l'écran, L = 25 et L = plafond.
+  let kTick = -1;
+  {
+    const { w, ps } = arena(1, false);
+    const p = ps[0];
+    p.facing = 1;
+    const e = spawnEnemy(w, 'ashigaru', p.x + 60, p.y, false);
+    e.facing = -1;
+    e.state = 'chase';
+    e.cd = 0;
+    for (let i = 0; i < 200 && kTick < 0; i++) {
+      const S = w.tick;
+      stepWorld(w, new Map());
+      if (w.events.some((ev) => ev.type === 'playerHit')) kTick = S;
+      w.events.length = 0;
+    }
+  }
+  const shRef = shurikenScenario(null, null);
+  for (const L of [25, LMAX]) {
+    const ok = spearScenario(L, kTick + L - 2);
+    check(`L = ${L} : parade lancée à l’écran avant l’impact → parry, lancier étourdi`, ok.evs.some((ev) => ev.type === 'parry') && !ok.evs.some((ev) => ev.type === 'playerHit') && ok.stunned);
+    const none = spearScenario(L, null);
+    const n = none.evs.filter((ev) => ev.type === 'playerHit').length;
+    check(`L = ${L} sans parade : la frappe touche une seule fois`, n === 1, `${n}`);
+    const early = spearScenario(L, kTick + L - 14);
+    check(`L = ${L} : parade trop tôt → playerHit`, early.evs.some((ev) => ev.type === 'playerHit') && !early.evs.some((ev) => ev.type === 'parry'));
+    const sh = shurikenScenario(L, shRef.hitTick + L - 2);
+    check(`projectile, L = ${L} : parade avant l’impact vu → parry, renvoyé`, sh.evs.some((ev) => ev.type === 'parry') && !sh.evs.some((ev) => ev.type === 'playerHit') && sh.w.projectiles.some((a) => a.kind === 'shuriken' && a.owner === 'player'));
+    const shLate = shurikenScenario(L, null);
+    const m = shLate.evs.filter((ev) => ev.type === 'playerHit').length;
+    check(`projectile, L = ${L} sans parade : touché une seule fois`, m === 1, `${m}`);
+  }
+}
+{
+  // 8c. Fantômes à L = plafond : renvoyés au plus une fois, jamais en double, jamais tranchés et encaissés.
+  let dup = 0;
+  let parried = 0;
+  let both = 0;
+  let err = '';
+  try {
+    for (let life = 2; life <= 50; life += 2) {
+      for (let pa = 0; pa <= 75; pa += 3) {
+        for (const btn of [BTN.PARRY, BTN.ATTACK]) {
+          const { w, ps } = arena(1, true);
+          const p = ps[0];
+          p.x += 480;
+          step(w, 40);
+          p.iframes = 0;
+          setLag(w.net!, p.id, LMAX);
+          p.facing = 1;
+          const id = w.nextId++;
+          w.projectiles.push({ id, kind: 'shuriken', x: p.x + 160, y: p.y - (btn === BTN.ATTACK ? 30 : 14), vx: -600, vy: 0, owner: 'enemy', ownerId: 0, damage: 8, life, hits: [], dead: false });
+          const P0 = w.tick;
+          const evs = step(w, 90, (S) => (S - P0 === pa ? btn : 0), () => {
+            if (new Set(w.projectiles).size !== w.projectiles.length || w.projectiles.filter((a) => a.id === id).length > 1) dup++;
+          });
+          const back = evs.filter((ev) => ev.type === 'parry' || ev.type === 'deflect').length;
+          const hit = evs.filter((ev) => ev.type === 'playerHit').length;
+          if (back) parried++;
+          if ((back && hit) || back > 1 || hit > 1) both++;
+        }
+      }
+    }
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  check(`fantômes, L = ${LMAX} : renvoyés sans doublon, jamais renvoyé et encaissé`, !err && parried > 0 && dup === 0 && both === 0, err || `${parried} renvoi(s), ${dup} doublon(s), ${both} double(s) effet(s)`);
+}
+{
+  // 8d. Changement d'étape à L = plafond : rien de l'ancien niveau n'est jugé.
+  const probe = createWorld(31, { mode: 'coop' });
+  nextStage(probe);
+  const spawn = { ...probe.level.spawn };
+  let revived = 0;
+  let touched = 0;
+  for (let pa = 0; pa <= LMAX + 6; pa++) {
+    const { w, ps } = arena(1, true);
+    const p = ps[0];
+    setLag(w.net!, p.id, LMAX);
+    const id = w.nextId++;
+    w.projectiles.push({ id, kind: 'shuriken', x: spawn.x + 4, y: spawn.y - 14, vx: 0, vy: 0, owner: 'enemy', ownerId: 0, damage: 8, life: 3, hits: [], dead: false });
+    step(w, 4);
+    nextStage(w);
+    p.iframes = 0;
+    p.facing = 1;
+    const P0 = w.tick;
+    const evs = step(w, LMAX + 12, (S) => (S - P0 === pa ? BTN.PARRY : 0));
+    if (w.projectiles.some((a) => a.id === id)) revived++;
+    if (evs.some((ev) => ev.type === 'playerHit' || ev.type === 'parry')) touched++;
+  }
+  check(`nextStage, L = ${LMAX} : aucun projectile de l’ancien niveau renvoyé ni jugé`, revived === 0 && touched === 0, `${revived} ressuscité(s), ${touched} touche/parade`);
+  const { w, ps } = arena(1, true);
+  const p = ps[0];
+  setLag(w.net!, p.id, LMAX);
+  const e = spawnEnemy(w, 'ashigaru', p.x + 60, p.y, false);
+  e.facing = -1;
+  e.state = 'chase';
+  e.cd = 0;
+  for (let i = 0; i < 200 && !w.net!.strikes.length; i++) step(w, 1);
+  const had = w.net!.strikes.length;
+  nextStage(w);
+  const after = step(w, LMAX + 5);
+  check(`nextStage, L = ${LMAX} : frappes différées oubliées`, had > 0 && w.net!.strikes.length === 0 && !after.some((ev) => ev.type === 'playerHit'), `${had} → ${w.net!.strikes.length}`);
+}
+{
+  // 8e. Mort puis renaissance pendant un délai de 30 ticks : au plus une touche pour la frappe.
+  for (const respawn of [1, 10, 25]) {
+    const { w, ps } = arena(2, true);
+    const [a, b] = ps;
+    b.x = a.x + 4;
+    b.y = a.y;
+    setLag(w.net!, a.id, LMAX);
+    setLag(w.net!, b.id, LMAX);
+    const e = spawnEnemy(w, 'ashigaru', a.x + 60, a.y, false);
+    e.facing = -1;
+    e.state = 'chase';
+    e.cd = 0;
+    let deathAt = -1;
+    let once = false;
+    let err = '';
+    let evs: GameEvent[] = [];
+    try {
+      evs = step(w, 400, () => 0, (S) => {
+        if (eState(e) === 'recover') once = true;
+        if (once) e.cd = 1e9;
+        if (deathAt < 0 && w.net!.strikes.length) {
+          deathAt = S;
+          a.hp = 0;
+          a.state = 'dead';
+          a.respawnT = respawn;
+        }
+      });
+    } catch (x) {
+      err = String((x as Error)?.stack ?? x).slice(0, 300);
+    }
+    const all = evs.filter((ev) => ev.type === 'playerHit').length;
+    check(`L = ${LMAX}, mort et renaissance (${respawn} tick(s)) pendant le délai : au plus une touche`, !err && deathAt > 0 && all <= 1, err || `${all} touche(s)`);
+  }
+}
+{
+  // 8f. Partie coop de 4000 ticks, retards 0..plafond (oscillations brutales, dents de scie) :
+  // historique borné à chaque pas (frappes, fantômes), état fini, partie jouable.
+  const w = createWorld(2024, { mode: 'coop' });
+  w.net = createLagComp();
+  for (let i = 0; i < 4; i++) addPlayer(w, 'p' + i, { color: i });
+  const input = scripted(77);
+  const lagAt = (t: number, i: number): number =>
+    i === 0 ? LMAX : i === 1 ? (((t / 3) | 0) % 2 ? LMAX : 0) : i === 2 ? LMAX - (t % (LMAX + 1)) : (Math.imul(t, 2654435761) >>> 26) % (LMAX + 1);
+  const m = new Map<number, number>();
+  const counts: Record<string, number> = {};
+  let maxStrikeAge = 0;
+  let maxGhostAge = 0;
+  let maxStrikes = 0;
+  let err = '';
+  try {
+    for (let t = 0; t < 4000; t++) {
+      if (t % 120 === 0) for (const p of w.players) if (p.state !== 'dead') p.hp = p.maxHp;
+      if (t % 150 === 75) {
+        w.players.forEach((p, i) => {
+          if (p.state === 'dead') return;
+          const x = p.x + (i % 2 ? -1 : 1) * (90 + 20 * i);
+          const gy = findGround(w.level, x, p.y, 2);
+          if (gy === null || Math.abs(gy - p.y) > 40) return;
+          const e = spawnEnemy(w, KINDS[(t / 150 + i) % KINDS.length | 0], x, gy, false);
+          e.state = 'chase';
+          e.cd = 0;
+        });
+      }
+      m.clear();
+      w.players.forEach((p, i) => {
+        m.set(p.id, input(w.tick, p.id));
+        setLag(w.net!, p.id, lagAt(t, i));
+      });
+      stepWorld(w, m);
+      for (const ev of w.events) counts[ev.type] = (counts[ev.type] ?? 0) + 1;
+      w.events.length = 0;
+      const net = w.net!;
+      maxStrikes = Math.max(maxStrikes, net.strikes.length);
+      for (const st of net.strikes) maxStrikeAge = Math.max(maxStrikeAge, w.tick - st.tick);
+      for (const g of net.ghosts) maxGhostAge = Math.max(maxGhostAge, w.tick - g.tick);
+    }
+  } catch (x) {
+    err = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  check(`coop 4000 ticks, retards 0..${LMAX} : aucune exception`, !err, err);
+  const finite = w.players.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y)) && w.enemies.every((e) => Number.isFinite(e.x) && Number.isFinite(e.y));
+  check('… état fini', finite);
+  check(`… historique borné à chaque pas : frappes et fantômes de moins de ${LMAX + 1} ticks`, maxStrikeAge <= LMAX && maxGhostAge <= LMAX, `âge max frappes ${maxStrikeAge}, fantômes ${maxGhostAge}, ${maxStrikes} frappe(s) en attente au plus`);
+  check('… anneau de taille plafond + 1', w.net!.ring.length === LMAX + 1);
+  check('… partie jouable (coups, touches)', (counts.hit ?? 0) > 20 && (counts.playerHit ?? 0) > 0, `${counts.hit ?? 0} hit, ${counts.playerHit ?? 0} playerHit, ${counts.parry ?? 0} parry`);
 }
 
 if (failures) {

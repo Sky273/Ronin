@@ -29,8 +29,13 @@ export const PROTOCOL_VERSION = 2;
 export const INTERP_TICKS = 6;
 export const INTERP_MIN_TICKS = 5;
 export const INTERP_MAX_TICKS = 12;
-/** Compensation de latence : recul maximal du jugement des coups (ticks, ~333 ms). */
-export const MAX_REWIND_TICKS = 20;
+/**
+ * Compensation de latence : recul maximal du jugement des coups (ticks, 500 ms). Le retard d'un
+ * joueur vaut ~ aller-retour + recul d'interpolation (5 à 12 ticks) + attente dans la file du
+ * serveur (~1,5 tick) : 30 ticks couvrent ~375 ms d'aller-retour avec le recul nominal (6 ticks),
+ * ~280 ms quand une forte gigue porte le recul au maximum.
+ */
+export const MAX_REWIND_TICKS = 30;
 /** Correction de prédiction au-delà de laquelle on se recale d'un coup (px). */
 export const CORRECTION_SNAP_PX = 120;
 /** Constante de temps du lissage des petites corrections de prédiction (ms). */

@@ -7,6 +7,7 @@ import { UPGRADE_MAX } from '../../shared/upgrades';
 import { gBlob, gFill, gStroke, type Rand, ringPoints, seeded } from '../render/brush';
 import { BOSS_NAME } from '../render/enemies';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
+import { netLabel, netQualityColor, type NetInfo } from './netQuality';
 import { DIFFICULTY_TEXT, fmtScore } from './difficultyText';
 import { rankOf, UPGRADE_TEXT } from './texts';
 
@@ -39,6 +40,9 @@ export class Hud {
   private kills: Text;
   private record: Text;
   private score: Text;
+  private net: Text;
+  private netLabel = '';
+  private netColor = '';
   private combo: Text;
   private wave: Text;
   private bossName: Text;
@@ -69,6 +73,7 @@ export class Hud {
     this.kills = txt(W - 92, 22, '0', { fontFamily: FONT_BRUSH, fontSize: '48px', color: '#15120e' }).setOrigin(1, 0);
     this.record = txt(W - 40, 84, '', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#4a433b' }).setOrigin(1, 0);
     this.score = txt(W - 40, 106, '', { fontFamily: FONT_BRUSH, fontSize: '20px', color: '#15120e' }).setOrigin(1, 0);
+    this.net = txt(W - 40, 134, '', { fontFamily: FONT_TEXT, fontSize: '14px', color: '#4a433b' }).setOrigin(1, 0).setVisible(false);
     this.combo = txt(W - 60, 250, '', { fontFamily: FONT_BRUSH, fontSize: '56px', color: '#15120e', align: 'right' }).setOrigin(1, 0.5);
     this.wave = txt(W / 2, 22, '', { fontFamily: FONT_TEXT, fontSize: '17px', color: '#15120e' }).setOrigin(0.5, 0);
     this.bossName = txt(W / 2, 50, '', { fontFamily: FONT_BRUSH, fontSize: '24px', color: '#8e2416' }).setOrigin(0.5, 0);
@@ -93,6 +98,20 @@ export class Hud {
       this.cards.push({ g, kanji, name, desc, lvl, key });
     }
     this.cardRoot.setVisible(false);
+  }
+
+  /** Connexion en ligne (null hors ligne) : nombre de joueurs et latence, colorée selon la qualité. */
+  setNet(n: NetInfo | null): void {
+    if (!n) {
+      if (this.net.visible) this.net.setVisible(false);
+      return;
+    }
+    // Redessin du texte (et de sa texture) seulement quand il change.
+    const label = netLabel(n);
+    const color = netQualityColor(n);
+    if (label !== this.netLabel) this.net.setText((this.netLabel = label));
+    if (color !== this.netColor) this.net.setColor((this.netColor = color));
+    if (!this.net.visible) this.net.setVisible(true);
   }
 
   /** Nouvelle partie : oublie l'état affiché de la précédente. */

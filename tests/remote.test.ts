@@ -6,7 +6,8 @@ import { EventGate, HIT_MATCH_TICKS, PREDICTED_TYPES } from '../client/net/event
 import { RemoteSource, SNAP_INTERVAL_MS } from '../client/net/remoteSource';
 import type { Transport } from '../client/net/transport';
 import { BTN } from '../shared/input';
-import { decodeSnapshot, encodeSnapshot, type SnapshotWire } from '../shared/net/codec';
+import { decodeSnapshot, encodeSnapshot, SELF_KEYS, type SnapshotWire } from '../shared/net/codec';
+import { spawnEnemy } from '../shared/enemy';
 import { PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../shared/net/protocol';
 import { makeSnapshot } from '../shared/net/snapshot';
 import type { GameEvent, World } from '../shared/types';
@@ -476,6 +477,176 @@ const now = (): number => clock;
   check('… non fermé : le client reprend avec les instantanés valides suivants', notRecovered.length === 0, notRecovered.join(' ; '));
   if (nan.length) console.log(`· NOTE : appliqués sans fermeture, avec des positions NaN : ${nan.join(' ; ')}`);
   console.log(`· comportements : ${behaviour.join(' | ')}`);
+}
+
+// QA 2. Décodage protégé : positions non finies dans les tuples des autres joueurs, ennemis,
+// projectiles et orbes ; joueur local mal formé.
+// Attendu : l'entité mal formée disparaît (aucun NaN affiché, même en extrapolation), le client
+// reprend avec les instantanés valides ; un `self` mal formé ferme la connexion une seule fois.
+{
+  const server = createWorld(SEED + 9, { mode: 'coop' });
+  server.spawnTimer = 1e9;
+  const me = addPlayer(server, 'Q', { color: 1 });
+  const other = addPlayer(server, 'R', { color: 2 });
+  run(server, 60, () => 0);
+  const addEntities = (): void => {
+    if (!server.enemies.length) spawnEnemy(server, 'ashigaru', me.x + 200, me.y, false);
+    if (!server.projectiles.length)
+      server.projectiles.push({ id: server.nextId++, kind: 'arrow', x: me.x + 300, y: me.y - 20, vx: -200, vy: 0, owner: 'enemy', ownerId: 0, damage: 1, life: 1e6, hits: [], dead: false });
+    if (!server.orbs.length) server.orbs.push({ id: server.nextId++, x: me.x + 120, y: me.y - 30, vx: 40, vy: 0, value: 1, life: 1e6, lost: false, onGround: false });
+  };
+  addEntities();
+  const good = wire(makeSnapshot(server, me.id, [], 3)) as unknown as unknown[][];
+  run(server, 3, () => 0);
+  addEntities();
+  const next = wire(makeSnapshot(server, me.id, [], 4)) as unknown as unknown[][];
+  check('instantané de base : autres joueurs, ennemis, projectiles et orbes présents', [7, 8, 9, 10].every((k) => next[k].length > 0), [7, 8, 9, 10].map((k) => next[k].length).join('/'));
+  /** Copie de `next` dont le champ `field` du premier tuple de la liste `list` vaut `val`. */
+  const patch = (list: number, field: number, val: unknown): unknown[] => {
+    const v = next.map((x) => (Array.isArray(x) ? x.map((y) => (Array.isArray(y) ? y.slice() : y)) : x));
+    (v[list][0] as unknown[])[field] = val;
+    return v;
+  };
+  const entities = (w: World) => [...w.players, ...w.enemies, ...w.projectiles, ...w.orbs];
+  const allFinite = (w: World): boolean => entities(w).every((o) => Number.isFinite(o.x) && Number.isFinite(o.y));
+  const velFinite = (w: World): boolean => entities(w).every((o) => Number.isFinite(o.vx) && Number.isFinite(o.vy));
+  const boot = (): { t: FakeTransport; src: RemoteSource; closes: string[] } => {
+    const t = new FakeTransport();
+    const src = new RemoteSource(t, { now });
+    const closes: string[] = [];
+    src.onClose((r) => closes.push(r));
+    t.welcomeCb!(wire<WelcomeMsg>(hello(me.id, SEED + 9, server.level.stage, server.tick - 3, 1)));
+    src.receive(good as unknown as SnapshotWire);
+    clock += 1000 / 60;
+    src.advance(1 / 60, () => 0, () => undefined);
+    return { t, src, closes };
+  };
+  // Liste, champ x, champ y, champ vx de chaque type de tuple.
+  const LISTS: [string, number, number, number, number][] = [
+    ['autre joueur', 7, 3, 4, 5],
+    ['ennemi', 8, 2, 3, 4],
+    ['projectile', 9, 2, 3, 4],
+    ['orbe', 10, 1, 2, 3],
+  ];
+  const BAD: [string, unknown][] = [['NaN', NaN], ['Infinity', Infinity], ['-Infinity', -Infinity], ['chaîne', 'abc']];
+  const entityVariants: [string, unknown[], number, number, boolean][] = [];
+  for (const [name, list, fx, fy, fvx] of LISTS) {
+    const id = (next[list][0] as number[])[0];
+    for (const [bn, bv] of BAD) {
+      entityVariants.push([`${name}, x = ${bn}`, patch(list, fx, bv), list, id, true]);
+      entityVariants.push([`${name}, y = ${bn}`, patch(list, fy, bv), list, id, true]);
+    }
+    entityVariants.push([`${name}, vx = NaN`, patch(list, fvx, NaN), list, id, false]);
+    entityVariants.push([`${name}, vy = Infinity`, patch(list, fvx + 1, Infinity), list, id, false]);
+  }
+  const notGone: string[] = [];
+  const shownNaN: string[] = [];
+  const velNaN: string[] = [];
+  const decodedVelNaN: string[] = [];
+  const errs: string[] = [];
+  const closedWrongly: string[] = [];
+  const notRecovered: string[] = [];
+  const msgpackOk: string[] = [];
+  for (const [name, v, list, id, pos] of entityVariants) {
+    // 1. Décodage seul (après passage par msgpack) : l'entité mal formée est retirée, les autres gardées.
+    try {
+      const snap = decodeSnapshot(wire(v) as unknown as SnapshotWire);
+      const lists = { 7: snap.others, 8: snap.enemies, 9: snap.projectiles, 10: snap.orbs } as Record<number, { id: number; vx: number; vy: number }[]>;
+      if (pos) {
+        if (lists[list].some((e) => e.id === id)) notGone.push(name);
+        if (lists[list].length !== next[list].length - 1) notGone.push(`${name} (autres entités de la liste perdues)`);
+      } else if (lists[list].some((e) => e.id === id && !(Number.isFinite(e.vx) && Number.isFinite(e.vy)))) decodedVelNaN.push(name);
+      msgpackOk.push(name);
+    } catch (x) {
+      errs.push(`${name} → decode : ${String((x as Error)?.message ?? x).slice(0, 60)}`);
+    }
+    // 2. Source distante : jamais de NaN affiché pendant l'extrapolation qui suit, puis reprise.
+    const { src, closes } = boot();
+    try {
+      src.receive(wire(v) as unknown as SnapshotWire);
+      for (let i = 0; i < 30; i++) {
+        clock += 1000 / 60;
+        src.advance(1 / 60, () => BTN.RIGHT, () => undefined);
+        if (!allFinite(src.world)) {
+          shownNaN.push(name);
+          break;
+        }
+        if (!velFinite(src.world) && !velNaN.includes(name)) velNaN.push(name);
+      }
+      if (src.closed || closes.length) closedWrongly.push(name);
+      for (let i = 0; i < 10; i++) {
+        run(server, 3, () => 0);
+        addEntities();
+        src.receive(wire(makeSnapshot(server, me.id, [], 5 + i)));
+        clock += 50;
+        src.advance(0.05, () => 0, () => undefined);
+      }
+      clock += 500;
+      src.advance(0.5, () => 0, () => undefined);
+      const w = src.world;
+      const ok = allFinite(w) && w.players.length === 2 && w.players.some((p) => p.id === other.id) && w.enemies.length > 0 && w.projectiles.length > 0 && w.orbs.length > 0;
+      if (!ok) notRecovered.push(name);
+    } catch (x) {
+      errs.push(`${name} → ${String((x as Error)?.message ?? x).slice(0, 60)}`);
+    }
+  }
+  check(`tuples à position non finie (${entityVariants.length} variantes) : aucune exception`, errs.length === 0, errs.slice(0, 4).join(' ; '));
+  check('… position non finie : l’entité disparaît de l’instantané décodé, les autres restent', notGone.length === 0, notGone.join(' ; '));
+  check('… aucune position NaN ni Infinity dans le monde affiché (30 images, extrapolation comprise)', shownNaN.length === 0, shownNaN.join(' ; '));
+  check('… vitesse non finie : entité écartée ou vitesse rendue finie au décodage', decodedVelNaN.length === 0, decodedVelNaN.join(' ; '));
+  check('… aucune vitesse NaN ni Infinity dans le monde affiché', velNaN.length === 0, velNaN.join(' ; '));
+  check('… la connexion n’est pas fermée pour une entité mal formée', closedWrongly.length === 0, closedWrongly.join(' ; '));
+  check('… le client reprend normalement avec les instantanés valides suivants', notRecovered.length === 0, notRecovered.join(' ; '));
+
+  // Joueur local mal formé : connexion fermée une seule fois, avec un message lisible ; plus rien ensuite.
+  const hl = SELF_KEYS.indexOf('hitList');
+  const selfVariants: [string, number, unknown][] = [
+    ['x = NaN', 2, NaN], ['x = Infinity', 2, Infinity], ['y = -Infinity', 3, -Infinity], ['y = chaîne', 3, 'abc'],
+    ['vx = NaN', 4, NaN], ['vy = Infinity', 5, Infinity], ['hitList absent', hl, undefined], ['hitList = chaîne', hl, 'x'], ['hitList = objet', hl, {}],
+  ];
+  const selfBad: string[] = [];
+  for (const [name, field, val] of selfVariants) {
+    const v = next.slice();
+    const self = (next[6] as unknown[]).slice();
+    self[field] = val;
+    v[6] = self;
+    const { t, src, closes } = boot();
+    let err = '';
+    let after = 0;
+    try {
+      src.receive(v as unknown as SnapshotWire);
+      src.receive(v as unknown as SnapshotWire); // répété : toujours une seule fermeture
+      for (let i = 0; i < 5; i++) {
+        run(server, 3, () => 0);
+        src.receive(wire(makeSnapshot(server, me.id, [], 20 + i)));
+        clock += 50;
+        after += src.advance(0.05, () => BTN.RIGHT, () => undefined).length;
+      }
+    } catch (x) {
+      err = String((x as Error)?.message ?? x).slice(0, 60);
+    }
+    const sent = t.inputs.length;
+    clock += 50;
+    src.advance(0.05, () => BTN.RIGHT, () => undefined);
+    const ok = !err && closes.length === 1 && src.closed === closes[0] && /reload/i.test(closes[0]) && after === 0 && t.inputs.length === sent && allFinite(src.world);
+    if (!ok) selfBad.push(`${name} : ${err || `${closes.length} fermeture(s), ${after} événement(s) ensuite`}`);
+  }
+  check(`self mal formé (${selfVariants.length} variantes) : connexion fermée une seule fois, message lisible, plus rien ensuite`, selfBad.length === 0, selfBad.join(' ; '));
+
+  // Cas limites signalés (non bloquants) : champ de position absent (null) ou tuple de projectile sans `hits`.
+  const notes: string[] = [];
+  {
+    const s = decodeSnapshot(wire(patch(8, 2, null)) as unknown as SnapshotWire);
+    const e = s.enemies.find((q) => q.id === (next[8][0] as number[])[0]);
+    if (e) notes.push(`ennemi x = null accepté en x = ${e.x}`);
+    const v = patch(9, 10, undefined);
+    try {
+      decodeSnapshot(v as unknown as SnapshotWire);
+    } catch {
+      notes.push('projectile sans liste `hits` : tout l’instantané est illisible (connexion fermée)');
+    }
+  }
+  if (notes.length) console.log(`· NOTE décodage : ${notes.join(' ; ')}`);
 }
 
 if (failures) {

@@ -2,6 +2,7 @@
 // Lancer : npm run test:policy
 import { isMine, shakeFor, SLAM_FULL_PX, SLAM_NONE_PX } from '../client/fx/eventPolicy';
 import { HoldTrigger } from '../client/input/hold';
+import { NET_UNKNOWN_COLOR, netLabel, netQualityColor } from '../client/ui/netQuality';
 import type { GameEvent } from '../shared/types';
 
 export {};
@@ -59,6 +60,39 @@ check('événements sans tremblement', shakeFor({ type: 'jump', x: 0, y: 0, doub
   g.update(false, 600);
   check('maintien interrompu : le compte repart de zéro', !g.update(true, 700) && !g.update(true, 1600) && g.update(true, 1700));
   check('progression bornée', g.progress(1800) === 0 && new HoldTrigger(1000).progress(0) === 0);
+}
+
+// 5. Qualité de connexion affichée.
+{
+  const good = netQualityColor({ rtt: 40, jitter: 10 });
+  const fair = netQualityColor({ rtt: 150, jitter: 20 });
+  const jittery = netQualityColor({ rtt: 40, jitter: 70 });
+  const poor = netQualityColor({ rtt: 320, jitter: 10 });
+  check('qualité : bonne, moyenne, mauvaise selon latence et gigue', good !== fair && fair !== poor && good !== poor && jittery === fair);
+}
+
+// 6. Qualité de connexion : seuils aux bornes exactes, valeurs nulles, négatives ou non finies (QA).
+{
+  const GOOD = netQualityColor({ rtt: 40, jitter: 10 });
+  const FAIR = netQualityColor({ rtt: 150, jitter: 20 });
+  const POOR = netQualityColor({ rtt: 320, jitter: 10 });
+  const q = (rtt: number, jitter: number): string => {
+    const c = netQualityColor({ rtt, jitter });
+    return c === GOOD ? 'bonne' : c === FAIR ? 'moyenne' : c === POOR ? 'mauvaise' : c === NET_UNKNOWN_COLOR ? 'inconnue' : c;
+  };
+  const cases: [number, number, string][] = [
+    [100, 40, 'bonne'], [100.001, 40, 'moyenne'], [100, 40.001, 'moyenne'], [1, 0, 'bonne'],
+    [200, 90, 'moyenne'], [200.001, 0, 'mauvaise'], [150, 90.001, 'mauvaise'], [40, 1000, 'mauvaise'],
+    [0, 0, 'inconnue'], [0, 500, 'inconnue'], [-5, 0, 'inconnue'], [NaN, 0, 'inconnue'],
+    [50, NaN, 'bonne'], [50, -10, 'bonne'], [Infinity, 0, 'mauvaise'], [250, NaN, 'mauvaise'],
+  ];
+  const bad = cases.filter(([r, j, want]) => q(r, j) !== want).map(([r, j, want]) => `(${r}, ${j}) → ${q(r, j)}, attendu ${want}`);
+  check('qualité : quatre couleurs distinctes', new Set([GOOD, FAIR, POOR, NET_UNKNOWN_COLOR]).size === 4);
+  check('qualité : bornes exactes, 0, négatifs et NaN', bad.length === 0, bad.join(' ; '));
+  if (q(50, Infinity) === 'bonne') console.log('· NOTE : une gigue infinie est traitée comme nulle (qualité « bonne »)');
+  const labels: [number, string][] = [[0, '… ms'], [-3, '… ms'], [NaN, '… ms'], [0.4, '0 ms'], [99.5, '100 ms'], [304.2, '304 ms']];
+  const lbad = labels.filter(([r, want]) => netLabel({ rtt: r, jitter: 0, players: 3 }) !== `3 ronin · ● ${want}`).map(([r]) => `${r} → « ${netLabel({ rtt: r, jitter: 0, players: 3 })} »`);
+  check('libellé : « … ms » sans mesure (0, négatif, NaN), arrondi sinon', lbad.length === 0, lbad.join(' ; '));
 }
 
 if (failures) {

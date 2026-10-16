@@ -621,6 +621,8 @@ export class GameScene extends Phaser.Scene {
     }
     this.orbStreakT -= dt;
     if (this.orbStreakT <= 0) this.orbStreak = 0;
+    const src = this.src;
+    this.hud.setNet(src instanceof RemoteSource ? { rtt: src.rtt, jitter: src.jitterMs, players: w.players.length } : null);
     this.hud.update(this.me, w, this.best, dt, time, this.worldCam);
     this.updateMusic();
 
