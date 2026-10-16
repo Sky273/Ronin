@@ -5,7 +5,7 @@ import { createEnemy, findGround } from '../shared/enemy';
 import { TILE as TILE_PX } from '../shared/constants';
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
-import type { Enemy, GameEvent, Player, World } from '../shared/types';
+import type { Duel, DuelInvite, Enemy, GameEvent, Player, World } from '../shared/types';
 import { addPlayer, createWorld, nextStage, spawnEnemy, stepWorld, warpToArena } from '../shared/world';
 import { type BenchClient, NetBench, percentile } from './net/harness';
 
@@ -412,6 +412,54 @@ function directSetup(seed: number): { w: World; p: Player; pred: Predictor; ctx:
   bench.run(1500, (i) => (i === 1 ? BTN.RIGHT : 0), still);
   const pb = lb.px.filter((_, i) => !lb.snapped[i]);
   check('kekkai prédit : un joueur de dehors y entre, correction max < 4 px', sb.x - sb.w / 2 > limit && Math.max(0, ...pb) < 4, `x=${(sb.x / TILE_PX).toFixed(1)} max ${Math.max(0, ...pb).toFixed(2)} px`);
+}
+
+// 8. Duels dans le contexte : copiés en profondeur dans le monde jetable, original jamais modifié ;
+// sans duel, la prédiction est identique. Duel entre deux autres joueurs (98 et 99) : le joueur
+// local n'y prend pas part, le test reste valable une fois stepDuelist branché dans stepPlayer.
+{
+  const { w, p, pred, ctx } = directSetup(31);
+  const twin = new Predictor(p.id);
+  /** Objet gelé en profondeur, dont les lectures sont comptées (preuve que la copie a eu lieu). */
+  let reads = 0;
+  const watch = <T extends object>(o: T): T => {
+    for (const v of Object.values(o)) if (v && typeof v === 'object') watch(v as object);
+    Object.freeze(o);
+    return new Proxy(o, { get: (t, k, r) => (reads++, Reflect.get(t, k, r)) });
+  };
+  const duel: Duel = {
+    id: 7, a: { pid: 98, wins: 0, strikeT: -1, parryT: -1, foul: false, react: -1 },
+    b: { pid: 99, wins: 1, strikeT: -1, parryT: -1, foul: false, react: -1 },
+    x: p.x, y: p.y, gap: 96, phase: 'kamae', t: 12, round: 2, played: 1, sigTick: w.tick + 40,
+    stage: w.level.stage, last: -1, winner: -1, firstTo: 2, maxRounds: 5, draw: true,
+  };
+  const invite: DuelInvite = { from: 99, to: 98, until: w.tick + 300, cd: false };
+  const before = JSON.stringify([duel, invite]);
+  const duels = watch([{ ...duel, a: { ...duel.a }, b: { ...duel.b } }]);
+  const invites = watch([{ ...invite }]);
+  const withDuel = (): PredictionContext => ({ ...ctx(), duels, duelInvites: invites });
+  pred.reconcile(clonePlayer(p), 0, withDuel(), () => []);
+  twin.reconcile(clonePlayer(p), 0, ctx(), () => []);
+  let threw = false;
+  let same = true;
+  try {
+    for (let s = 1; s <= 40; s++) {
+      const b = s < 20 ? BTN.RIGHT : s < 30 ? BTN.IAI : s % 3 === 0 ? BTN.PARRY : 0;
+      pred.step(s, b, 0, [], withDuel());
+      twin.step(s, b, 0, [], ctx());
+      if (s % 10 === 0) {
+        // Le serveur acquitte la moitié : rejeu des entrées en attente, avec et sans duel.
+        pred.reconcile(clonePlayer(p), s - 5, withDuel(), () => []);
+        twin.reconcile(clonePlayer(p), s - 5, ctx(), () => []);
+      }
+      if (JSON.stringify(pred.predicted) !== JSON.stringify(twin.predicted)) same = false;
+    }
+  } catch {
+    threw = true; // une écriture sur l'original gelé lèverait une erreur (mode strict)
+  }
+  check('duel du contexte copié dans le monde jetable (lu à chaque pas)', reads > 0 && !threw, `${reads} lectures`);
+  check('duel et défi originaux inchangés après step et reconcile', JSON.stringify([duels[0], invites[0]]) === before);
+  check('duel d’autres joueurs dans le contexte : prédiction identique à celle sans duel', same && pred.pending.length === twin.pending.length);
 }
 
 if (failures) {

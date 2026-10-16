@@ -130,6 +130,14 @@ export interface BenchMetrics {
   frames: number;
 }
 
+/** Lien d'un client : mêmes réglages dans les deux sens, ou réglages par sens (montant, descendant). */
+export type ClientLink = Partial<LinkOptions> | { up?: Partial<LinkOptions>; down?: Partial<LinkOptions> };
+
+/** Le réglage est-il donné par sens ? */
+function perDirection(l: ClientLink): l is { up?: Partial<LinkOptions>; down?: Partial<LinkOptions> } {
+  return 'up' in l || 'down' in l;
+}
+
 /** Serveur + clients sur horloge virtuelle. */
 export class NetBench {
   readonly clock = new VirtualClock();
@@ -138,6 +146,8 @@ export class NetBench {
   readonly metrics: BenchMetrics = { snapBytes: [], frames: 0 };
   private stepsSinceSnap = 0;
   private linkSeed: number;
+  /** Dernière séquence envoyée en rafale, par joueur. */
+  private burstSeq = new Map<number, number>();
   readonly frameMs: number;
 
   constructor(private opts: BenchOptions = {}) {
@@ -146,16 +156,67 @@ export class NetBench {
     this.frameMs = opts.frameMs ?? 1000 / 60;
   }
 
-  /** Ajoute un client : arrivée dans la session, accueil envoyé par le lien descendant. */
-  addClient(name: string): BenchClient {
-    const link = (): VirtualLink => new VirtualLink(this.clock, { lagMs: this.opts.lagMs ?? 0, jitterMs: this.opts.jitterMs ?? 0, seed: this.linkSeed++ });
+  /**
+   * Ajoute un client : arrivée dans la session, accueil envoyé par le lien descendant.
+   * `link` : latence et gigue de ce client (les deux sens, ou `{ up, down }` par sens) ;
+   * les valeurs absentes sont celles du banc.
+   */
+  addClient(name: string, link: ClientLink = {}): BenchClient {
+    const upOpts = perDirection(link) ? link.up ?? {} : link;
+    const downOpts = perDirection(link) ? link.down ?? {} : link;
+    const make = (o: Partial<LinkOptions>): VirtualLink =>
+      new VirtualLink(this.clock, {
+        lagMs: o.lagMs ?? this.opts.lagMs ?? 0,
+        jitterMs: o.jitterMs ?? this.opts.jitterMs ?? 0,
+        seed: o.seed ?? this.linkSeed++,
+      });
     const { pid } = this.session.join(name);
-    const transport = new LinkTransport(this.clock, link(), link(), (m) => this.session.pushInput(pid, m));
+    const transport = new LinkTransport(this.clock, make(upOpts), make(downOpts), (m) => this.session.pushInput(pid, m));
     const src = new RemoteSource(transport, { now: this.clock.now });
     const c: BenchClient = { pid, src, transport, lastButtons: 0 };
     this.clients.push(c);
     transport.deliverWelcome(this.session.welcomeFor(pid));
     return c;
+  }
+
+  /** Tick prédit du client : tick de consommation serveur de sa prochaine entrée (équité des duels). */
+  predictedTick(c: BenchClient): number {
+    return c.src.predictor.tick;
+  }
+
+  /**
+   * Rafale (test anti-triche) : pousse d'un coup plusieurs entrées dans le lien montant du client,
+   * hors de sa source. Un nombre devient `{ s, b, v }` avec la séquence suivante et `v` = tick de rendu
+   * courant du client (sauf `v` donné) ; un `InputMsg` est envoyé tel quel.
+   * Attention : le serveur ignore ensuite les entrées de la source dont la séquence n'est pas plus grande.
+   * Renvoie les messages envoyés.
+   */
+  burst(c: BenchClient, inputs: readonly (number | InputMsg)[], v?: number): InputMsg[] {
+    const out: InputMsg[] = [];
+    const view = v ?? Math.max(0, Math.floor(c.src.interp.renderTick(this.clock.t)));
+    let s = Math.max(c.src.inputSeq, this.burstSeq.get(c.pid) ?? 0);
+    for (const x of inputs) {
+      const msg: InputMsg = typeof x === 'number' ? { s: ++s, b: x, v: view } : x;
+      if (typeof x !== 'number') s = Math.max(s, x.s);
+      out.push(msg);
+      c.transport.up.send(msg, (m) => this.session.pushInput(c.pid, m as InputMsg));
+    }
+    this.burstSeq.set(c.pid, s);
+    return out;
+  }
+
+  /**
+   * Appelle `cb(tick)` après chaque pas du serveur, avec le tick qui vient d'être simulé (celui où
+   * les entrées ont été consommées, avant w.tick++). Observation seule : le serveur n'est pas modifié.
+   */
+  onServerStep(cb: (tick: number) => void): void {
+    const s = this.session as unknown as { step(): void };
+    const orig = s.step.bind(this.session);
+    s.step = () => {
+      const t = this.session.world.tick;
+      orig();
+      cb(t);
+    };
   }
 
   /** Joueur du serveur (état de référence). */

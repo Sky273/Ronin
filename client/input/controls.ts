@@ -24,6 +24,7 @@ const KEYMAP: Record<string, number> = {
   Numpad1: BTN.PICK1,
   Numpad2: BTN.PICK2,
   Numpad3: BTN.PICK3,
+  KeyG: BTN.DUEL,
 };
 
 const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F7', 'Escape', 'Backspace', 'Tab']);
@@ -148,6 +149,7 @@ function gamepadButtons(): number {
     if (btn(1) || btn(7)) b |= BTN.DASH;
     if (btn(3)) b |= BTN.IAI;
     if (btn(4) || btn(5) || btn(6)) b |= BTN.PARRY;
+    if (btn(11)) b |= BTN.DUEL; // R3 (clic du stick droit) : défier, accepter, tenir pour abandonner
   }
   return b;
 }

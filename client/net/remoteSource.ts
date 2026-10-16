@@ -220,7 +220,8 @@ export class RemoteSource implements WorldSource {
       this.lastT = snap.t;
       // Le niveau, l'étape et la barrière suivent le serveur (les entités sont remplacées plus bas).
       if (applySnapshot(this.w, snap).stageChanged) this.stageDirty = true;
-      this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t };
+      // Duels et défis de l'instantané : le duelliste local est prédit (garde, départ de l'iai).
+      this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t, duels: snap.duels, duelInvites: snap.invites };
       this.interp.push(snap, at);
       this.predictor.reconcile(snap.self, snap.ack, this.ctx, (v) => this.interp.enemiesAt(v));
       this.lastAck = snap.ack;
@@ -267,6 +268,8 @@ export class RemoteSource implements WorldSource {
     w.enemies = s.enemies;
     w.projectiles = s.projectiles;
     w.orbs = s.orbs;
+    // w.duels et w.duelInvites restent ceux du dernier instantané (posés par applySnapshot) ; ils
+    // sont lus au tick prédit w.tick, qui est le tick de consommation serveur des entrées (équité du 斬).
   }
 
   /** En ligne, les positions affichées sont déjà lissées : pas d'interpolation supplémentaire dans la scène. */
