@@ -483,7 +483,9 @@ function boss(c: Ctx): void {
         e.hornStage++;
         w.events.push({ type: 'horn', x: e.x, y: e.y - e.h });
         for (const side of [-1, 1, -1].slice(0, BOSS.HORN_ADDS)) {
-          const x = clamp(e.x + side * (150 + w.rng.next() * 80), 3 * TILE, (w.level.w - 3) * TILE);
+          // Coop : les renforts du cor restent dans l'arène (le kekkai ne laisse pas entrer les ennemis du dehors).
+          const minX = w.mode === 'coop' ? (w.level.arena.col + 2) * TILE : 3 * TILE;
+          const x = clamp(e.x + side * (150 + w.rng.next() * 80), minX, (w.level.w - 3) * TILE);
           const gy = findGround(w.level, x, e.y);
           if (gy !== null) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpScale(w));
         }

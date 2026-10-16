@@ -1,14 +1,15 @@
 // Tests des règles du mode coopératif (simulation, sans réseau).
 // Lancer : npm run test:coop
-import { COOP, COOP_CLEARED_TICKS, ENEMY, TILE } from '../shared/constants';
+import { COOP, COOP_CLEARED_TICKS, ENEMY, PLAYER, TICK_RATE, TILE } from '../shared/constants';
 import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
 import { BTN } from '../shared/input';
 import { damagePlayer, doomEnemy, killEnemy, takeToken } from '../shared/interactions';
 import { Rng } from '../shared/math';
 import type { GameEvent, Player, World } from '../shared/types';
-import type { DifficultyId } from '../shared/difficulty';
+import { clearBonus, type DifficultyId, guardianHpScale } from '../shared/difficulty';
+import { emptyUpgrades } from '../shared/upgrades';
 import { T_KEKKAI } from '../shared/level';
-import { addPlayer, createWorld, nextStage, removePlayer, stepWorld, warpToArena } from '../shared/world';
+import { addPlayer, createWorld, nextStage, removePlayer, resetWorld, stepWorld, warpToArena } from '../shared/world';
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -268,14 +269,80 @@ function nonFinite(w: World): string[] {
   check('bilan : étape suivante sans appui', stateOf(w) === 'playing' && w.level.stage === 1 && evs.some((ev) => ev.type === 'stageStart'), `état=${stateOf(w)} étape=${w.level.stage}`);
   check('nouvelle étape : sanctuaire commun remis à 0', w.shrine === 0 && w.players.every((p) => p.checkpoint === 0));
 
-  // L'appui d'un joueur reste possible après 90 ticks.
-  const w2 = createWorld(1234, { mode: 'coop' });
-  addPlayer(w2, 'A');
-  w2.stage.state = 'cleared';
-  w2.stage.t = 0;
-  run(w2, 95);
-  run(w2, 1, () => BTN.JUMP);
-  check('bilan : un appui fait repartir avant le délai', stateOf(w2) === 'playing' && w2.level.stage === 1);
+  /** Monde coop de n joueurs placé directement au bilan (st.t = 0). */
+  const atClear = (n: number) => {
+    const w = createWorld(1234, { mode: 'coop' });
+    const ps = Array.from({ length: n }, (_, i) => addPlayer(w, `p${i}`));
+    w.stage.state = 'cleared';
+    w.stage.t = 0;
+    return { w, ps };
+  };
+  /** Un tick où seuls les joueurs listés appuient sur JUMP. */
+  const press = (w: World, who: Player[]) => run(w, 1, (_t, id) => (who.some((p) => p.id === id) ? BTN.JUMP : 0));
+
+  // Seul : son appui suffit (après 90 ticks).
+  {
+    const { w } = atClear(1);
+    run(w, 95);
+    run(w, 1, () => BTN.JUMP);
+    check('bilan : un appui fait repartir avant le délai', stateOf(w) === 'playing' && w.level.stage === 1);
+  }
+  // À 4 joueurs : il faut une majorité stricte (3 votes).
+  {
+    const { w, ps } = atClear(4);
+    run(w, 95);
+    press(w, [ps[0]]);
+    const after1 = stateOf(w);
+    const ready0 = w.stage.byPlayer?.[ps[0].id]?.ready === true;
+    press(w, [ps[0], ps[1]]);
+    const after2 = stateOf(w);
+    const evs = press(w, [ps[0], ps[1], ps[2]]);
+    check('bilan à 4 : 1 vote ne suffit pas (et il est enregistré)', after1 === 'cleared' && ready0, after1);
+    check('bilan à 4 : 2 votes ne suffisent pas', after2 === 'cleared', after2);
+    check('bilan à 4 : le 3e vote fait passer au tick même', stateOf(w) === 'playing' && w.level.stage === 1 && evs.some((ev) => ev.type === 'stageStart'));
+  }
+  // À 4 joueurs, le vote est définitif : relâcher puis rappuyer ne l'annule pas.
+  {
+    const { w, ps } = atClear(4);
+    run(w, 95);
+    press(w, [ps[0]]);
+    run(w, 3);
+    press(w, [ps[1]]);
+    run(w, 3);
+    press(w, [ps[2]]);
+    check('bilan à 4 : votes successifs cumulés (non annulés)', stateOf(w) === 'playing');
+  }
+  // Un appui avant t = 90 est ignoré (front montant seulement : le tenir ensuite ne compte pas).
+  {
+    const { w, ps } = atClear(1);
+    run(w, 50);
+    run(w, 70, () => BTN.JUMP); // appui à t = 51, tenu jusqu'à t = 120
+    check('bilan : un appui avant 90 ticks est ignoré', stateOf(w) === 'cleared' && w.stage.byPlayer?.[ps[0].id]?.ready === false, `t=${w.stage.t}`);
+    run(w, 1);
+    press(w, ps);
+    check('bilan : un nouvel appui après 90 ticks fait repartir', stateOf(w) === 'playing');
+  }
+  // Sans appui : passage à 480 ticks exactement.
+  {
+    const { w } = atClear(3);
+    run(w, COOP_CLEARED_TICKS - 1);
+    const before = stateOf(w);
+    run(w, 1);
+    check('bilan sans appui : encore affiché à 479, passage à 480', before === 'cleared' && stateOf(w) === 'playing', `${before} → ${stateOf(w)}`);
+  }
+  // Un arrivant pendant le bilan compte dans les joueurs présents.
+  {
+    const { w, ps } = atClear(2);
+    run(w, 95);
+    press(w, [ps[0]]);
+    const c = addPlayer(w, 'C');
+    const d = addPlayer(w, 'D');
+    press(w, [ps[0], ps[1]]);
+    const with4 = stateOf(w);
+    check('bilan : un arrivant a sa fiche (non prêt)', w.stage.byPlayer?.[c.id]?.ready === false);
+    press(w, [ps[0], ps[1], d]);
+    check('bilan : les arrivants comptent (2 votes sur 4 ne suffisent pas, 3 oui)', with4 === 'cleared' && stateOf(w) === 'playing', with4);
+  }
 }
 
 // ─── 6. Aucun renfort n'apparaît à moins de 700 px d'un joueur vivant ───────
@@ -302,6 +369,9 @@ function nonFinite(w: World): string[] {
     for (const e of w.enemies) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
+      // Le gardien (PV × 2,5 à 4 joueurs) est ramené à ses PV de base : ce test porte sur les
+      // renforts, il faut que l'arène se termine pour que la horde reprenne à l'étape suivante.
+      if (e.type === 'boss') e.hp = e.maxHp = Math.round(e.maxHp / (1 + COOP.GUARDIAN_HP_PER_PLAYER * (w.players.length - 1)));
       if (!e.horde) continue;
       spawned++;
       const near = w.players.filter((p) => p.state !== 'dead' && Math.abs(p.x - e.x) < COOP.SPAWN_SAFE);
@@ -483,6 +553,17 @@ function nonFinite(w: World): string[] {
   a.y = w.level.gate.y;
   a.vx = 0;
   a.vy = 0;
+  // Chacun a progressé : A (vivant) doit tout garder, B (mort au passage) doit tout perdre.
+  for (const p of [a, b]) {
+    p.up.parry = 2;
+    p.maxHp = 140;
+    p.kills = 7;
+  }
+  b.honor = 900;
+  b.level = 4;
+  b.picks = 2;
+  b.offer = ['parry'];
+  const aUp = JSON.stringify(a.up);
   kill(w, b); // B meurt juste avant la victoire
   for (let i = 0; i < 200 && stateOf(w) !== 'cleared'; i++) run(w, 1, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
   check('bilan atteint (B mort)', stateOf(w) === 'cleared' && pState(b) === 'dead', `${stateOf(w)} ${pState(b)}`);
@@ -503,6 +584,12 @@ function nonFinite(w: World): string[] {
   check('bilan : passage seul malgré un mort et un arrivant', stateOf(w) === 'playing' && L.stage === 1 && evs.filter((ev) => ev.type === 'stageStart').length === 1, `${stateOf(w)} étape=${L.stage}`);
   check('après le bilan : tout le monde au départ, vivant (B compris)', [a, b, c!].every((p) => p.x === L.spawn.x && pState(p) !== 'dead' && p.hp === p.maxHp), [a, b, c!].map((p) => pState(p)).join(','));
   check('après le bilan : aucune valeur non finie', nonFinite(w).length === 0, nonFinite(w).slice(0, 3).join(' ; '));
+  check(
+    'mort au passage d’étape : B repart comme après une renaissance',
+    JSON.stringify(b.up) === JSON.stringify(emptyUpgrades()) && b.honor === 0 && b.level === 0 && b.picks === 0 && b.offer.length === 0 && b.maxHp === PLAYER.MAX_HP && b.hp === PLAYER.MAX_HP && b.kills === 0,
+    `up.parry=${b.up.parry} honneur=${b.honor} niveau=${b.level} picks=${b.picks} offre=${b.offer.length} maxHp=${b.maxHp} kills=${b.kills}`,
+  );
+  check('passage d’étape : A (vivant) garde ses améliorations', JSON.stringify(a.up) === aUp && a.maxHp === 140 && a.hp === 140 && a.kills >= 7, `maxHp=${a.maxHp} kills=${a.kills}`);
 }
 
 // ─── 12. Honneur perdu ramassé par un autre joueur : le repère du mort disparaît ─
@@ -716,6 +803,148 @@ function nonFinite(w: World): string[] {
     run(w, 30, () => BTN.RIGHT);
     check('solo : barrière pleine (T_SOLID), pas de kekkai', stateOf(w) === 'arena' && w.level.tiles[10 * w.level.w + w.level.arena.col] !== T_KEKKAI);
   }
+}
+
+// ─── 16. Statistiques par joueur : la somme des fiches égale les compteurs de l'étape ─
+{
+  const w = createWorld(4242, { mode: 'coop' });
+  const ps = [0, 1, 2, 3].map((i) => addPlayer(w, `p${i}`, { color: i }));
+  ps.forEach((p, i) => place(w, p, w.level.spawn.x + i * 60));
+  const input = scripted(17);
+  let parried = 0;
+  let stage0 = true;
+  for (let t = 0; t < 4000 && stage0; t++) {
+    if (t % 300 === 120) kill(w, ps[t % 4]);
+    // Parade forcée de temps en temps (face à l'attaque, dans la fenêtre).
+    if (t % 400 === 50) {
+      const p = ps[(t / 400) % 4 | 0];
+      if (p.state !== 'dead') {
+        p.state = 'parry';
+        p.stateT = 0;
+        if (damagePlayer(w, p, 10, p.x + p.facing * 20) === 'parried') parried++;
+      }
+    }
+    run(w, 1, input);
+    stage0 = w.level.stage === 0;
+  }
+  const st = w.stage;
+  const by = st.byPlayer ?? {};
+  const sum = (k: 'kills' | 'deaths' | 'parries' | 'honor') => Object.values(by).reduce((s, x) => s + x[k], 0);
+  const info = (['kills', 'deaths', 'parries', 'honor'] as const).map((k) => `${k} ${sum(k)}/${st[k]}`).join(' ');
+  check('S1 : une fiche par joueur présent', Object.keys(by).length === 4 && ps.every((p) => !!by[p.id]));
+  check('S1 : partie significative (éliminations, morts, parades, Honneur)', st.kills > 0 && st.deaths > 0 && parried > 0 && st.honor > 0, info);
+  check('S1 : Σ fiches = compteurs de l\'étape (kills, deaths, parries, honor)', (['kills', 'deaths', 'parries', 'honor'] as const).every((k) => sum(k) === st[k]), info);
+  check('S1 : meilleur combo global = max des fiches', Math.max(...Object.values(by).map((x) => x.bestCombo)) === st.bestCombo, `${st.bestCombo}`);
+}
+
+// ─── 17. Note individuelle, note médiane de la salle et bonus de chacun ─────
+{
+  /** Coop à n joueurs, porte ouverte ; deaths[i] morts pour le joueur i ; renvoie le monde au bilan. */
+  const clearWith = (deaths: number[], slow = false) => {
+    const w = createWorld(1234, { mode: 'coop' });
+    const ps = deaths.map((_, i) => addPlayer(w, `p${i}`));
+    w.enemies = [];
+    w.spawnTimer = 1e9;
+    w.stage.state = 'gateOpen';
+    if (slow) w.stage.startTick = w.tick - 6 * 60 * TICK_RATE;
+    ps.forEach((p, i) => {
+      const s = w.stage.byPlayer![p.id];
+      s.deaths = deaths[i];
+      w.stage.deaths += deaths[i];
+      p.iframes = 1e9;
+    });
+    const a = ps[0];
+    a.x = w.level.gate.x - 60;
+    a.y = w.level.gate.y;
+    a.vx = a.vy = 0;
+    let before = ps.map((p) => [p.honor, p.score]);
+    let evs: GameEvent[] = [];
+    for (let i = 0; i < 200 && stateOf(w) !== 'cleared'; i++) {
+      before = ps.map((p) => [p.honor, p.score]);
+      evs = run(w, 1, (_t, id) => (id === a.id ? BTN.RIGHT : 0));
+    }
+    return { w, ps, before, clear: evs.find((ev) => ev.type === 'stageClear') };
+  };
+  const expected = (d: number, slow: boolean) => (d === 0 && !slow ? 0 : d <= 1 ? 1 : 2);
+  const cases: [number[], boolean, number][] = [
+    [[0, 1, 2], false, 1],
+    [[0, 0, 2, 2], false, 0], // nombre pair : la meilleure des deux notes centrales
+    [[2, 2, 0, 1, 2], false, 2],
+    [[0], false, 0],
+    [[0, 0, 1], true, 1], // plus de 6 min : aucun 優
+  ];
+  for (const [deaths, slow, median] of cases) {
+    const { w, ps, before, clear } = clearWith(deaths, slow);
+    const by = w.stage.byPlayer!;
+    const label = `[${deaths.join(',')}]${slow ? ' lent' : ''}`;
+    check(`S2 ${label} : bilan atteint`, stateOf(w) === 'cleared' && !!clear, stateOf(w));
+    check(`S2 ${label} : note individuelle = formule`, ps.every((p, i) => by[p.id].grade === expected(deaths[i], slow)), ps.map((p) => by[p.id].grade).join(','));
+    check(
+      `S2 ${label} : note de la salle = médiane (st et stageClear)`,
+      w.stage.grade === median && w.stage.bonus === clearBonus(median, 0) && !!clear && clear.type === 'stageClear' && clear.grade === median && clear.bonus === w.stage.bonus,
+      `${w.stage.grade}`,
+    );
+    check(
+      `S3 ${label} : chacun reçoit son bonus, en Honneur et en score`,
+      ps.every((p, i) => {
+        const b = clearBonus(expected(deaths[i], slow), 0);
+        return by[p.id].bonus === b && p.honor - before[i][0] === b && p.score - before[i][1] === b && by[p.id].honor === b;
+      }),
+      ps.map((p, i) => `${p.honor - before[i][0]}/${by[p.id].bonus}`).join(' '),
+    );
+  }
+}
+
+// ─── 18. Points de vie du gardien selon les joueurs présents ────────────────
+{
+  const guardianAt = (n: number, deadOne: boolean) => {
+    const w = createWorld(808, { mode: 'coop' });
+    const ps = Array.from({ length: n }, (_, i) => addPlayer(w, `p${i}`));
+    for (const p of ps) p.iframes = 1e9;
+    if (deadOne && n > 1) kill(w, ps[n - 1]);
+    warpToArena(w, ps[0].id);
+    run(w, 30, (_t, id) => (id === ps[0].id ? BTN.RIGHT : 0));
+    return { w, g: w.enemies.find((e) => e.id === w.stage.guardianId) };
+  };
+  const base = (w: World) => ENEMY.boss.hp * guardianHpScale(w);
+  const one = guardianAt(1, false);
+  check('S6 : à 1 joueur, PV de base du gardien', !!one.g && one.g.maxHp === Math.round(base(one.w)), `${one.g?.maxHp}`);
+  const four = guardianAt(4, true);
+  const want = Math.round(base(four.w) * (1 + 0.5 * 3));
+  check('S6 : à 4 joueurs (un mort compris), PV × 2,5', stateOf(four.w) === 'arena' && !!four.g && four.g.maxHp === want, `${four.g?.maxHp} attendu ${want}`);
+  const hp0 = four.g?.hp;
+  addPlayer(four.w, 'E');
+  run(four.w, 10);
+  check('S6 : un 5e arrivant pendant le combat ne change rien', !!four.g && four.g.maxHp === want && four.g.hp === hp0, `${four.g?.maxHp}`);
+}
+
+// ─── 19. Cycle de vie des fiches ; solo sans fiche ──────────────────────────
+{
+  const w = createWorld(55, { mode: 'coop' });
+  check('S7 : création coop → byPlayer vide', JSON.stringify(w.stage.byPlayer) === '{}');
+  const ps = [0, 1, 2].map((i) => addPlayer(w, `p${i}`));
+  const by0 = w.stage.byPlayer!;
+  for (const p of ps) Object.assign(by0[p.id], { kills: 5, parries: 2, deaths: 1, honor: 40, bestCombo: 9, grade: 0, bonus: 150, ready: true });
+  nextStage(w);
+  const fresh = JSON.stringify({ kills: 0, parries: 0, deaths: 0, honor: 0, bestCombo: 0, grade: 2, bonus: 0, ready: false });
+  const by = w.stage.byPlayer ?? {};
+  check('S7 : après nextStage, une fiche vierge par joueur présent', Object.keys(by).length === 3 && ps.every((p) => JSON.stringify(by[p.id]) === fresh), JSON.stringify(by));
+  removePlayer(w, ps[1].id);
+  check('S7 : removePlayer retire la fiche', !(ps[1].id in by) && Object.keys(by).length === 2);
+  resetWorld(w, 9, { mode: 'coop' });
+  check('S7 : resetWorld coop → byPlayer vide', JSON.stringify(w.stage.byPlayer) === '{}' && w.players.length === 0);
+
+  // Solo : la clé n'existe jamais (création, partie, étape suivante, arrivée, départ).
+  const s = createWorld(77);
+  const a = addPlayer(s, 'solo');
+  let absent = !('byPlayer' in s.stage);
+  run(s, 600, scripted(3), (s) => (absent &&= !('byPlayer' in s.stage)));
+  nextStage(s);
+  absent &&= !('byPlayer' in s.stage);
+  const b = addPlayer(s, 'deux');
+  removePlayer(s, b.id);
+  absent &&= !('byPlayer' in s.stage) && s.players[0] === a;
+  check('solo : byPlayer absent (\'byPlayer\' in w.stage === false)', absent);
 }
 
 if (failures) {

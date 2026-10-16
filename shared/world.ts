@@ -1,14 +1,14 @@
 import { bodyRect } from './combat';
 import { COOP, DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
-import { addScore, damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
+import { addScore, damagePlayer, emptyStageStats, gainHonor, hitEnemy, spawnOrbs } from './interactions';
 import { keepGhost, lagOf, recordHistory, resolveDeferred } from './lagcomp';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
 import { arenaEntrance, createPlayer, stepPlayer } from './player';
 import { buildStage } from './stagebuild';
-import { newStageState, populateStage, stepCleared, stepStage } from './stage';
+import { newStageState, openStageStats, populateStage, stepCleared, stepStage } from './stage';
 import type { Body, Enemy, EnemyType, GameMode, Player, World } from './types';
 import { magnetRadius } from './upgrades';
 
@@ -44,6 +44,7 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
     over: false,
     overT: 0,
   };
+  openStageStats(w); // coop seulement (aucun joueur encore : enregistrement vide)
   populateStage(w);
   return w;
 }
@@ -63,6 +64,7 @@ export function addPlayer(w: World, name: string, opts: { color?: number } = {})
   p.lives = DIFFICULTIES[w.difficulty].lives;
   p.color = opts.color ?? 0;
   if (w.mode === 'coop') placeNewcomer(w, p);
+  if (w.stage.byPlayer) w.stage.byPlayer[p.id] = emptyStageStats();
   w.players.push(p);
   return p;
 }
@@ -90,6 +92,7 @@ function placeNewcomer(w: World, p: Player): void {
  */
 export function removePlayer(w: World, id: number): void {
   w.players = w.players.filter((p) => p.id !== id);
+  if (w.stage.byPlayer) delete w.stage.byPlayer[id];
 }
 
 /** Un pas de simulation (1/60 s). inputs : masque de boutons par id de joueur. */

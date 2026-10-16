@@ -1,10 +1,25 @@
 import { BOSS, COOP, ENEMY, HONOR, honorForLevel, PLAYER as P, SPAWN } from './constants';
 import { DIFFICULTIES, enemyDmgScale, loopScoreMult } from './difficulty';
 import { canFit } from './physics';
-import type { Enemy, Player, World } from './types';
+import type { Enemy, Player, PlayerStageStats, World } from './types';
 import { leechHeal, parryWindow, rollOffer } from './upgrades';
 
 // Résolution des coups échangés entre joueurs et ennemis, et économie d'Honneur.
+
+// ─── Statistiques d'étape par joueur (coop) ─────────────────────────────────
+
+/** Statistiques d'étape vierges d'un joueur (coop). */
+export function emptyStageStats(): PlayerStageStats {
+  return { kills: 0, parries: 0, deaths: 0, honor: 0, bestCombo: 0, grade: 2, bonus: 0, ready: false };
+}
+
+/**
+ * Statistiques d'étape du joueur p, ou undefined en solo (w.stage.byPlayer absent) :
+ * les compteurs par joueur n'existent qu'en coop, l'état solo reste identique.
+ */
+export function stageStatsOf(w: World, p: Player): PlayerStageStats | undefined {
+  return w.stage.byPlayer?.[p.id];
+}
 
 /** Jetons d'attaque : limite le nombre d'ennemis qui frappent en même temps (lisibilité). */
 export function takeToken(w: World, e: Enemy): boolean {
@@ -41,6 +56,8 @@ export function damagePlayer(w: World, p: Player, dmg: number, srcX: number): Da
     p.vx = -srcSide * 120;
     p.hp = Math.min(p.maxHp, p.hp + 6 * p.up.parry);
     w.stage.parries++;
+    const ps = stageStatsOf(w, p);
+    if (ps) ps.parries++;
     w.events.push({ type: 'parry', x: p.x + p.facing * 14, y: p.y - 30, pid: p.id });
     return 'parried';
   }
@@ -76,6 +93,8 @@ function killPlayer(w: World, p: Player): void {
   p.stateT = 0;
   p.respawnT = P.RESPAWN_TICKS;
   w.stage.deaths++;
+  const ps = stageStatsOf(w, p);
+  if (ps) ps.deaths++;
   // Coop : pas de vies, on renaît toujours ; la moitié de l'Honneur tombe au sol.
   if (w.mode === 'coop') {
     const dropped = Math.floor(p.honor * HONOR.DEATH_DROP);
@@ -265,6 +284,8 @@ export function killEnemy(w: World, e: Enemy, p: Player | null, cut: number, byI
   let honor: number = HONOR[e.type];
   if (p) {
     p.kills++;
+    const ps = stageStatsOf(w, p);
+    if (ps) ps.kills++;
     honor = Math.round(honor * (1 + Math.min(20, p.combo) * HONOR.COMBO_BONUS));
     // Un projectile encore en vol après la dernière mort ne compte plus.
     if (!p.out) {
@@ -324,6 +345,8 @@ export function spawnOrbs(w: World, x: number, y: number, total: number, lost: b
 export function gainHonor(w: World, p: Player, v: number): void {
   p.honor += v;
   w.stage.honor += v;
+  const ps = stageStatsOf(w, p);
+  if (ps) ps.honor += v;
   while (p.honor >= honorForLevel(p.level + 1)) {
     p.level++;
     p.picks++;
