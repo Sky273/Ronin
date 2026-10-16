@@ -2,8 +2,8 @@
 // Le niveau n'est jamais transmis : il se reconstruit à partir de la graine et du numéro d'étape.
 import { setBarrier } from '../stage';
 import { buildStage } from '../stagebuild';
-import type { GameEvent, World } from '../types';
-import { encodeSnapshot, type SnapshotWire } from './codec';
+import type { Enemy, GameEvent, Orb, Player, Projectile, World } from '../types';
+import { encodeEnemy, encodeEvent, encodeOrb, encodeOther, encodeProjectile, encodeSnapshotWith, type SnapshotWire, type ViewEncoder } from './codec';
 import { INTEREST_PX, type Snapshot } from './protocol';
 
 const near = (x: number, cx: number) => Math.abs(x - cx) <= INTEREST_PX;
@@ -35,9 +35,53 @@ export function snapshotFor(w: World, viewerId: number, events: GameEvent[], ack
   };
 }
 
-/** Instantané encodé pour le joueur `viewerId` (prêt à être envoyé). */
+/**
+ * Cache des vues encodées d'un monde pour un tick : les vues partagées entre clients (autres joueurs,
+ * ennemis, projectiles, orbes, événements) ne sont encodées qu'une fois par tick, quel que soit le
+ * nombre de destinataires. Clé : l'objet lui-même (un monde serveur ne modifie ses entités qu'en
+ * avançant d'un tick, et son tick ne recule jamais).
+ */
+interface TickCache {
+  tick: number;
+  encoder: ViewEncoder;
+}
+const caches = new WeakMap<World, TickCache>();
+
+/** Encodeur mémoïsé par objet. */
+function memo<T extends object, A extends unknown[]>(fn: (o: T, ...args: A) => unknown): (o: T, ...args: A) => unknown {
+  const m = new Map<T, unknown>();
+  return (o, ...args) => {
+    let r = m.get(o);
+    if (r === undefined) {
+      r = fn(o, ...args);
+      m.set(o, r);
+    }
+    return r;
+  };
+}
+
+function encoderFor(w: World): ViewEncoder {
+  let c = caches.get(w);
+  if (!c || c.tick !== w.tick) {
+    // L'âge des ticks des autres joueurs dépend de t : identique pour tout le tick.
+    c = {
+      tick: w.tick,
+      encoder: {
+        other: memo<Player, [number]>(encodeOther),
+        enemy: memo<Enemy, []>(encodeEnemy),
+        projectile: memo<Projectile, []>(encodeProjectile),
+        orb: memo<Orb, []>(encodeOrb),
+        event: memo<GameEvent, []>(encodeEvent),
+      },
+    };
+    caches.set(w, c);
+  }
+  return c.encoder;
+}
+
+/** Instantané encodé pour le joueur `viewerId` (prêt à être envoyé). Vues partagées en cache par tick. */
 export function makeSnapshot(w: World, viewerId: number, events: GameEvent[], ack: number): SnapshotWire {
-  return encodeSnapshot(snapshotFor(w, viewerId, events, ack));
+  return encodeSnapshotWith(snapshotFor(w, viewerId, events, ack), encoderFor(w));
 }
 
 /**

@@ -51,7 +51,12 @@ function run(w: World, ticks: number, input: (t: number, id: number) => number):
   );
   check('tick, Marée et étape reproduits', client.tick === server.tick && client.wave.phase === server.wave.phase && client.stage.state === server.stage.state && !stageChanged);
   const nearEnemies = server.enemies.filter((e) => Math.abs(e.x - a.x) <= INTEREST_PX);
-  check('ennemis proches reproduits à l’identique', client.enemies.length === nearEnemies.length && client.enemies.every((e, i) => e.id === nearEnemies[i].id && e.x === nearEnemies[i].x && e.hp === nearEnemies[i].hp));
+  // Vues d'ennemis quantifiées par le codec : positions au demi-pixel (erreur ≤ 0,25 px), le reste exact.
+  check(
+    'ennemis proches reproduits (positions à 0,25 px près)',
+    client.enemies.length === nearEnemies.length &&
+      client.enemies.every((e, i) => e.id === nearEnemies[i].id && Math.abs(e.x - nearEnemies[i].x) <= 0.25 && Math.abs(e.y - nearEnemies[i].y) <= 0.25 && e.hp === nearEnemies[i].hp),
+  );
   check('accusé de réception transmis', snap.ack === 399);
 }
 
