@@ -24,7 +24,8 @@ export function populateStage(w: World): void {
   for (const s of w.level.enemySpawns) spawnEnemy(w, s.type, s.x, s.y, false, hp);
 }
 
-function setBarrier(w: World, on: boolean): void {
+/** Pose (on) ou retire la barrière de l'arène dans les tuiles du niveau. */
+export function setBarrier(w: World, on: boolean): void {
   const l = w.level;
   const a = l.arena;
   for (let r = 0; r < a.rows; r++) l.tiles[r * l.w + a.col] = on ? T_SOLID : a.backup[r];
@@ -143,8 +144,8 @@ export function nextStage(w: World): void {
 }
 
 /** Outil de debug : téléporte le joueur à l'entrée de l'arène. */
-export function warpToArena(w: World): void {
-  const p = w.players[0];
+export function warpToArena(w: World, pid?: number): void {
+  const p = pid === undefined ? w.players[0] : w.players.find((q) => q.id === pid);
   if (!p || w.stage.state !== 'playing') return;
   p.x = (w.level.arena.col + 1.5) * TILE;
   p.y = w.level.arena.guardianY;

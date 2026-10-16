@@ -86,6 +86,7 @@ export interface Player extends Body {
   score: number;
   runKills: number; // ennemis tranchés sur toute la partie (kills est remis à zéro à chaque mort)
   out: boolean; // plus de vie : ne renaîtra pas
+  color: number; // index de palette du joueur (0 = vermillon, celui du solo)
   outT: number; // ticks écoulés depuis la sortie
 
   respawnT: number;
@@ -256,6 +257,8 @@ export type GameEvent =
   | { type: 'stageClear'; loop: number; grade: number; bonus: number }
   | { type: 'stageStart'; loop: number };
 
+export type GameMode = 'solo' | 'coop';
+
 export interface World {
   tick: number;
   /** Graine de la partie : détermine aussi les niveaux générés des étapes suivantes. */
@@ -274,6 +277,8 @@ export interface World {
   wave: WaveState;
   stage: StageState;
   difficulty: DifficultyId;
+  /** 'solo' : partie locale historique ; 'coop' : salle en ligne (règles multijoueur). */
+  mode: GameMode;
   /** Partie terminée (tous les joueurs sans vie) : la simulation est figée. */
   over: boolean;
   overT: number; // ticks écoulés depuis que tous les joueurs sont sortis

@@ -8,14 +8,15 @@ import { moveBody, solidAt } from './physics';
 import { createPlayer, stepPlayer } from './player';
 import { buildStage } from './stagebuild';
 import { newStageState, populateStage, stepCleared, stepStage } from './stage';
-import type { Body, Enemy, EnemyType, Player, World } from './types';
+import type { Body, Enemy, EnemyType, GameMode, Player, World } from './types';
 import { magnetRadius } from './upgrades';
 
 export { spawnEnemy };
-export { nextStage, warpToArena } from './stage';
+export { nextStage, setBarrier, warpToArena } from './stage';
 
 export interface WorldOptions {
   difficulty?: DifficultyId;
+  mode?: GameMode;
 }
 
 export function createWorld(seed = 7, opts: WorldOptions = {}): World {
@@ -37,6 +38,7 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
     wave: { n: 0, phase: 'calm', t: 0, kills: 0, quota: 0 },
     stage: newStageState(0, 0),
     difficulty: opts.difficulty ?? 'normal',
+    mode: opts.mode ?? 'solo',
     over: false,
     overT: 0,
   };
@@ -54,11 +56,17 @@ export function resetWorld(w: World, seed: number, opts: WorldOptions = {}): voi
   Object.assign(w, { ...fresh, level: w.level });
 }
 
-export function addPlayer(w: World, name: string): Player {
+export function addPlayer(w: World, name: string, opts: { color?: number } = {}): Player {
   const p = createPlayer(w.nextId++, name, w.level.spawn.x, w.level.spawn.y);
   p.lives = DIFFICULTIES[w.difficulty].lives;
+  p.color = opts.color ?? 0;
   w.players.push(p);
   return p;
+}
+
+/** Retire un joueur (déconnexion). Les références restantes (doomBy, ownerId) se résolvent à vide. */
+export function removePlayer(w: World, id: number): void {
+  w.players = w.players.filter((p) => p.id !== id);
 }
 
 /** Un pas de simulation (1/60 s). inputs : masque de boutons par id de joueur. */

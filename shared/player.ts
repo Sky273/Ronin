@@ -22,7 +22,7 @@ export function createPlayer(id: number, name: string, x: number, y: number): Pl
     prevButtons: 0,
     kills: 0, combo: 0, comboTimer: 0, bestCombo: 0,
     honor: 0, level: 0, picks: 0, offer: [], up: emptyUpgrades(), lostX: NaN, lostY: NaN,
-    lives: 5, score: 0, runKills: 0, out: false, outT: 0,
+    lives: 5, score: 0, runKills: 0, out: false, outT: 0, color: 0,
     respawnT: 0, spawnX: x, spawnY: y, checkpoint: 0,
     doubleJumpTick: -999, parryTick: -999,
   };
