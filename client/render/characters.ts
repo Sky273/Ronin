@@ -304,12 +304,14 @@ export interface DrawStyle {
   glint?: number;
   scarf?: Pt[];
   ghost?: boolean;
+  /** Teinte propre au joueur (hachimaki, sageo du fourreau) ; vermillon par défaut. Le tint reste prioritaire. */
+  accent?: number;
 }
 
 export function drawSamurai(g: G, sk: Skeleton, X: Xf, st: DrawStyle): void {
   const ink = st.tint ?? C.ink;
   const soft = st.tint ?? C.inkSoft;
-  const red = st.tint ?? C.red;
+  const red = st.tint ?? st.accent ?? C.red;
   const a = st.alpha;
   const r = st.rand;
   const limb = (p0: Pt, p1: Pt, p2: Pt, w0: number, w1: number, col: number, al: number) =>
@@ -335,7 +337,7 @@ export function drawSamurai(g: G, sk: Skeleton, X: Xf, st: DrawStyle): void {
     gStroke(g, [X(sk.neck), X(collar)], C.paper, a * 0.55, { width: 1.3, taperStart: 0.1, taperEnd: 0.6 }, r);
   }
 
-  // Hachimaki (bandeau rouge flottant)
+  // Hachimaki (bandeau flottant, à la couleur du joueur)
   if (st.scarf && st.scarf.length > 2) {
     gStroke(g, st.scarf, red, a, { width: 3.4, taperStart: 0, taperEnd: 0.95, jitter: 0.15 }, r, 2);
     gStroke(g, st.scarf.slice(0, 5).map((q, i) => ({ x: q.x, y: q.y + 1.5 + i * 0.6 })), red, a * 0.85, { width: 2.2, taperStart: 0, taperEnd: 0.95 }, r, 2);
