@@ -258,6 +258,8 @@ export type GameEvent =
 
 export interface World {
   tick: number;
+  /** Graine de la partie : détermine aussi les niveaux générés des étapes suivantes. */
+  seed: number;
   level: Level;
   players: Player[];
   enemies: Enemy[];

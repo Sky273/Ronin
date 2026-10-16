@@ -3,10 +3,10 @@ import { DT, ENEMY, HONOR, PLAYER, SPAWN, TILE, WAVES } from './constants';
 import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { addScore, damagePlayer, gainHonor, hitEnemy, spawnOrbs } from './interactions';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
-import { buildLevel } from './level';
 import { approach, clamp, overlaps, Rng } from './math';
 import { moveBody, solidAt } from './physics';
 import { createPlayer, stepPlayer } from './player';
+import { buildStage } from './stagebuild';
 import { newStageState, populateStage, stepCleared, stepStage } from './stage';
 import type { Body, Enemy, EnemyType, Player, World } from './types';
 import { magnetRadius } from './upgrades';
@@ -19,9 +19,10 @@ export interface WorldOptions {
 }
 
 export function createWorld(seed = 7, opts: WorldOptions = {}): World {
-  const level = buildLevel();
+  const level = buildStage(0, seed);
   const w: World = {
     tick: 0,
+    seed,
     level,
     players: [],
     enemies: [],

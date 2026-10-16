@@ -1,11 +1,12 @@
 import { TILE } from './constants';
+import type { BiomeId } from './biomes';
 import type { EnemyType } from './types';
 
 export const T_EMPTY = 0;
 export const T_SOLID = 1;
 export const T_ONEWAY = 2; // plateforme traversable par le dessous
 
-export type DecoKind = 'torii' | 'lantern' | 'bamboo' | 'pine' | 'stone' | 'banner' | 'shrine' | 'sakura';
+export type DecoKind = 'torii' | 'lantern' | 'bamboo' | 'pine' | 'stone' | 'banner' | 'shrine' | 'sakura' | 'house' | 'rampart';
 
 export interface Deco {
   kind: DecoKind;
@@ -15,6 +16,9 @@ export interface Deco {
 }
 
 export interface Level {
+  /** Numéro d'étape (0 = forêt de bambous historique) et biome : toujours définis (Object.assign). */
+  stage: number;
+  biome: BiomeId;
   w: number;
   h: number;
   pxW: number;
@@ -168,6 +172,8 @@ export function buildLevel(): Level {
   const gate = { x: 218 * TILE + TILE / 2, y: G * TILE };
 
   return {
+    stage: 0,
+    biome: 'bamboo',
     w,
     h,
     checkpoints,

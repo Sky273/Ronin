@@ -3,8 +3,9 @@ import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { spawnEnemy } from './enemy';
 import { addScore, gainHonor } from './interactions';
 import { BTN } from './input';
-import { buildLevel, T_SOLID } from './level';
+import { T_SOLID } from './level';
 import { handlePicks, resetForStage } from './player';
+import { buildStage } from './stagebuild';
 import type { StageState, World } from './types';
 
 // Déroulé d'une étape : exploration → arène du gardien → porte ouverte → bilan,
@@ -128,7 +129,7 @@ export function stepCleared(w: World, inputs: Map<number, number>): void {
 /** Retour à l'étape 1, une boucle plus loin. Améliorations et Honneur sont conservés. */
 export function nextStage(w: World): void {
   const loop = w.stage.loop + 1;
-  Object.assign(w.level, buildLevel());
+  Object.assign(w.level, buildStage(loop, w.seed));
   w.enemies = [];
   w.projectiles = [];
   w.orbs = [];

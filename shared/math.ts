@@ -34,3 +34,12 @@ export class Rng {
     return a + (b - a) * this.next();
   }
 }
+
+/** Graine d'une étape : hachage pur de la graine du monde et du numéro d'étape
+ *  (indépendant du déroulé de la partie, donc reproductible côté serveur). */
+export function stageSeed(seed: number, stage: number): number {
+  let h = Math.imul((seed | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((stage | 0) + 1, 0xc2b2ae35);
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d);
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b);
+  return (h ^ (h >>> 16)) >>> 0 || 1;
+}
