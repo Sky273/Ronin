@@ -115,7 +115,7 @@ Client and server must run the same protocol version (checked on join): update b
 | Iai (hold, then release) | L | middle click / Y |
 | Choose an upgrade | 1 · 2 · 3 | — |
 | Online: challenge / accept a duel · hold to forfeit | G | R3 |
-| Online: leave the room | Esc | hold Select |
+| Quit to the title (solo: the run is abandoned, no Hall of Honor entry) · online: leave the room | Esc | hold Select |
 | Online: ready at the stage results | Space / J | A / X |
 | Dojo: ready (start without waiting) · hold to forfeit a match | G | R3 |
 | Dojo: show / hide the bracket | Tab | — |

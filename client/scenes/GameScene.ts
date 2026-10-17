@@ -351,8 +351,8 @@ export class GameScene extends Phaser.Scene {
   /** Aiguillage des touches de menu vers l'écran actif (sans effet en jeu). */
   private menuKey(code: string): void {
     if (this.screen === 'play') {
-      // En ligne, Échap quitte la salle (pas de pause : le monde continue sans nous).
-      if (code === 'Escape' && this.src !== this.local) this.leaveOnline(null);
+      // Échap quitte : en ligne, la salle (pas de pause : le monde continue sans nous) ; en solo, la partie.
+      if (code === 'Escape') this.quitPlay();
       return;
     }
     this.ensureAudio();
@@ -465,6 +465,43 @@ export class GameScene extends Phaser.Scene {
       this.goOnline(this.room); // retour au menu de la salle visée (route ou dojo)
       this.onlineMenu.setStatus(reason, true);
     } else this.goTitle();
+  }
+
+  /** Échap (ou Select tenu) en jeu : quitte la salle en ligne, ou abandonne la partie solo. */
+  private quitPlay(): void {
+    if (this.src !== this.local) this.leaveOnline(null);
+    else this.quitRun();
+  }
+
+  /**
+   * Solo : la partie est abandonnée et l'on revient au titre, sans inscription au Hall of Honor (il récompense
+   * un voyage mené jusqu'au bout). Le titre retrouve un monde neuf, comme au lancement (dojo hors ligne compris).
+   */
+  private quitRun(): void {
+    const w = this.local.world;
+    resetWorld(w, (Date.now() & 0xffff) + 1, { difficulty: this.difficulty });
+    this.local.reset(addPlayer(w, 'Ronin').id);
+    this.meCache = null;
+    this.applyLevel();
+    this.prev.clear();
+    this.phase.clear();
+    this.lastPose.clear();
+    this.clearCharacters();
+    this.flash = this.shake = this.zoomPunch = this.wipe = 0;
+    this.orbStreak = this.orbStreakT = this.lastLost = 0;
+    this.best = 0;
+    this.overInfo = null;
+    this.overT = 0;
+    this.results.hide();
+    this.hud.reset();
+    this.allies.clear();
+    this.duel.clear();
+    this.bracket.clear();
+    this.fx.clear();
+    this.controls.reset();
+    this.deathText.setAlpha(0);
+    this.deathSub.setAlpha(0);
+    this.goTitle();
   }
 
   /** Nouvelle partie : le monde est réinitialisé sur place, tout l'état client aussi. */
@@ -637,9 +674,9 @@ export class GameScene extends Phaser.Scene {
       if (this.controls.sample() !== 0 && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
     }
     if (this.screen === 'over' && this.overT > GAME_OVER_HOLD) this.leaveGameOver();
-    // En ligne, Select maintenu à la manette quitte la salle (B sert au dash, Échap au clavier).
-    const online = this.screen === 'play' && this.src !== this.local;
-    if (this.padQuit.update(online && this.controls.padQuitHeld(), time) && online) this.leaveOnline(null);
+    // Select maintenu à la manette quitte, comme Échap au clavier (B sert au dash) : la salle en ligne, la partie en solo.
+    const playing = this.screen === 'play';
+    if (this.padQuit.update(playing && this.controls.padQuitHeld(), time) && playing) this.quitPlay();
     // Salle rejointe : on applique ses instantanés jusqu'au premier (startOnline prend alors le relais).
     if (this.screen === 'online' && this.pending) this.pending.advance(dt, () => 0, () => undefined);
     if (this.screen === 'play' || this.screen === 'over') {
