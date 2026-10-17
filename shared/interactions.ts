@@ -78,6 +78,8 @@ export function damagePlayer(w: World, p: Player, dmg: number, srcX: number): Da
   if (p.h !== P.H && canFit(p, w.level, P.H)) {
     p.h = P.H;
     p.crouch = false;
+  } else if (p.h === P.SLIDE_H && canFit(p, w.level, P.CROUCH_H)) {
+    p.h = P.CROUCH_H; // touché en glissade sous un plafond : accroupi, la hauteur de glissade ne sert qu'à glisser
   }
   w.events.push({ type: 'playerHit', x: p.x, y: p.y - p.h / 2, dir: -srcSide, damage: dmg, pid: p.id });
 
