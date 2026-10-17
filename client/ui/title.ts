@@ -9,7 +9,10 @@ const INPUT_GUARD_MS = 300;
 const COL_ON = '#15120e';
 const COL_OFF = '#6b6359';
 
-/** Écran titre (浪人) avec un petit menu : jouer, jouer en ligne (si proposé) ou consulter le tableau d'honneur. */
+/**
+ * Écran titre (浪人) avec un petit menu : jouer, jouer en ligne et le dojo (si proposés) ou consulter le
+ * tableau d'honneur.
+ */
 export class TitleScreen {
   private root: Phaser.GameObjects.Container;
   private entries: Phaser.GameObjects.Text[] = [];
@@ -18,11 +21,14 @@ export class TitleScreen {
   private shown = false;
   private readyAt = 0;
   private actions: (() => void)[];
+  /** Écart du trait rouge sous l'entrée sélectionnée (px). */
+  private markDy = 20;
 
-  constructor(private scene: Phaser.Scene, put: Put, cb: { onPlay(): void; onScores(): void; onOnline?(): void }) {
-    // L'entrée « Online » n'apparaît que si la scène fournit le rappel correspondant.
+  constructor(private scene: Phaser.Scene, put: Put, cb: { onPlay(): void; onScores(): void; onOnline?(): void; onDojo?(): void }) {
+    // Les entrées « Online » et « Dojo » n'apparaissent que si la scène fournit le rappel correspondant.
     const items: { label: string; act: () => void }[] = [{ label: 'Draw your blade', act: () => cb.onPlay() }];
     if (cb.onOnline) items.push({ label: 'Online', act: () => cb.onOnline?.() });
+    if (cb.onDojo) items.push({ label: 'Dojo', act: () => cb.onDojo?.() });
     items.push({ label: 'Hall of Honor', act: () => cb.onScores() });
     this.actions = items.map((it) => it.act);
     const W = scene.scale.width;
@@ -43,11 +49,15 @@ export class TitleScreen {
     // Trait de pinceau rouge sous l'entrée sélectionnée (dessiné en coordonnées locales,
     // pour pouvoir le « tracer » de gauche à droite via scaleX).
     this.mark = scene.add.graphics();
-    // Deux entrées : disposition d'origine ; trois : un peu resserrées pour garder l'aide à l'écran.
-    const top = items.length > 2 ? 538 : 548;
-    const gap = items.length > 2 ? 42 : 50;
+    // Deux entrées : disposition d'origine ; trois : un peu resserrées pour garder l'aide à l'écran ;
+    // quatre : plus serrées encore, en un corps un peu plus petit (le trait rouge tient entre deux lignes).
+    const four = items.length > 3;
+    const top = four ? 518 : items.length > 2 ? 538 : 548;
+    const gap = four ? 38 : items.length > 2 ? 42 : 50;
+    const size = four ? '25px' : '27px';
+    if (four) this.markDy = 18;
     items.forEach(({ label }, i) => {
-      const t = scene.add.text(W / 2, top + i * gap, label, { fontFamily: FONT_TEXT, fontSize: '27px', color: COL_OFF }).setOrigin(0.5);
+      const t = scene.add.text(W / 2, top + i * gap, label, { fontFamily: FONT_TEXT, fontSize: size, color: COL_OFF }).setOrigin(0.5);
       t.setInteractive({ useHandCursor: true });
       t.on('pointerover', () => {
         if (this.shown) this.select(i);
@@ -114,7 +124,7 @@ export class TitleScreen {
     g.clear();
     gStroke(g, [{ x: 0, y: 2 }, { x: half, y: -1 }, { x: half * 2, y: 1 }], C.red, 0.85, { width: 6, taperStart: 0.08, taperEnd: 0.5, jitter: 0.25 }, r, 4);
     gFill(g, [{ x: -18, y: -24 }, { x: -12, y: -25 }, { x: -13, y: -19 }, { x: -19, y: -18 }], C.red, 0.9);
-    g.setPosition(t.x - half, t.y + 20);
+    g.setPosition(t.x - half, t.y + this.markDy);
     this.scene.tweens.killTweensOf(g);
     g.setScale(0.15, 1).setAlpha(0.4);
     this.scene.tweens.add({ targets: g, scaleX: 1, alpha: 1, duration: 180, ease: 'Quad.easeOut' });

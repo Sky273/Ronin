@@ -83,6 +83,14 @@ export interface DuelViewModel {
 /** Aide affichée pendant la garde du joueur local. */
 export const KAMAE_HELP = 'hold L · release at 斬 · K parry · early = foul';
 
+/** Marque discrète des bots du dojo (木人, mannequin d'entraînement), à côté de leur nom. */
+export const BOT_MARK = '木人';
+
+/** Dojo : ce joueur est-il un bot du tournoi (faux hors du dojo) ? */
+export function isDojoBot(w: World, pid: number): boolean {
+  return w.tournament?.entrants.some((e) => e.pid === pid && e.bot) === true;
+}
+
 const WHY: Record<number, { kanji: string; text: string }> = {
   [DUEL_WHY.IPPON]: { kanji: '一本', text: 'ippon' },
   [DUEL_WHY.PARRY]: { kanji: '弾', text: 'parried' },
@@ -137,8 +145,8 @@ export function winMarks(wins: number, firstTo: number): string {
 
 /**
  * Fin de série : titre et ligne d'explication. `wa`/`wb` : manches gagnées par `a` et `b`.
- * Vu par un duelliste (meId = a ou b) : 勝 / 負 / 引き分け / 降参 / 不戦勝 / 反則 / 中断 ;
- * vu par un spectateur : 勝 avec « Kenji defeated Aiko 2–1 » (ou le kanji du forfait).
+ * Vu par un duelliste (meId = a ou b) : 勝 / 負 / 引き分け / 降参 / 不戦勝 / 反則 / 不在 / 抽選 / 中断 ;
+ * vu par un spectateur : 勝 avec « Kenji defeated Aiko 2–1 » (ou le kanji du forfait, du tirage au sort).
  */
 export function seriesText(
   a: number, b: number, winner: number, wa: number, wb: number, why: number, meId: number, nameOf: NameOf,
@@ -148,7 +156,9 @@ export function seriesText(
   if (why === DUEL_WHY.INTERRUPT || why === DUEL_WHY.HIT) {
     return { title: '中断', sub: `duel interrupted · ${whyLabel(why).text}`, red: false };
   }
-  const byForfeit = why === DUEL_WHY.FORFEIT || why === DUEL_WHY.DISCONNECT || why === DUEL_WHY.FLOOD;
+  // Issues hors combat (forfaits, absence, disqualification) et tirage au sort du dojo : leur propre kanji.
+  const byForfeit = why === DUEL_WHY.FORFEIT || why === DUEL_WHY.DISCONNECT || why === DUEL_WHY.FLOOD
+    || why === DUEL_WHY.ABSENT || why === DUEL_WHY.SUSPECT || why === DUEL_WHY.LOT;
   if (!mine) return { title: draw ? '引き分け' : WHY[byForfeit ? why : DUEL_WHY.WIN].kanji, sub: endToast({ type: 'duelEnd', id: 0, winner, wa, wb, why }, a, b, nameOf), red: false };
   const myW = meId === a ? wa : wb;
   const opW = meId === a ? wb : wa;
@@ -163,6 +173,18 @@ export function seriesText(
   }
   if (why === DUEL_WHY.FLOOD) {
     return won ? { title: '勝', sub: `${opp} disqualified · victory by forfeit`, red: true } : { title: '反則', sub: whyLabel(why).text, red: false };
+  }
+  // Dojo : absence prolongée, réactions suspectes répétées, tirage au sort (sommes des réactions égales).
+  if (why === DUEL_WHY.ABSENT) {
+    return won ? { title: '勝', sub: `${opp} absent · 不在 — victory by forfeit`, red: true } : { title: '不在', sub: whyLabel(why).text, red: false };
+  }
+  if (why === DUEL_WHY.SUSPECT) {
+    return won ? { title: '勝', sub: `${opp} disqualified · 反則`, red: true } : { title: '反則', sub: whyLabel(why).text, red: false };
+  }
+  if (why === DUEL_WHY.LOT) {
+    return won
+      ? { title: '勝', sub: `抽選 · the lot falls to you ${myW}–${opW}`, red: true }
+      : { title: '抽選', sub: `the lot falls to ${opp} ${myW}–${opW}`, red: false };
   }
   return won ? { title: '勝', sub: `victory ${myW}–${opW}`, red: true } : { title: '負', sub: `defeat ${myW}–${opW}`, red: false };
 }
@@ -180,6 +202,9 @@ export function endToast(ev: DuelEndEvent, a: number, b: number, nameOf: NameOf)
   if (ev.why === DUEL_WHY.FORFEIT) return `${L} yielded to ${W} · 降参`;
   if (ev.why === DUEL_WHY.DISCONNECT) return `${W} wins by default — ${L} left · 不戦勝`;
   if (ev.why === DUEL_WHY.FLOOD) return `${W} wins by forfeit — ${L} disqualified · 反則`;
+  if (ev.why === DUEL_WHY.ABSENT) return `${W} wins by forfeit — ${L} absent · 不在`;
+  if (ev.why === DUEL_WHY.SUSPECT) return `${W} wins — ${L} disqualified · 反則`;
+  if (ev.why === DUEL_WHY.LOT) return `${W} wins by lot over ${L} ${ww}–${lw} · 抽選`;
   return `${W} defeated ${L} ${ww}–${lw}`;
 }
 
@@ -220,9 +245,11 @@ function side(w: World, d: Duel, s: 'a' | 'b', nameOf: NameOf): DuelSideView {
   const ds = d[s];
   const p = w.players.find((q) => q.id === ds.pid);
   const markX = d.x + (s === 'a' ? -1 : 1) * (d.gap / 2);
+  // Dojo : le nom d'un bot, porté au-dessus du personnage par la surcouche, garde sa marque 木人.
+  const name = nameOf(ds.pid);
   return {
     pid: ds.pid,
-    name: nameOf(ds.pid),
+    name: isDojoBot(w, ds.pid) ? `${name} ${BOT_MARK}` : name,
     color: playerColor(p?.color ?? 0),
     wins: ds.wins,
     marks: winMarks(ds.wins, d.firstTo),
@@ -314,7 +341,8 @@ export function boutView(w: World, d: Duel, meId: number, memo?: DuelMemo): Duel
     case 'end': {
       const end = memo?.ends.get(d.id);
       const winner = end ? end.winner : d.winner;
-      const terminal = d.last === DUEL_WHY.FORFEIT || d.last === DUEL_WHY.DISCONNECT || d.last === DUEL_WHY.FLOOD || d.last === DUEL_WHY.INTERRUPT || d.last === DUEL_WHY.HIT || d.last === DUEL_WHY.DRAW || d.last === DUEL_WHY.WIN;
+      const terminal = d.last === DUEL_WHY.FORFEIT || d.last === DUEL_WHY.DISCONNECT || d.last === DUEL_WHY.FLOOD || d.last === DUEL_WHY.INTERRUPT || d.last === DUEL_WHY.HIT || d.last === DUEL_WHY.DRAW || d.last === DUEL_WHY.WIN
+        || d.last === DUEL_WHY.ABSENT || d.last === DUEL_WHY.SUSPECT || d.last === DUEL_WHY.LOT;
       const why = end ? end.why : terminal ? d.last : winner >= 0 ? DUEL_WHY.WIN : DUEL_WHY.DRAW;
       const s = seriesText(d.a.pid, d.b.pid, winner, end ? end.wa : d.a.wins, end ? end.wb : d.b.wins, why, meId, nameOf);
       v.outcome = why;

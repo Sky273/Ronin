@@ -1,8 +1,10 @@
 import type Phaser from 'phaser';
 import { TILE } from '../../shared/constants';
+import { duelOf } from '../../shared/duel';
 import { arenaInside } from '../../shared/level';
 import type { World } from '../../shared/types';
 import { C, FONT_BRUSH, FONT_TEXT, hexCss, playerColor } from '../render/palette';
+import { BOT_MARK, isDojoBot } from './duelView';
 
 type Text = Phaser.GameObjects.Text;
 type Put = <T extends Phaser.GameObjects.GameObject>(obj: T, layer: 'bg' | 'world' | 'ui') => T;
@@ -27,7 +29,7 @@ interface Slot {
 }
 
 /**
- * Repères des coéquipiers hors de la vue (coop) : flèche ◀ ou ▶ à leur couleur au bord de
+ * Repères des coéquipiers hors de la vue (coop, dojo) : flèche ◀ ou ▶ à leur couleur au bord de
  * l'écran, avec leur nom et leur distance en tuiles ; repère « 結界 » vers l'entrée de l'arène
  * quand elle est fermée et que le joueur local est resté dehors. Les textes sont réutilisés
  * d'une image à l'autre (pool par id).
@@ -41,10 +43,13 @@ export class AllyMarkers {
     private put: Put,
   ) {}
 
-  /** À appeler à chaque image pendant une partie ; masque tout hors du mode coop. */
+  /**
+   * À appeler à chaque image pendant une partie ; masque tout en solo. Au dojo, les bots portent leur
+   * marque 木人, et rien n'est montré pendant le duel du joueur local (le face-à-face occupe l'écran).
+   */
   update(world: World, meId: number, cam: Phaser.Cameras.Scene2D.Camera): void {
     const me = world.players.find((p) => p.id === meId);
-    if (world.mode !== 'coop' || !me) {
+    if (world.mode === 'solo' || !me || (world.mode === 'dojo' && duelOf(world, meId))) {
       this.hide();
       return;
     }
@@ -63,7 +68,7 @@ export class AllyMarkers {
       if (p.x >= v.x && p.x <= v.right && y >= v.y && y <= v.bottom) continue;
       const right = p.x > cx;
       const dist = Math.round(Math.abs(p.x - me.x) / TILE);
-      const name = p.name || 'ronin';
+      const name = (p.name || 'ronin') + (isDojoBot(world, p.id) ? ` ${BOT_MARK}` : '');
       const label = right ? `${name}  ${dist} ▶` : `◀ ${dist}  ${name}`;
       const t = this.text(p.id, false);
       const color = hexCss(playerColor(p.color));

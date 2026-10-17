@@ -29,7 +29,8 @@ const KEYMAP: Record<string, number> = {
   KeyG: BTN.DUEL,
 };
 
-const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F7', 'Escape', 'Backspace', 'Tab']);
+// Tab : tableau du dojo (sinon le focus quitte le canevas) ; F10 : dojo de dev (sinon le menu du navigateur).
+const PREVENT = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F7', 'F10', 'Escape', 'Backspace', 'Tab']);
 
 // Touches dont le comportement navigateur gênerait la saisie d'un nom (retour arrière, défilement, focus).
 const TEXT_PREVENT = new Set(['Backspace', 'Space', 'Enter', 'NumpadEnter', 'Tab']);

@@ -7,6 +7,7 @@ import { UPGRADE_MAX } from '../../shared/upgrades';
 import { gBlob, gFill, gStroke, type Rand, ringPoints, seeded } from '../render/brush';
 import { BOSS_NAME } from '../render/enemies';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
+import { dojoHudLine } from './bracketView';
 import { netLabel, netQualityColor, type NetInfo } from './netQuality';
 import { DIFFICULTY_TEXT, fmtScore } from './difficultyText';
 import { rankOf, UPGRADE_TEXT } from './texts';
@@ -23,6 +24,17 @@ const HELP = [
   'Online: Esc or hold Select (gamepad)   leave the room',
   'G   challenge / accept a duel (online) · hold G to forfeit',
 ];
+
+/** Aide du dojo : ni route ni améliorations, les duels du tournoi et le tableau. */
+const HELP_DOJO = [
+  '← → / A D (Q D on AZERTY)   move          Space   jump',
+  'L (hold)   kamae · release at 斬 · K   parry · releasing early = foul',
+  'G   ready (while waiting) · hold G to forfeit a match',
+  'Tab   bracket · Esc or hold Select (gamepad)   leave the dojo',
+  'H   help · M   sound · N   music · F1   hitboxes',
+];
+const HELP_TEXT = HELP.join('\n');
+const HELP_DOJO_TEXT = HELP_DOJO.join('\n');
 
 // Cartes d'amélioration : rangée centrée en bas de l'écran ; pendant le bilan coop, dont le panneau
 // descend jusqu'en bas (x de W/2 - 334 à W/2 + 332, voir results.ts), colonne dans la marge de gauche.
@@ -65,6 +77,7 @@ export class Hud {
   private rankName: Text;
   private honor: Text;
   private kills: Text;
+  private killMark: Text;
   private record: Text;
   private score: Text;
   private net: Text;
@@ -101,7 +114,7 @@ export class Hud {
     this.rank = txt(34, 20, '浪人', { fontFamily: FONT_BRUSH, fontSize: '34px', color: '#15120e' });
     this.rankName = txt(36, 64, '', { fontFamily: FONT_TEXT, fontSize: '14px', color: '#4a433b' });
     this.honor = txt(150, 70, '', { fontFamily: FONT_BRUSH, fontSize: '22px', color: '#15120e' });
-    txt(W - 40, 26, '討', { fontFamily: FONT_BRUSH, fontSize: '40px', color: '#b8321f' }).setOrigin(1, 0);
+    this.killMark = txt(W - 40, 26, '討', { fontFamily: FONT_BRUSH, fontSize: '40px', color: '#b8321f' }).setOrigin(1, 0);
     this.kills = txt(W - 92, 22, '0', { fontFamily: FONT_BRUSH, fontSize: '48px', color: '#15120e' }).setOrigin(1, 0);
     this.record = txt(W - 40, 84, '', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#4a433b' }).setOrigin(1, 0);
     this.score = txt(W - 40, 106, '', { fontFamily: FONT_BRUSH, fontSize: '20px', color: '#15120e' }).setOrigin(1, 0);
@@ -109,7 +122,7 @@ export class Hud {
     this.combo = txt(W - 60, 250, '', { fontFamily: FONT_BRUSH, fontSize: '56px', color: '#15120e', align: 'right' }).setOrigin(1, 0.5);
     this.wave = txt(W / 2, 22, '', { fontFamily: FONT_TEXT, fontSize: '17px', color: '#15120e' }).setOrigin(0.5, 0);
     this.bossName = txt(W / 2, 50, '', { fontFamily: FONT_BRUSH, fontSize: '24px', color: '#8e2416' }).setOrigin(0.5, 0);
-    this.help = txt(30, H - 24, HELP.join('\n'), { fontFamily: FONT_TEXT, fontSize: '14px', color: '#3a342d', lineSpacing: 4 }).setOrigin(0, 1).setAlpha(0.85);
+    this.help = txt(30, H - 24, HELP_TEXT, { fontFamily: FONT_TEXT, fontSize: '14px', color: '#3a342d', lineSpacing: 4 }).setOrigin(0, 1).setAlpha(0.85);
     // Bannières dans le tiers haut : l'action reste lisible en dessous.
     this.bannerKanji = txt(W / 2, 175, '', { fontFamily: FONT_BRUSH, fontSize: '100px', color: '#15120e' }).setOrigin(0.5).setAlpha(0).setDepth(140);
     this.bannerTitle = txt(W / 2, 248, '', { fontFamily: FONT_TEXT, fontSize: '26px', color: '#15120e' }).setOrigin(0.5).setAlpha(0).setDepth(140);
@@ -220,6 +233,11 @@ export class Hud {
     g.clear();
     const r = seeded(Math.floor(time / 120));
     const W = this.scene.scale.width;
+    // Dojo : ni vies, ni Honneur, ni score, ni Marée, ni étape ; une ligne de tournoi à la place.
+    const dojo = w.mode === 'dojo';
+    const helpText = dojo ? HELP_DOJO_TEXT : HELP_TEXT;
+    if (this.help.text !== helpText) this.help.setText(helpText);
+    for (const t of [this.honor, this.kills, this.killMark, this.record, this.score]) if (t.visible === dojo) t.setVisible(!dojo);
 
     // Rang : annoncé sans couper une autre bannière, ni passer par-dessus le bilan d'étape.
     const rk = rankOf(p.level);
@@ -249,14 +267,16 @@ export class Hud {
     this.honor.setText(`誉 ${p.honor}`).setPosition(x0, 62);
     this.rankName.setPosition(x0 + 16, 92);
     const bx = x0 + this.honor.width + 14;
-    gStroke(g, [{ x: bx, y: 76 }, { x: bx + 140, y: 76 }], C.wash, 0.25, { width: 5, taperStart: 0.05, taperEnd: 0.1 }, r);
-    if (prog > 0.01) gStroke(g, [{ x: bx, y: 76 }, { x: bx + 140 * prog, y: 76 }], C.ink, 0.85, { width: 4, taperStart: 0.05, taperEnd: 0.2 }, r);
+    if (!dojo) {
+      gStroke(g, [{ x: bx, y: 76 }, { x: bx + 140, y: 76 }], C.wash, 0.25, { width: 5, taperStart: 0.05, taperEnd: 0.1 }, r);
+      if (prog > 0.01) gStroke(g, [{ x: bx, y: 76 }, { x: bx + 140 * prog, y: 76 }], C.ink, 0.85, { width: 4, taperStart: 0.05, taperEnd: 0.2 }, r);
+    }
 
     // Dash et charge d'iai
     gBlob(g, x0 + 5, 101, 5, p.dashCd <= 0 ? C.ink : C.washLight, p.dashCd <= 0 ? 0.85 : 0.4, r);
     // Vies restantes : une goutte d'encre pleine par vie, vide pour les vies perdues.
-    // En coopération, pas de vies : on renaît sans fin.
-    const maxLives = w.mode === 'coop' ? 0 : Math.max(p.lives, DIFFICULTIES[w.difficulty].lives);
+    // En ligne (coop, dojo), pas de vies : on renaît sans fin.
+    const maxLives = w.mode !== 'solo' ? 0 : Math.max(p.lives, DIFFICULTIES[w.difficulty].lives);
     for (let i = 0; i < maxLives; i++) {
       const lx = x0 + 6 + i * 15;
       if (i < p.lives) gBlob(g, lx, 124, 5, C.red, 0.85, r, 0.25);
@@ -284,13 +304,20 @@ export class Hud {
 
     this.updateWave(w, g, r);
     this.updateCards(p, w, play, dt, time);
-    this.updateLostMarker(p, cam, W, time);
+    if (dojo) {
+      if (this.lostMark.visible) this.lostMark.setVisible(false);
+    } else this.updateLostMarker(p, cam, W, time);
   }
 
   private updateWave(w: World, g: Phaser.GameObjects.Graphics, r: Rand): void {
     const wv = w.wave;
     const st = w.stage;
     const W = this.scene.scale.width;
+    if (w.tournament) {
+      recolor(this.wave.setText(dojoHudLine(w.tournament, w.tick)), w.tournament.phase === 'done' ? '#b8321f' : '#15120e');
+      this.bossName.setText('');
+      return;
+    }
     const boss = w.enemies.find((e) => e.type === 'boss');
     const stagePrefix = `Stage ${st.loop + 1}  ·  `;
     if (st.state === 'arena') recolor(this.wave.setText(`${stagePrefix}門  the guardian bars the way`), '#8e2416');

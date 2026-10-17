@@ -7,9 +7,12 @@ import type { Player, World } from '../shared/types';
 import { addPlayer, createWorld } from '../shared/world';
 import { Sfx } from '../client/audio/sfx';
 import { Controls, shortcutChar } from '../client/input/controls';
+import { ROOMS, type RoomName } from '../shared/net/protocol';
 import { Hud } from '../client/ui/hud';
+import { OnlineMenu } from '../client/ui/onlineMenu';
 import { Results } from '../client/ui/results';
 import { buildRoster } from '../client/ui/roster';
+import { TitleScreen } from '../client/ui/title';
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -409,6 +412,13 @@ class FakeObj {
   setAngle(): this {
     return this;
   }
+  /** Clics : les écrans de menu s'y abonnent (sans effet ici, les tests passent par le clavier). */
+  setInteractive(): this {
+    return this;
+  }
+  on(): this {
+    return this;
+  }
   add(o: FakeObj | FakeObj[]): this {
     for (const c of ([] as FakeObj[]).concat(o)) c.parent = this;
     return this;
@@ -433,6 +443,7 @@ function fakeScene() {
     add: {
       text: (x: number, y: number, s: string, style: { color?: string } = {}) => new FakeObj(x, y, s, style),
       graphics: () => new FakeObj(),
+      rectangle: () => new FakeObj(),
       container: (x = 0, y = 0, children: FakeObj[] = []) => new FakeObj(x, y).add(children),
     },
     tweens: {
@@ -455,6 +466,9 @@ interface HudView {
   cardRoot: FakeObj;
   help: FakeObj;
   wave: FakeObj;
+  honor: FakeObj;
+  kills: FakeObj;
+  score: FakeObj;
   combo: FakeObj;
   bannerTitle: FakeObj;
   cards: { g: FakeObj }[];
@@ -654,6 +668,53 @@ section('26', () => {
   me.combo = 12;
   frame();
   check('26 : combo ≥ 10 : vermillon', v.combo.style.color === '#b8321f', v.combo.style.color);
+});
+
+// ─── M5 : HUD du dojo, entrée « Dojo » du titre, menu en ligne vers la salle visée ─
+section('dojo hud', () => {
+  const w = createWorld(6, { mode: 'dojo' });
+  const me = addPlayer(w, 'Luc');
+  const { v, frame } = hudBench(w, me);
+  frame();
+  check('dojo : ligne « 道場 · Tournament 1 · <état> » à la place de la Marée', v.wave.text.startsWith('道場 · Tournament 1 · Waiting for challengers'), v.wave.text);
+  check('dojo : ni Honneur, ni tués, ni score', !v.honor.visible && !v.kills.visible && !v.score.visible);
+  check('dojo : aide du dojo (G ready, abandon tenu, Tab)', v.help.text.includes('Tab   bracket') && v.help.text.includes('hold G to forfeit') && !v.help.text.includes('upgrade'), v.help.text);
+  const solo = createWorld(6);
+  const p = addPlayer(solo, 'Ronin');
+  const s = hudBench(solo, p);
+  s.frame();
+  check('solo : aide, Honneur et ligne de Marée inchangés', s.v.help.text.includes('choose an upgrade') && s.v.honor.visible && s.v.kills.visible && !s.v.wave.text.startsWith('道場'));
+});
+
+section('titre et menu en ligne', () => {
+  const scene = fakeScene();
+  const calls: string[] = [];
+  const title = new TitleScreen(scene as never, put as never, {
+    onPlay: () => calls.push('play'), onScores: () => calls.push('scores'), onOnline: () => calls.push('online'), onDojo: () => calls.push('dojo'),
+  });
+  const entries = (title as unknown as { entries: FakeObj[] }).entries;
+  check('titre : 4 entrées, « Dojo » en 3e', entries.map((e) => e.text).join(',') === 'Draw your blade,Online,Dojo,Hall of Honor', entries.map((e) => e.text).join(','));
+  check('titre : entrées espacées d\'au moins 38 px, au-dessus de l\'aide', entries.every((e, i) => i === 0 || e.y - entries[i - 1].y >= 38) && entries[3].y < 660);
+  title.show();
+  scene.time.now += 400;
+  title.key('ArrowDown');
+  title.key('ArrowDown');
+  title.key('Enter');
+  check('titre : « Dojo » mène au dojo', calls.join() === 'dojo', calls.join());
+  const joins: { name: string; room: RoomName }[] = [];
+  const menu = new OnlineMenu(scene as never, put as never, { onJoin: (name, room) => joins.push({ name, room }), onBack: () => undefined });
+  const mv = menu as unknown as { kanji: FakeObj; title: FakeObj; join: FakeObj };
+  menu.show('Luc', ROOMS.dojo);
+  check('menu vers le dojo : 道場 et textes adaptés', mv.kanji.text === '道場' && mv.title.text.startsWith('Dojo') && mv.join.text === 'Enter — Enter the dojo' && menu.room === ROOMS.dojo);
+  scene.time.now += 400;
+  menu.keyText('Enter', 'Enter');
+  check('menu vers le dojo : onJoin(nom, dojo)', joins.length === 1 && joins[0].name === 'Luc' && joins[0].room === ROOMS.dojo, JSON.stringify(joins));
+  menu.hide();
+  menu.show('Aiko');
+  scene.time.now += 400;
+  check('menu par défaut : la route partagée (縁)', mv.kanji.text === '縁' && mv.join.text === 'Enter — Join a room' && menu.room === ROOMS.coop);
+  menu.keyText('Enter', 'Enter');
+  check('menu par défaut : onJoin(nom, coop)', joins.length === 2 && joins[1].room === ROOMS.coop);
 });
 
 if (failures) {
