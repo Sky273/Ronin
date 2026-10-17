@@ -22,7 +22,7 @@ const FRAME_MS = 1000 / 60;
 const MAX_EXTRAP = 3;
 
 // ---------------------------------------------------------------------------
-// 1. Horloge seule : plafond, recul de la chronologie, rafale.
+// 1. Horloge seule : plafond, recul de la chronologie, rafale, trou de mesures.
 // ---------------------------------------------------------------------------
 {
   // 1a. Plafond : l'horloge s'y arrête sans reculer ; levé, le retard est repris d'un coup.
@@ -87,6 +87,39 @@ const MAX_EXTRAP = 3;
   }
   check('rafale (coupure puis tout d’un coup) : estimation gardée, horloge à moins d’un tick', worst < 1, `écart max ${worst.toFixed(2)} tick`);
 }
+for (const G of [2000, 3000, 5000]) {
+  // 1d. Trou de mesures plus long que la fenêtre (gel du serveur de G ms, reprise plafonnée à 5 pas) :
+  // la fenêtre est vidée, le recul n'y est pas vu. Plafond de l'interpolateur (dernier instantané +
+  // extrapolation + délai) : l'estimation, en avance pendant le trou, revient sur la nouvelle chronologie.
+  const SHIFT = G * TICKS_PER_MS - 5;
+  const T0 = 3000;
+  const c = new ServerClock();
+  const snapAt = (at: number): number => at * TICKS_PER_MS - (at >= T0 + G ? SHIFT : 0);
+  let sent = 0;
+  let newest = -Infinity;
+  let prev = -Infinity;
+  let mono = true;
+  let over = -Infinity;
+  const T1 = T0 + G + 50; // première mesure après le trou
+  let lastOff = T1;
+  for (let t = 50; t <= T1 + 3000; t += FRAME_MS) {
+    while (sent + 50 <= t) {
+      if (sent < T0 || sent >= T0 + G) {
+        c.observe(snapAt(sent), sent + 50);
+        newest = snapAt(sent);
+      }
+      sent += 50;
+    }
+    const cap = newest + MAX_EXTRAP + c.delayTicks();
+    const v = c.tickAt(t, cap);
+    if (v < prev) mono = false;
+    prev = v;
+    over = Math.max(over, v - cap);
+    if (t >= T1 && Math.abs(v - snapAt(t - 50)) > 1) lastOff = t;
+  }
+  check(`trou de mesures de ${G} ms (fenêtre vidée) : horloge à ±1 tick de la nouvelle chronologie en moins de 1 s`, lastOff - T1 < 1000, `écart > 1 tick jusqu’à ${(lastOff - T1).toFixed(0)} ms après la reprise`);
+  check(`… sans jamais reculer ni dépasser le plafond`, mono && over <= 1e-9, `dépassement max ${over.toFixed(2)} tick`);
+}
 
 // ---------------------------------------------------------------------------
 // 2. Banc réseau : B regarde A (50 ms + gigue 10 ms) pendant un décrochage.
@@ -102,8 +135,11 @@ interface Outcome {
   /** Retard de l'horloge (tick serveur − tick de rendu − délai) : avant l'événement, et pire écart à ce retard de 1,5 s à 4 s après. */
   behind0: number;
   behindDrift: number;
+  /** Délai après la fin de l'événement jusqu'au retour durable du retard à ±1 tick de son niveau d'avant (ms). */
+  settleMs: number;
 }
-function decrochage(kind: Kind, ms: number, seed = 3): Outcome {
+/** `ms` : durée de l'événement, ou hausse de la latence (latence en hausse) ; `upMs` : hausse pendant un pic de latence. */
+function decrochage(kind: Kind, ms: number, upMs = ms, seed = 3): Outcome {
   const bench = new NetBench({ seed, lagMs: 50, jitterMs: 10 });
   bench.addClient('A');
   const B = bench.addClient('B');
@@ -144,7 +180,7 @@ function decrochage(kind: Kind, ms: number, seed = 3): Outcome {
   if (kind === 'gel du serveur') bench.freezeServer(ms, input, track);
   else if (kind === 'latence en hausse') down.opts.lagMs = 50 + ms;
   else if (kind === 'pic de latence') {
-    down.opts.lagMs = 50 + ms;
+    down.opts.lagMs = 50 + upMs;
     bench.run(ms, input, track);
     down.opts.lagMs = 50;
   } else {
@@ -158,9 +194,11 @@ function decrochage(kind: Kind, ms: number, seed = 3): Outcome {
   const f0 = bench.metrics.frames;
   let seen = u0;
   let lastUnder = -1;
+  let lastOff = -1;
   behind = [];
   bench.run(4000, input, (f) => {
     track();
+    if (Math.abs(behind[behind.length - 1] - behind0) > 1) lastOff = f;
     if (B.src.interp.underruns !== seen) {
       seen = B.src.interp.underruns;
       lastUnder = f;
@@ -174,13 +212,16 @@ function decrochage(kind: Kind, ms: number, seed = 3): Outcome {
     backwards,
     behind0,
     behindDrift: drift,
+    settleMs: lastOff < 0 ? 0 : (lastOff - f0 + 1) * FRAME_MS,
   };
 }
 const fmt = (o: Outcome): string =>
-  `${o.under} sous-alimentation(s) ensuite, la dernière ${o.lastUnderMs.toFixed(0)} ms après, v − affiché max ${o.viewOver}, retard d’horloge ${o.behind0.toFixed(1)} ticks, écart ensuite ${o.behindDrift.toFixed(1)}`;
-for (const ms of [250, 500, 1000]) {
+  `${o.under} sous-alimentation(s) ensuite, la dernière ${o.lastUnderMs.toFixed(0)} ms après, v − affiché max ${o.viewOver}, retard d’horloge ${o.behind0.toFixed(1)} ticks, écart ensuite ${o.behindDrift.toFixed(1)}, à ±1 tick ${o.settleMs.toFixed(0)} ms après`;
+// Au-delà de ~1,9 s, la fenêtre de mesures est vidée par le trou : le recul n'y est pas vu.
+for (const ms of [250, 500, 1000, 2000, 3000, 5000]) {
   const o = decrochage('gel du serveur', ms);
   check(`gel du serveur ${ms} ms : interpolation rétablie en moins de 1 s après la reprise`, o.lastUnderMs < 1000, fmt(o));
+  check(`gel du serveur ${ms} ms : horloge revenue à ±1 tick de la chronologie en moins de 1 s`, o.settleMs < 1000, fmt(o));
   check(`gel du serveur ${ms} ms : tick de vue jamais au-delà de l’état affiché, rendu monotone`, o.viewOver <= 0 && o.backwards === 0, fmt(o));
 }
 for (const ms of [150, 250]) {
@@ -192,9 +233,10 @@ for (const ms of [250, 500, 1000]) {
   const o = decrochage('coupure', ms);
   check(`coupure du lien descendant ${ms} ms (rafale) : horloge revenue sur la chronologie (< 1 tick d’écart dès 1,5 s)`, o.behindDrift < 1 && o.viewOver <= 0 && o.backwards === 0, fmt(o));
 }
-for (const ms of [250, 500]) {
-  const o = decrochage('pic de latence', ms);
-  check(`pic de latence passager +${ms} ms : horloge revenue sur la chronologie (pas de rattrapage lent à +5 %)`, o.behindDrift < 1 && o.viewOver <= 0 && o.backwards === 0, fmt(o));
+// Pics courts, et plus longs que la fenêtre de mesures (2 s) : le recul supposé reste dû, repris d'un coup au retour.
+for (const [ms, up] of [[250, 250], [500, 500], [2500, 200], [3000, 200]]) {
+  const o = decrochage('pic de latence', ms, up);
+  check(`pic de latence passager +${up} ms pendant ${ms} ms : horloge revenue à ±1 tick de la chronologie en moins de 1 s (pas de rattrapage lent à +5 %)`, o.settleMs < 1000 && o.behindDrift < 1 && o.viewOver <= 0 && o.backwards === 0, fmt(o));
 }
 
 if (failures) {
