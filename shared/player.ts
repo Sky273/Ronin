@@ -132,6 +132,8 @@ function stepNormal(w: World, p: Player, b: number, pressed: number): void {
     p.crouch = false;
     p.h = P.H;
   }
+  // Hauteur de glissade restée hors glissade (coup reçu sous un plafond) : accroupi dès que le corps y tient.
+  if (p.crouch && p.h === P.SLIDE_H && canFit(p, L, P.CROUCH_H)) p.h = P.CROUCH_H;
 
   // Actions prioritaires
   if (p.dashBuffer > 0 && p.dashCd <= 0 && (p.onGround || !p.airDash) && canFit(p, L, P.H)) {
@@ -243,8 +245,11 @@ function startDash(w: World, p: Player, dirX: number): void {
   p.vx = p.facing * P.DASH_SPEED;
   p.vy = 0;
   p.iframes = Math.max(p.iframes, P.DASH_TICKS);
-  p.crouch = false;
-  p.h = P.H;
+  // Les appelants exigent la place debout ; par prudence, on ne se redresse jamais dans un plafond.
+  if (canFit(p, w.level, P.H)) {
+    p.crouch = false;
+    p.h = P.H;
+  }
   p.attack = null;
   w.events.push({ type: 'dash', x: p.x, y: p.y, dir: p.facing, pid: p.id });
 }
@@ -386,9 +391,10 @@ function stepAttack(w: World, p: Player, b: number): void {
 
   if (t >= activeStart && t <= activeEnd) doHits(w, p, d);
 
-  // Annulations : dash à tout moment après le début de l'animation active,
-  // saut après un coup réussi, enchaînement du combo.
-  if (t >= activeStart && p.dashBuffer > 0 && p.dashCd <= 0 && (p.onGround || !p.airDash)) {
+  // Annulations : dash à tout moment après le début de l'animation active (debout seulement,
+  // comme depuis l'état normal : accroupi sous un plafond, la tête y entrerait), saut après un
+  // coup réussi, enchaînement du combo.
+  if (t >= activeStart && p.dashBuffer > 0 && p.dashCd <= 0 && (p.onGround || !p.airDash) && canFit(p, w.level, P.H)) {
     endAttack(p, false);
     startDash(w, p, dirX);
     return;

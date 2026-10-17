@@ -6,13 +6,13 @@ import { findGround, spawnEnemy, stepEnemy } from './enemy';
 import { addScore, damagePlayer, emptyStageStats, gainHonor, hitEnemy, spawnOrbs } from './interactions';
 import { keepGhost, lagOf, recordHistory, resolveDeferred } from './lagcomp';
 import { DIFFICULTIES, type DifficultyId, enemyHpScale, extraEnemiesFor, firstCalmMult } from './difficulty';
-import { approach, clamp, overlaps, Rng } from './math';
-import { kekkaiSplits } from './level';
-import { moveBody, solidAt } from './physics';
+import { approach, clamp, lerp, overlaps, Rng } from './math';
+import { kekkaiSplits, type Level, T_SOLID, tileAt } from './level';
+import { fitsAt, moveBody, solidAt } from './physics';
 import { arenaEntrance, createPlayer, stepPlayer } from './player';
 import { buildStage } from './stagebuild';
 import { newStageState, openStageStats, populateStage, stepCleared, stepStage } from './stage';
-import type { Body, Enemy, EnemyType, GameMode, Player, World } from './types';
+import type { Body, Enemy, EnemyType, GameMode, Orb, Player, World } from './types';
 import { magnetRadius } from './upgrades';
 
 export { spawnEnemy };
@@ -221,11 +221,17 @@ function stepProjectiles(w: World): void {
 // ─── Orbes d'Honneur ────────────────────────────────────────────────────────
 
 const ORB_SIZE = 6;
+const ORB_SPEED = 720; // vitesse d'une orbe attirée (px/s) : 12 px par tick, moins que le rayon de ramassage (18)
+const ORB_STEER = 0.12; // part de l'écart à la vitesse visée rattrapée à chaque tick
 
 function stepOrbs(w: World): void {
   const keep = [];
+  let expired = false; // une orbe d'Honneur perdu a expiré pendant ce tick
   for (const o of w.orbs) {
-    if (--o.life <= 0) continue;
+    if (--o.life <= 0) {
+      if (o.lost) expired = true;
+      continue;
+    }
     const age = (o.lost ? HONOR.LOST_LIFE : HONOR.ORB_LIFE) - o.life;
     let target: Player | null = null;
     let best = Infinity;
@@ -250,24 +256,22 @@ function stepOrbs(w: World): void {
         o.life = 0;
         if (o.lost && !w.orbs.some((q) => q !== o && q.lost && q.life > 0)) {
           // Plus aucun Honneur perdu au sol : en coop, le repère de chacun s'efface (les orbes n'ont pas de propriétaire).
-          if (w.mode === 'coop') for (const q of w.players) q.lostX = NaN;
-          else target.lostX = NaN;
+          clearLostMarkers(w.mode === 'coop' ? w.players : [target]);
         }
         continue;
       }
+      // Vitesse pilotée vers le joueur, et non accélération centrale : la composante tangentielle
+      // s'amortit (sinon l'orbe se mettait en orbite autour de lui sans jamais passer à portée).
+      // Comme l'aimant, elle traverse le décor, mais sans sortir du niveau.
       const dx = (target.x - o.x) / best;
       const dy = (target.y - 22 - o.y) / best;
-      o.vx += dx * 2600 * DT;
-      o.vy += dy * 2600 * DT;
-      const sp = Math.hypot(o.vx, o.vy);
-      if (sp > 720) {
-        o.vx *= 720 / sp;
-        o.vy *= 720 / sp;
-      }
-      o.x += o.vx * DT;
-      o.y += o.vy * DT;
+      o.vx = lerp(o.vx, dx * ORB_SPEED, ORB_STEER);
+      o.vy = lerp(o.vy, dy * ORB_SPEED, ORB_STEER);
+      o.x = clamp(o.x + o.vx * DT, 0, w.level.w * TILE);
+      o.y = clamp(o.y + o.vy * DT, 0, w.level.h * TILE);
       o.onGround = false;
     } else {
+      unburyOrb(w.level, o); // lâchée par l'aimant dans le décor : remontée à la surface
       const b = { x: o.x, y: o.y + ORB_SIZE / 2, vx: o.vx, vy: o.vy + 900 * DT, w: ORB_SIZE, h: ORB_SIZE, onGround: o.onGround } as Body;
       moveBody(b, w.level, DT, false);
       o.x = b.x;
@@ -279,6 +283,42 @@ function stepOrbs(w: World): void {
     keep.push(o);
   }
   w.orbs = keep;
+  // La dernière orbe d'Honneur perdu a expiré : le repère s'efface, comme au ramassage.
+  if (expired && !keep.some((q) => q.lost)) clearLostMarkers(w.players);
+}
+
+/** Plus aucun Honneur perdu au sol : le repère s'efface (lostX/lostY = NaN). */
+function clearLostMarkers(players: Player[]): void {
+  for (const q of players) {
+    q.lostX = NaN;
+    q.lostY = NaN;
+  }
+}
+
+/**
+ * Orbe dans une tuile pleine ou hors du niveau (l'attraction traverse le décor) : ramenée, sans
+ * vitesse, dans la première case libre en remontant sa colonne (elle se pose alors à la surface),
+ * sinon dans les colonnes voisines, du côté le plus proche d'abord. Sans effet sur une orbe libre.
+ */
+function unburyOrb(l: Level, o: Orb): void {
+  if (fitsAt(l, o.x, o.y + ORB_SIZE / 2, ORB_SIZE, ORB_SIZE)) return;
+  const half = ORB_SIZE / 2 + 0.01;
+  const c0 = clamp(Math.floor(o.x / TILE), 0, l.w - 1);
+  const r0 = clamp(Math.floor(o.y / TILE), 0, l.h - 1);
+  const side = o.x < (c0 + 0.5) * TILE ? -1 : 1;
+  for (let d = 0; d < l.w; d++) {
+    for (const c of d === 0 ? [c0] : [c0 + side * d, c0 - side * d]) {
+      if (c < 0 || c >= l.w) continue;
+      for (let r = r0; r >= 0; r--) {
+        if (tileAt(l, c, r) === T_SOLID) continue;
+        o.x = clamp(o.x, c * TILE + half, (c + 1) * TILE - half);
+        o.y = clamp(o.y, r * TILE + half, (r + 1) * TILE - half);
+        o.vx = 0;
+        o.vy = 0;
+        return;
+      }
+    }
+  }
 }
 
 // ─── La Marée ───────────────────────────────────────────────────────────────

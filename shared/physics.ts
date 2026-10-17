@@ -82,6 +82,13 @@ export function moveBody(b: Body, l: Level, dt: number, dropThrough: boolean, ke
         break;
       }
     }
+    // Le haut du niveau est un plafond (tileAt est vide au-dessus de la rangée 0) : sans lui, un mur
+    // escaladé de saut en saut menait hors de l'écran, par-dessus la barrière de l'arène.
+    if (ny - b.h < 0) {
+      ny = b.h;
+      b.vy = 0;
+      res.ceil = true;
+    }
   }
   b.y = ny;
   return res;
