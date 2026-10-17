@@ -1,13 +1,14 @@
 // Tests du serveur (session pure, puis serveur réel en local avec des clients SDK).
 // Lancer : npm run test:server
+import { request, type ClientRequest } from 'node:http';
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
-import { AWAY_CLOSE_CODE, BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
+import { AWAY_CLOSE_CODE, BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, sanitizePlayerName, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
 import type { Player } from '../shared/types';
 import { CloseCode, matchMaker } from '@colyseus/core';
-import { MAX_PAYLOAD, startServer } from '../server/app';
-import type { CoopRoom } from '../server/rooms/CoopRoom';
+import { MAX_HTTP_BODY, MAX_PAYLOAD, startServer } from '../server/app';
+import { MAX_ROOMS, type CoopRoom } from '../server/rooms/CoopRoom';
 import { LagLine } from '../server/lag';
 import { IDLE_RELEASE_TICKS, MAX_INPUT_QUEUE, MAX_STEPS_PER_UPDATE, CoopSession } from '../server/session';
 import { COOP_AWAY_TICKS, COOP_CLEARED_TICKS, COOP_KICK_TICKS, COOP_READY_AFTER } from '../shared/constants';
@@ -78,6 +79,18 @@ const view = (w: SnapshotWire): TestSnap => {
   check('13e joueur refusé', threw && s.playerCount === PLAYER_COLORS);
   const w = s.welcomeFor(d.pid);
   check('message de bienvenue', w.pid === d.pid && w.seed === 42 && w.color === 1 && w.stage === s.world.level.stage && w.tick === s.world.tick);
+}
+
+// 1b. Pseudos invisibles : les caractères Default_Ignorable (dont les remplissages hangul, de catégorie lettre) sont retirés.
+{
+  const cps = (s: string) => [...s].map((c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
+  for (const raw of ['ㅤㅤㅤ', 'ᅟᅠ', 'ﾠ', ' ㅤ ​⁠ ']) {
+    check(`pseudo invisible (${cps(raw)}) → Ronin`, sanitizePlayerName(raw) === 'Ronin', cps(sanitizePlayerName(raw)));
+  }
+  check('remplissages invisibles autour d’un pseudo retirés', sanitizePlayerName('ㅤKenjiㅤ') === 'Kenji', cps(sanitizePlayerName('ㅤKenjiㅤ')));
+  const s = new CoopSession(43);
+  const { pid } = s.join('ㅤㅤ');
+  check('session : pseudo invisible remplacé par Ronin dans le monde', player(s, pid)?.name === 'Ronin', cps(player(s, pid)?.name ?? ''));
 }
 
 // 2. Entrées : séquences, masque, file plafonnée.
@@ -574,18 +587,27 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     check('départs/arrivées rapides : couleurs libérées (le nouveau prend la plus basse libre)', late.room.roomId === roomId && late.welcome?.color === lowest, `couleur ${late.welcome?.color}, attendu ${lowest}`);
     check('départs/arrivées rapides : la salle continue', await flowing(witness));
 
-    // Pseudo démesuré dans les options d'arrivée.
+    // Pseudo démesuré dans les options d'arrivée (corps HTTP sous MAX_HTTP_BODY) : tronqué à 12.
     let hugeErr = '';
     try {
-      const h = await connect(url, 'N'.repeat(200_000));
+      const h = await connect(url, 'N'.repeat(4000));
       await waitFor(() => !!h.welcome, 2000);
       const p = room?.coop.world.players.find((q) => q.id === h.welcome?.pid);
-      check('pseudo de 200 000 caractères : tronqué à 12', !!p && p.name.length === 12, `${p?.name.length}`);
+      check('pseudo de 4000 caractères : tronqué à 12', !!p && p.name.length === 12, `${p?.name.length}`);
       await h.room.leave();
     } catch (x) {
       hugeErr = String(x);
     }
-    check('pseudo démesuré : pas de plantage du serveur', await flowing(witness), hugeErr);
+    check('pseudo démesuré : arrivée acceptée, pas de plantage du serveur', hugeErr === '' && (await flowing(witness)), hugeErr);
+    // Au-delà (200 000 caractères, corps HTTP > MAX_HTTP_BODY) : arrivée refusée dès le matchmaking.
+    let bigErr = '';
+    try {
+      const r = await new Client(url).joinOrCreate('coop', { name: 'N'.repeat(200_000) });
+      await r.leave();
+    } catch (x) {
+      bigErr = String(x);
+    }
+    check('pseudo de 200 000 caractères : arrivée refusée (corps HTTP trop gros), la salle continue', bigErr !== '' && (await flowing(witness)), bigErr);
 
     for (const c of [...cs, late]) if (!c.left) await c.room.leave().catch(() => undefined);
   } catch (err) {
@@ -597,28 +619,144 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
   process.env.LAG_MS = '60';
   process.env.JITTER_MS = '20';
   const srv2 = await startServer({ port: 0 });
-  delete process.env.LAG_MS;
-  delete process.env.JITTER_MS;
   try {
     const url2 = `ws://localhost:${srv2.port}`;
-    const w = await connect(url2, 'witness');
+    // La latence est lue à la création de la salle (première arrivée) : variables gardées jusque-là.
+    const w = await connect(url2, 'witness').finally(() => {
+      delete process.env.LAG_MS;
+      delete process.env.JITTER_MS;
+    });
     await waitFor(() => !!w.welcome, 3000);
+    const lagOf = (r: CoopRoom | undefined) => (r as unknown as { lag: { enabled: boolean; last: Map<string, number> } } | undefined)?.lag;
+    check('latence simulée : active dans la salle', !!lagOf(roomOf(w.room.roomId))?.enabled);
     for (let k = 0; k < 5; k++) {
       const c = await connect(url2, `lag${k}`);
       for (let i = 1; i <= 30; i++) c.room.send(MSG.input, { s: i, b: BTN.RIGHT });
       c.room.send(MSG.ping, { t: 1 });
-      await c.room.leave(); // les entrées retardées arrivent après le départ
+      await c.room.leave(); // les entrées et l'écho du ping, retardés, arrivent après le départ
     }
     await sleep(300);
     const room2 = roomOf(w.room.roomId);
     check('latence simulée + départs : session cohérente', room2?.coop.playerCount === 1 && room2.coop.world.players.length === 1, `${room2?.coop.playerCount}`);
     check('latence simulée + départs : la salle continue', await flowing(w) && !w.left);
+    // Un ping retardé exécuté après le départ ne recrée pas le canal de sortie du client parti.
+    const chans = [...(lagOf(room2)?.last.keys() ?? [])];
+    check('latence simulée + départs : aucun canal des clients partis ne survit', chans.length > 0 && chans.every((k) => k.endsWith(`:${w.room.sessionId}`)), chans.join(', '));
     await w.room.leave();
   } catch (err) {
     check('scénario de latence sans exception', false, String(err));
   }
   await srv2.stop();
   check('aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
+  process.off('uncaughtException', onCrash);
+  process.off('unhandledRejection', onCrash);
+}
+
+// ─── (d) Plafond de salles (« server full ») et corps HTTP du matchmaking bornés ─
+
+/** POST brut vers le matchmaking : statut « HTTP <code> », « coupée <code> » (connexion fermée) ou « délai ». */
+function rawPost(port: number, headers: Record<string, string | number>, send: (req: ClientRequest) => void): Promise<{ status: string; body: string }> {
+  return new Promise((resolve) => {
+    const req = request({ host: '127.0.0.1', port, path: '/matchmake/joinOrCreate/coop', method: 'POST', headers: { 'content-type': 'application/json', ...headers } }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d: string) => (body += d));
+      res.on('end', () => {
+        clearTimeout(timer);
+        resolve({ status: `HTTP ${res.statusCode}`, body });
+        req.destroy();
+      });
+    });
+    const timer = setTimeout(() => {
+      resolve({ status: 'délai', body: '' });
+      req.destroy();
+    }, 3000);
+    req.on('error', (e: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      resolve({ status: `coupée ${e.code ?? e.message}`, body: '' });
+    });
+    send(req);
+  });
+}
+
+{
+  const crashes: string[] = [];
+  const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
+  process.on('uncaughtException', onCrash);
+  process.on('unhandledRejection', onCrash);
+  // Journal d'erreurs du serveur : un refus ne doit pas produire d'exception secondaire.
+  const errors: string[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map((a) => String((a as Error)?.stack ?? a)).join(' '));
+    consoleError(...args);
+  };
+  const srv = await startServer({ port: 0 });
+  const url = `ws://localhost:${srv.port}`;
+  const stats = matchMaker.stats.local;
+  // Plafond atteint sans ouvrir MAX_ROOMS vraies salles : salles fictives ajoutées au compteur du processus.
+  const fake = MAX_ROOMS - 1 - stats.roomCount;
+  stats.roomCount += fake;
+  const opened: TestClient[] = [];
+  try {
+    const lastRoom = await new Client(url).create('coop', { name: 'last' });
+    check(`plafond : la salle n° ${MAX_ROOMS} (MAX_ROOMS) est créée`, stats.roomCount === MAX_ROOMS, `${stats.roomCount} salles`);
+    let refusal = '';
+    try {
+      const extra = await new Client(url).create('coop', { name: 'extra' });
+      await extra.leave();
+    } catch (e) {
+      refusal = String((e as Error)?.message ?? e);
+    }
+    check(`plafond : la salle n° ${MAX_ROOMS + 1} est refusée (au plus MAX_ROOMS salles par processus)`, refusal !== '' && stats.roomCount === MAX_ROOMS, `${stats.roomCount} salles, « ${refusal} »`);
+    check('refus : le client reçoit « server full » tel quel', refusal === 'server full', refusal);
+    const secondary = errors.filter((e) => /cannot disconnect|onDispose|lagStats/.test(e));
+    check('refus : aucune exception secondaire (disconnect pendant onCreate, onDispose sans session)', secondary.length === 0, secondary.map((e) => e.slice(0, 120)).join(' | '));
+    const health = await fetch(`http://localhost:${srv.port}/health`).then((r) => r.json() as Promise<{ ok: boolean }>);
+    const after = await connect(url, 'after');
+    opened.push(after);
+    await waitFor(() => !!after.welcome, 2000);
+    check('refus : serveur sain (/health, joinOrCreate place le joueur dans la salle ouverte)', health.ok && after.room.roomId === lastRoom.roomId && !!after.welcome, `${JSON.stringify(health)} ${after.room.roomId}/${lastRoom.roomId}`);
+
+    // Corps HTTP : bornés à MAX_HTTP_BODY (le framework les lirait en entier, sans limite).
+    const MIB = 1 << 20;
+    const big = await rawPost(srv.port, { 'content-length': MIB }, (req) => {
+      req.flushHeaders();
+      req.write('{"name":"' + 'N'.repeat(16 * 1024)); // le reste n'est jamais envoyé : la réponse doit venir avant
+    });
+    check('corps HTTP annoncé de 1 Mio : 413 sans lire le corps', big.status === 'HTTP 413', big.status);
+    const chunked = await rawPost(srv.port, {}, (req) => {
+      const part = 'N'.repeat(16 * 1024);
+      req.write('{"name":"');
+      for (let i = 0; i < 64; i++) req.write(part);
+      req.end('"}');
+    });
+    check('corps HTTP chunked de 1 Mio : refusé en cours de lecture (413 ou connexion coupée)', /^(HTTP 413|coupée)/.test(chunked.status), chunked.status);
+    const edge = JSON.stringify({ name: 'N'.repeat(MAX_HTTP_BODY - 11) });
+    const atMax = await rawPost(srv.port, { 'content-length': Buffer.byteLength(edge) }, (req) => req.end(edge));
+    const overMax = await rawPost(srv.port, { 'content-length': Buffer.byteLength(edge) + 1 }, (req) => {
+      req.flushHeaders();
+      req.write(edge.slice(0, 100)); // réponse attendue sur la seule longueur annoncée
+    });
+    check(`corps HTTP de ${MAX_HTTP_BODY} o accepté, ${MAX_HTTP_BODY + 1} o refusé (413)`, atMax.status === 'HTTP 200' && overMax.status === 'HTTP 413', `${atMax.status} / ${overMax.status}`);
+    const small = await rawPost(srv.port, {}, (req) => {
+      req.write('{"name":');
+      req.end('"Chunk"}');
+    });
+    check('petit corps chunked : lu par le garde puis transmis, place réservée', small.status === 'HTTP 200' && small.body.includes('sessionId'), `${small.status} ${small.body.slice(0, 80)}`);
+    const late = await connect(url, 'still');
+    opened.push(late);
+    check('après les corps refusés : un joueur rejoint toujours une salle', await waitFor(() => !!late.welcome, 2000) && late.room.roomId === lastRoom.roomId);
+    for (const c of opened) await c.room.leave().catch(() => undefined);
+    await lastRoom.leave().catch(() => undefined);
+  } catch (err) {
+    check('scénario plafond / corps HTTP sans exception', false, String((err as Error)?.stack ?? err).slice(0, 400));
+  } finally {
+    stats.roomCount -= fake;
+  }
+  await srv.stop();
+  console.error = consoleError;
+  check('plafond / corps HTTP : aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
   process.off('uncaughtException', onCrash);
   process.off('unhandledRejection', onCrash);
 }

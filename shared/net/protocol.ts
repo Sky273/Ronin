@@ -113,6 +113,7 @@ export function sanitizePlayerName(raw: unknown): string {
   const s = typeof raw === 'string' ? raw.slice(0, 64) : '';
   const cleaned = s
     .normalize('NFC')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '') // invisibles, dont les « lettres » de remplissage hangul (U+3164…)
     .replace(/\s+/gu, ' ')
     .replace(/[^\p{L}\p{N} ._-]/gu, '')
     .trim();

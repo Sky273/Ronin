@@ -29,7 +29,7 @@ export const MAX_STEPS_PER_UPDATE = 5;
 const STEP_UNITS = 1000;
 /** Liste vide partagée (aucune allocation quand personne n'est absent). */
 const NO_ONE: number[] = [];
-/** Au-delà de ce nombre de pas sans entrée (0,5 s), les boutons d'un joueur sont relâchés. */
+/** Au-delà de ce nombre de pas sans entrée (0,5 s), les boutons d'un joueur sont relâchés (hors duel). */
 export const IDLE_RELEASE_TICKS = 30;
 
 interface PlayerSlot {
@@ -49,8 +49,11 @@ interface PlayerSlot {
   lag: number;
   /** Dernier tick où le joueur a appuyé sur un bouton (un onglet laissé ouvert envoie des entrées vides). */
   lastActive: number;
-  /** Heures de réception (ms, horloge de la session) des entrées récentes : cadence soutenue en duel. */
-  recv: number[];
+  /** Heure de la dernière réception (ms, horloge de la session ou de la salle) ; -1 : aucune. */
+  lastRecv: number;
+  /** Duel : heure de référence de la cadence (-1 : hors duel) et entrées reçues depuis. */
+  floodSince: number;
+  floodCount: number;
 }
 
 /** Tick de vue valide : entier ≥ 0 (sinon ignoré). */
@@ -86,7 +89,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, recv: [] });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, lastRecv: -1, floodSince: -1, floodCount: 0 });
     return { pid: p.id, color };
   }
 
@@ -117,24 +120,33 @@ export class CoopSession {
     const input: InputMsg = { s: msg.s, b: msg.b & BUTTON_MASK };
     if (validView(msg.v)) input.v = msg.v;
     slot.queue.push(input);
+    // Heure de réception réelle si fournie (salle, banc), sinon horloge de la session.
+    const now = atMs ?? this.clockMs;
+    const prevRecv = slot.lastRecv;
+    slot.lastRecv = now;
     if (isDueling(this.world, pid)) {
       // Duel : file stricte, une entrée par tick, jamais fusionnée. Le tick prédit par le client
       // (tick serveur + entrées en attente) reste ainsi exactement le tick de consommation :
       // envoyer plus vite que 60 Hz ne fait voir le signal en avance qu'au prix d'une file qui
-      // s'allonge d'autant. Une cadence soutenue trop rapide (client accéléré) fait perdre le duel ;
-      // une rafale après une coupure (même nombre d'entrées sur la fenêtre) ne compte pas.
-      // Heure de réception réelle si fournie (salle, banc), sinon horloge de la session.
-      const now = atMs ?? this.clockMs;
-      slot.recv.push(now);
-      while (slot.recv.length && slot.recv[0] < now - DUEL.FLOOD_WINDOW_MS) slot.recv.shift();
-      const allowed = (DUEL.FLOOD_WINDOW_MS / 1000) * NET_TICK * DUEL.FLOOD_RATE + DUEL.FLOOD_SLACK;
-      if (slot.recv.length > allowed || slot.queue.length > DUEL.QUEUE_MAX) {
+      // s'allonge d'autant. Une cadence soutenue trop rapide (client accéléré) fait perdre le duel.
+      // Cadence cumulée depuis la dernière réception d'avant le duel : une rafale après une coupure,
+      // même longue, ne fait que rattraper le temps écoulé ; l'avance d'un client accéléré grandit
+      // sans cesse et finit par dépasser la marge.
+      if (slot.floodSince < 0) {
+        slot.floodSince = prevRecv >= 0 ? prevRecv : now;
+        slot.floodCount = 0;
+      }
+      slot.floodCount++;
+      const allowed = ((now - slot.floodSince) / 1000) * NET_TICK * DUEL.FLOOD_RATE + DUEL.FLOOD_SLACK;
+      if (slot.floodCount > allowed || slot.queue.length > DUEL.QUEUE_MAX) {
         forfeit(this.world, pid, DUEL_WHY.FLOOD);
         slot.queue = [input];
-        slot.recv.length = 0;
+        slot.floodSince = now;
+        slot.floodCount = 0;
       }
       return true;
     }
+    slot.floodSince = -1;
     if (slot.queue.length > MAX_INPUT_QUEUE) {
       // File saturée (rafale réseau) : on ne garde que la plus récente, en conservant
       // les appuis des entrées abandonnées pour ne pas perdre un saut ou une attaque.
@@ -201,8 +213,10 @@ export class CoopSession {
         // son retard pour que des frappes différées soient jugées en bloc contre un état plus tardif.
         slot.lag = Math.max(raw, slot.lag - 1);
         this.lagStats.add(slot.lag);
-      } else if (++slot.starved > IDLE_RELEASE_TICKS) {
+      } else if (++slot.starved > IDLE_RELEASE_TICKS && !isDueling(w, slot.pid)) {
         // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.
+        // Pas en duel : relâcher l'iai y serait une frappe (ou une faute) que le joueur n'a pas faite. Un départ
+        // y donne déjà un forfait (DISCONNECT) ; un onglet muet garde son dernier masque sans frapper (TIMEOUT).
         slot.held = 0;
       }
       this.inputs.set(slot.pid, slot.held);
