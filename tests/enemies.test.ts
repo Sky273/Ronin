@@ -1,12 +1,13 @@
 // Tests des ennemis, de l'arène et des renforts (simulation, sans réseau) : jetons d'attaque
 // à la fermeture et à la réouverture de l'arène, barrière en solo, renforts du cor, de la horde
-// et de la Marée, gardien perché.
+// et de la Marée, gardien perché, réapparition du ninja.
 // Lancer : npx esbuild tests/enemies.test.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/enemies.test.mjs && node node_modules/.cache/enemies.test.mjs
-import { ENEMY, TILE } from '../shared/constants';
-import { spawnEnemy } from '../shared/enemy';
+import { ENEMY, PLAYER, TILE } from '../shared/constants';
+import { findGround, spawnEnemy } from '../shared/enemy';
 import { BTN } from '../shared/input';
 import { damagePlayer, releaseToken, takeToken } from '../shared/interactions';
-import { arenaInside } from '../shared/level';
+import { arenaInside, type Level } from '../shared/level';
+import { Rng } from '../shared/math';
 import { fitsAt } from '../shared/physics';
 import type { Enemy, GameEvent, GameMode, Player, World } from '../shared/types';
 import { addPlayer, createWorld, nextStage, stepWorld, warpToArena } from '../shared/world';
@@ -185,6 +186,46 @@ for (const mode of ['solo', 'coop'] as GameMode[]) {
   });
   const appear = evs.filter((ev) => ev.type === 'appear' && ev.id === n.id && arenaInside(w.level, ev.x)).length;
   check(`${mode} : un ninja dehors ne se téléporte pas dans l’arène fermée`, stateOf(w) === 'arena' && !inside && appear === 0, `x−barrière ${(n.x - col * TILE).toFixed(0)} px, ${appear} réapparition(s) dedans`);
+}
+for (const mode of ['solo', 'coop'] as GameMode[]) {
+  // Ninja disparu juste avant la fermeture, le joueur entre la barrière et le déclencheur : sa destination
+  // (choisie barrière ouverte) tombait dans la colonne de la barrière ; il y réapparaissait, et son estoc le
+  // faisait entrer dans l'arène fermée.
+  let tries = 0;
+  let early = 0;
+  let hits = 0;
+  const bad: string[] = [];
+  for (let k = 0; k < 40; k++) {
+    for (const off of [-60, -75, -90, -105]) {
+      const { w, p } = quiet(1, mode);
+      const a = w.level.arena;
+      const col = a.col;
+      p.x = (col + 1) * TILE + 8 + (k / 40) * (a.trigger - (col + 1) * TILE - 8);
+      p.y = a.guardianY;
+      p.facing = 1;
+      if (p.x + off + ENEMY.ninja.w / 2 > col * TILE) continue;
+      const n = foe(w, 'ninja', p.x + off, a.guardianY, 999);
+      n.dodgeCd = 0;
+      tries++;
+      let vanishT = -1;
+      let lockT = -1;
+      let wrong = '';
+      run(w, 360, () => (stateOf(w) === 'playing' ? BTN.RIGHT : 0), (w) => {
+        const g = w.enemies.find((e) => e.id === w.stage.guardianId);
+        if (g) g.freeze = 1e9;
+        if (vanishT < 0 && n.state === 'hidden') vanishT = w.tick;
+        if (lockT < 0 && stateOf(w) === 'arena') lockT = w.tick;
+        if (lockT >= 0 && p.hp < p.maxHp) hits++;
+        p.hp = p.maxHp;
+        if (!wrong && lockT >= 0 && w.enemies.includes(n) && n.state !== 'hidden' && n.x + n.w / 2 > col * TILE) {
+          wrong = `joueur ${(p.x / TILE).toFixed(2)} écart ${off} : ${n.state} en ${(n.x / TILE).toFixed(2)}`;
+        }
+      });
+      if (vanishT >= 0 && lockT >= vanishT && lockT - vanishT < 16) early++;
+      if (wrong) bad.push(wrong);
+    }
+  }
+  check(`${mode} : ninja disparu juste avant la fermeture : jamais dans la barrière ni dans l’arène, joueur jamais touché`, early > tries / 2 && bad.length === 0 && hits === 0, `${early}/${tries} disparus < 16 ticks avant, ${bad.length} dedans, ${hits} coup(s) ${bad.slice(0, 2).join(' ; ')}`);
 }
 for (const mode of ['solo', 'coop'] as GameMode[]) {
   // Corps à corps à travers la barrière : un lancier collé dehors, le joueur collé dedans.
@@ -383,7 +424,7 @@ for (const mode of ['solo', 'coop'] as GameMode[]) {
   }
 }
 
-// ─── 12. Renforts de la horde : le corps entièrement libre ───────────────────
+// ─── 12. Renforts de la horde, ninja réapparu : le corps entièrement libre ────
 {
   let spawned = 0;
   let stuck = 0;
@@ -423,6 +464,132 @@ for (const mode of ['solo', 'coop'] as GameMode[]) {
     }
   }
   check('horde : aucun renfort encastré dans le décor à son apparition', spawned > 1000 && stuck === 0, `${stuck}/${spawned} encastrés${first ? ', ' + first : ''}`);
+}
+{
+  // Ninja : sa destination est choisie à la disparition, le sol recalculé 16 ticks plus tard près du joueur,
+  // qui a pu changer de hauteur (findGround ne regarde que la colonne du centre, ou ne trouve rien).
+  /** Disparition du ninja `n`, le joueur déplacé par `move` pendant qu'il est caché : corps libre à la réapparition ? */
+  const reappear = (w: World, p: Player, n: Enemy, move: () => void): string => {
+    let hidden = false;
+    let res = 'pas de disparition';
+    run(w, 40, () => 0, () => {
+      if (res.startsWith('réapparu')) return;
+      if (n.state === 'hidden') {
+        hidden = true;
+        move();
+      } else if (hidden) {
+        res = `réapparu en (${(n.x / TILE).toFixed(2)}, ${(n.y / TILE).toFixed(2)}) libre=${fitsAt(w.level, n.x, n.y, n.w, n.h)}`;
+      }
+      p.vx = 0;
+      p.vy = 0;
+      p.iframes = 99;
+    });
+    return res;
+  };
+  {
+    // Plateforme sautée (graine 5, étape 5) : joueur en l'air au-dessus de la plateforme de la rangée 12 à la
+    // disparition, retombé plus bas à la réapparition ; le sol trouvé (rangée 18) est contre la colonne 87 pleine.
+    const { w, p } = quiet(5);
+    for (let s = 0; s < 5; s++) nextStage(w);
+    w.enemies = [];
+    w.spawnTimer = 1e9;
+    w.wave.t = -1e9;
+    p.x = 89.81 * TILE;
+    p.y = 13.08 * TILE;
+    p.facing = 1;
+    const n = foe(w, 'ninja', 91.5 * TILE, 15 * TILE, 999);
+    n.dodgeCd = 0;
+    const fits0 = fitsAt(w.level, n.x, n.y, n.w, n.h);
+    const res = reappear(w, p, n, () => {
+      p.x = 89.81 * TILE;
+      p.y = 14.28 * TILE;
+    });
+    check('ninja : joueur retombé sous la plateforme pendant la disparition : réapparition le corps libre', fits0 && res.endsWith('libre=true'), res);
+  }
+  {
+    // Joueur descendu au pied d'un bloc (graine 24, étape 4) : findGround ne trouve rien à la destination
+    // (dans le bloc), le ninja y réapparaissait à son ancienne hauteur, entièrement dans le bloc.
+    const { w, p } = quiet(24);
+    for (let s = 0; s < 4; s++) nextStage(w);
+    w.enemies = [];
+    w.spawnTimer = 1e9;
+    w.wave.t = -1e9;
+    p.x = 43.84 * TILE;
+    p.y = 15 * TILE;
+    p.facing = -1;
+    const n = foe(w, 'ninja', 47.27 * TILE, 18 * TILE, 999);
+    n.dodgeCd = 0;
+    const fits0 = fitsAt(w.level, n.x, n.y, n.w, n.h);
+    const res = reappear(w, p, n, () => {
+      p.x = 49.3 * TILE;
+      p.y = 18 * TILE;
+    });
+    let stuck = 0;
+    run(w, 300, () => 0, () => {
+      p.x = 49.3 * TILE;
+      p.y = 18 * TILE;
+      p.iframes = 99;
+      p.hp = p.maxHp;
+      if (w.enemies.includes(n) && !fitsAt(w.level, n.x, n.y, n.w, n.h)) stuck++;
+    });
+    check('ninja : joueur descendu au pied d’un bloc pendant la disparition : réapparition le corps libre', fits0 && res.endsWith('libre=true') && stuck === 0, `${res}, ensuite ${stuck}/300 ticks encastré`);
+  }
+  // Balayage : joueur sur un sol quelconque, ninja à portée de disparition ; pendant qu'il est caché, le
+  // joueur passe sur un autre sol d'une colonne voisine (plus haut ou plus bas, sur un bloc ou à son pied),
+  // parfois en l'air.
+  /** Sols de la colonne de x (pieds) où un corps de largeur cw et de hauteur ch tient. */
+  const grounds = (l: Level, x: number, cw: number, ch: number): number[] => {
+    const out: number[] = [];
+    for (let y = findGround(l, x, 0, 0); y !== null; y = findGround(l, x, y + TILE, 0)) if (fitsAt(l, x, y, cw, ch)) out.push(y);
+    return out;
+  };
+  const rng = new Rng(2468);
+  const pick = (a: number[]): number => a[Math.floor(rng.next() * a.length)];
+  let appears = 0;
+  let stuck = 0;
+  let first = '';
+  for (let seed = 1; seed <= 4; seed++) {
+    const { w, p } = quiet(seed);
+    for (let stage = 0; stage <= 4; stage++) {
+      if (stage) nextStage(w);
+      w.spawnTimer = 1e9;
+      w.wave.t = -1e9;
+      const l = w.level;
+      for (let k = 0; k < 40; k++) {
+        w.enemies = [];
+        w.attackTokens = 0;
+        const x = rng.range(4, l.arena.col - 6) * TILE;
+        const gs = grounds(l, x, p.w, PLAYER.H);
+        if (!gs.length) continue;
+        const gy = rng.next() < 0.5 ? gs[0] : pick(gs); // souvent le plus haut (sur un bloc)
+        const nx = x + (rng.next() < 0.5 ? -1 : 1) * rng.range(50, 105);
+        const ngs = grounds(l, nx, ENEMY.ninja.w, ENEMY.ninja.h);
+        if (!ngs.length) continue;
+        p.x = x;
+        p.y = gy;
+        p.facing = rng.next() < 0.5 ? -1 : 1;
+        const n = foe(w, 'ninja', nx, pick(ngs), 999); // à n'importe quelle hauteur : il disparaît dès 110 px
+        n.dodgeCd = 0;
+        // Pendant la disparition, le joueur saute, tombe ou s'écarte (position libre, sinon inchangée).
+        const mx = x + rng.range(-90, 90);
+        const ms = grounds(l, mx, p.w, PLAYER.H);
+        const my = ms.length ? (rng.next() < 0.5 ? ms[ms.length - 1] : pick(ms)) : null; // souvent le plus bas
+        const air = rng.next() < 0.5 ? 0 : rng.range(0, 3) * TILE;
+        const to = my !== null && fitsAt(l, mx, my - air, p.w, PLAYER.H) ? { x: mx, y: my - air } : { x, y: gy };
+        const res = reappear(w, p, n, () => {
+          p.x = to.x;
+          p.y = to.y;
+        });
+        if (!res.startsWith('réapparu')) continue;
+        appears++;
+        if (!res.endsWith('libre=true')) {
+          stuck++;
+          if (!first) first = `graine ${seed} étape ${stage} : ${res}`;
+        }
+      }
+    }
+  }
+  check('ninja : jamais encastré dans le décor à sa réapparition, même si le joueur change de hauteur', appears > 300 && stuck === 0, `${stuck}/${appears} encastrés${first ? ', ' + first : ''}`);
 }
 
 if (failures) {

@@ -488,6 +488,69 @@ for (const mode of ['solo', 'coop'] as const) {
   check('accroupi resté à la hauteur de glissade : ramené à 28 px dès que possible', p.state === 'normal' && p.crouch && p.h === PLAYER.CROUCH_H, `h=${p.h}`);
 }
 
+// ─── 7. Orbe prise dans un plafond : elle retombe sous le plafond ───────────
+// Le bonus de fin de Marée est versé 60 px au-dessus du joueur : accroupi dans le tunnel bas, ou la tête
+// contre un plafond, ce point tombait dans le décor, et unburyOrb (qui ne cherchait qu'en remontant)
+// posait les orbes sur le dessus du bloc, hors d'atteinte : tout le bonus expirait.
+{
+  /** Fin de Marée au prochain tick (quota atteint), bonus de 25 × n. */
+  const endTide = (w: World, n: number): void => {
+    w.wave = { n, phase: 'tide', t: 0, kills: 99, quota: 10 + 4 * n };
+  };
+  const missed: string[] = [];
+  let runs = 0;
+  for (const seed of [1, 3]) {
+    for (const col of [77, 80, 83]) {
+      // Accroupi dans le tunnel du niveau 0 (colonnes 76 à 84, plafond plein des rangées 9 à 16).
+      const w = quiet(seed);
+      const p = addPlayer(w, 'a');
+      p.x = 70 * TILE;
+      p.y = 18 * TILE;
+      for (let i = 0; i < 20; i++) tick(w, p, BTN.RIGHT);
+      for (let i = 0; i < 400 && p.x < col * TILE; i++) tick(w, p, BTN.RIGHT | BTN.DOWN);
+      for (let i = 0; i < 10; i++) tick(w, p, BTN.DOWN);
+      const inTunnel = p.h === PLAYER.CROUCH_H && free(w, p) && !fitsAt(w.level, p.x, p.y, p.w, PLAYER.H);
+      const h0 = p.honor;
+      endTide(w, 2);
+      for (let i = 0; i < 300; i++) tick(w, p, BTN.DOWN);
+      runs++;
+      if (!inTunnel || p.honor !== h0 + 50) missed.push(`graine ${seed} col ${col} : ${inTunnel ? `+${p.honor - h0}` : 'hors du tunnel'}`);
+    }
+  }
+  {
+    // La tête contre le dessous du plateau de la zone 4 (rangées 8 à 12) : le joueur retombe, sans bouger.
+    const w = quiet(1);
+    const p = addPlayer(w, 'a');
+    p.x = 105 * TILE + 16;
+    p.y = 13 * TILE + PLAYER.H;
+    tick(w, p, 0);
+    p.x = 105 * TILE + 16;
+    p.y = 13 * TILE + PLAYER.H;
+    p.vy = 0;
+    const h0 = p.honor;
+    endTide(w, 2);
+    for (let i = 0; i < 300; i++) tick(w, p, 0);
+    runs++;
+    if (p.honor !== h0 + 50) missed.push(`sous le plateau : +${p.honor - h0}`);
+  }
+  check('bonus de Marée versé dans un tunnel bas ou la tête contre un plafond : entièrement ramassé sur place', missed.length === 0, `${runs - missed.length}/${runs} ${missed.join(', ')}`);
+  // unburyOrb seule : orbes posées dans un plafond ou un plancher, sans joueur, ramenées dans la case libre
+  // la plus proche (dessous pour le bas d'un plafond, dessus pour le haut d'un plancher), puis posées.
+  const w = quiet(1);
+  const cases: [string, Orb, number, number][] = [
+    ['plafond du tunnel (rangée 16)', orb(w, 80 * TILE + 16, 16 * TILE + 4, 0, 0, false, 1, 0), 17, 18],
+    ['bas du plateau (rangée 12)', orb(w, 105 * TILE + 16, 12 * TILE + 28, 0, 0, false, 1, 0), 13, 18],
+    ['haut du plateau (rangée 8)', orb(w, 105 * TILE + 16, 8 * TILE + 4, 0, 0, false, 1, 0), 7, 8],
+  ];
+  for (const [, o] of cases) w.orbs.push(o);
+  tick(w, null, 0);
+  const first = cases.map(([name, o, row]) => (orbFree(w, o) && Math.floor(o.y / TILE) === row ? '' : `${name} → y=${o.y.toFixed(0)}`)).filter(Boolean);
+  for (let i = 0; i < 90; i++) tick(w, null, 0);
+  const rest = cases.map(([name, o, , ground]) => (o.onGround && Math.abs(o.y + 3 - ground * TILE) < 0.5 ? '' : `${name} → y=${o.y.toFixed(0)}`)).filter(Boolean);
+  check('orbe prise dans le décor : ramenée dans la case libre la plus proche, au-dessus ou en dessous', first.length === 0, first.join(', '));
+  check('… puis posée sur le sol le plus proche (tunnel, route basse, dessus du plateau)', rest.length === 0, rest.join(', '));
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);
