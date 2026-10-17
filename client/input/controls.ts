@@ -2,7 +2,8 @@ import { BTN } from '../../shared/input';
 
 // On lit `event.code` (position physique de la touche) : ZQSD sur AZERTY et
 // WASD sur QWERTY tombent donc sur les mêmes boutons, sans configuration.
-// Les raccourcis mnémoniques (H, M, N) se lisent au contraire par la lettre produite (onChar).
+// Les raccourcis mnémoniques (H, M, N) se lisent au contraire par la lettre produite (onChar),
+// à défaut par leur position (Dvorak : h et n tombent sur des touches de jeu).
 const KEYMAP: Record<string, number> = {
   ArrowLeft: BTN.LEFT,
   KeyA: BTN.LEFT,
@@ -55,6 +56,7 @@ export class Controls {
   private charHandlers = new Map<string, () => void>();
   private anyKey: (() => void) | null = null;
   private textFn: TextFn | null = null; // mode saisie : toutes les touches vont au champ texte
+  private textDown = new Set<string>(); // touches pressées depuis l'entrée en saisie (seules à pouvoir s'y répéter)
   // Heure du dernier reset() : le clic alors en cours (ex. « Hard ») ne doit pas devenir une attaque.
   private resetAt = -Infinity;
   private padPrev = 0; // boutons de menu de la manette au tick précédent (fronts montants)
@@ -65,8 +67,10 @@ export class Controls {
       if (this.textFn) {
         // En saisie, ni boutons de jeu ni raccourcis (H, M, N…) : la touche n'appartient qu'au champ.
         if (TEXT_PREVENT.has(e.code)) e.preventDefault();
-        // Répétition autorisée (effacer en maintenant Retour arrière), sauf pour valider.
-        if (e.repeat && (e.code === 'Enter' || e.code === 'NumpadEnter')) return;
+        // Répétition autorisée (effacer en maintenant Retour arrière), sauf pour valider, et seulement
+        // d'une touche pressée dans le champ : celle qui a passé l'écran 討死, encore tenue, n'y tape rien.
+        if (!e.repeat) this.textDown.add(e.code);
+        else if (!this.textDown.has(e.code) || e.code === 'Enter' || e.code === 'NumpadEnter') return;
         // Raccourcis (Ctrl+V, ⌘+A…) : ne pas insérer la lettre. AltGr (Ctrl+Alt) reste permis.
         if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1) return;
         this.textFn(e.key, e.code);
@@ -79,8 +83,14 @@ export class Controls {
         this.latched |= b;
       }
       this.handlers.get(e.code)?.();
-      // Une touche de jeu ne déclenche jamais de raccourci (en Colemak, J produit « n »).
-      if (!b) this.charHandlers.get(shortcutChar(e.key, e.code))?.();
+      // Une touche de jeu ne déclenche jamais de raccourci (en Colemak, J produit « n »). Repli par
+      // position si la touche produit une lettre sans raccourci : en Colemak, N produit « k », d'où N.
+      // « , » (position M en AZERTY) n'est pas une lettre : pas de repli, la lettre M est ailleurs.
+      if (!b) {
+        const ch = shortcutChar(e.key, e.code);
+        const at = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : '';
+        (this.charHandlers.get(ch) ?? (ch ? this.charHandlers.get(at) : undefined))?.();
+      }
       this.anyKey?.();
     });
     window.addEventListener('keyup', (e) => {
@@ -109,7 +119,10 @@ export class Controls {
     this.handlers.set(code, fn);
   }
 
-  /** Raccourci mnémonique, par la lettre produite (insensible à la casse), hors touches de jeu. */
+  /**
+   * Raccourci mnémonique, par la lettre produite (insensible à la casse), hors touches de jeu ;
+   * à défaut, par la position de la lettre (KeyN), si cette touche produit une lettre sans raccourci.
+   */
   onChar(ch: string, fn: () => void): void {
     this.charHandlers.set(ch.toLowerCase(), fn);
   }
@@ -121,10 +134,12 @@ export class Controls {
 
   /**
    * Active (callback) ou désactive (null) le mode saisie de texte.
-   * Les états de boutons sont remis à zéro pour qu'aucune pression ne « fuie » vers le jeu.
+   * Les états de boutons sont remis à zéro pour qu'aucune pression ne « fuie » vers le jeu ;
+   * une touche déjà tenue ne se répète pas dans le champ (il faut la relâcher et la represser).
    */
   setTextMode(fn: TextFn | null): void {
     this.textFn = fn;
+    this.textDown.clear();
     this.reset();
   }
 

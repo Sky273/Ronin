@@ -190,11 +190,43 @@ section('18', () => {
   press('KeyN', 'n');
   c.setTextMode(null);
   check('18 : pendant la saisie du nom, ni M ni H ni N', n.m === 4 && n.h === 1 && n.n === 1 && typed.join('') === 'mhn', `saisi « ${typed.join('')} »`);
+  press('KeyH', 'm'); // Colemak-DH : la lettre M est en position H
+  check('18 : la lettre d\'un raccourci prime sur le repli par position', n.m === 5 && n.h === 1, `m ${n.m} · h ${n.h}`);
   check(
     '18 : shortcutChar',
     shortcutChar('m', 'Semicolon') === 'm' && shortcutChar(',', 'KeyM') === '' && shortcutChar('Enter', 'Enter') === ''
       && shortcutChar('é', 'Digit2') === '' && shortcutChar('ж', 'Semicolon') === '' && shortcutChar('Ь', 'KeyM') === 'm',
   );
+  // Les trois rangées de lettres, tapées dans chaque disposition : H, M et N doivent rester joignables
+  // (repli par position quand leur lettre tombe sur une touche de jeu), jamais par une touche de jeu.
+  const rows = ['KeyQ KeyW KeyE KeyR KeyT KeyY KeyU KeyI KeyO KeyP BracketLeft BracketRight', 'KeyA KeyS KeyD KeyF KeyG KeyH KeyJ KeyK KeyL Semicolon Quote', 'KeyZ KeyX KeyC KeyV KeyB KeyN KeyM Comma Period Slash'].flatMap((r) => r.split(' '));
+  const layouts: [string, string, string][] = [
+    // Disposition, caractère produit par chaque position de `rows`, positions attendues de H, M et N.
+    ['QWERTY', "qwertyuiop[]asdfghjkl;'zxcvbnm,./", 'KeyH KeyM KeyN'],
+    ['AZERTY', 'azertyuiop^$qsdfghjklmùwxcvbn,;:!', 'KeyH Semicolon KeyN'], // « , » en KeyM : rien (défaut 18)
+    ['Dvorak', "',.pyfgcrl/=aoeuidhtns-;qjkxbmwvz", 'KeyH KeyM KeyN'], // h et n sur J et L (attaque, iai)
+    ['Colemak', "qwfpgjluy;[]arstdhneio'zxcvbkm,./", 'KeyH KeyM KeyN'], // n sur J (attaque)
+  ];
+  for (const [name, keys, want] of layouts) {
+    const lc = new Controls(new FakeTarget() as never);
+    const by: Record<string, string[]> = { h: [], m: [], n: [] };
+    let at = '';
+    for (const ch of 'hmn') lc.onChar(ch, () => by[ch].push(at));
+    const count = () => by.h.length + by.m.length + by.n.length;
+    let games = 0;
+    const leaks: string[] = [];
+    [...keys].forEach((key, i) => {
+      at = rows[i];
+      const before = count();
+      press(at, key);
+      if (lc.sample() === 0) return;
+      games++; // touche de jeu : le bouton est enregistré
+      if (count() !== before) leaks.push(`${at} « ${key} »`);
+    });
+    const got = [by.h, by.m, by.n].map((l) => l.join('+') || 'aucune').join(' ');
+    check(`18 : ${name}, H, M et N joignables, une touche chacun`, got === want, got);
+    check(`18 : ${name}, aucune touche de jeu ne déclenche de raccourci`, games === 9 && leaks.length === 0, `${games} touches de jeu${leaks.length ? ` · ${leaks.join(', ')}` : ''}`);
+  }
 });
 
 // ─── 19 : « press any key » ─────────────────────────────────────────────────
@@ -220,6 +252,38 @@ section('19', () => {
   press('KeyE', 'e');
   c.setTextMode(null);
   check('19 : rien pendant la saisie du nom', any === 8, `${any}`);
+  // La touche qui passe l'écran (leaveGameOver ouvre le champ dans son keydown), si elle reste
+  // enfoncée, ne se répète pas dans le champ ; une touche pressée dans le champ s'y répète.
+  const field: string[] = [];
+  const toField = () => c.setTextMode((key) => field.push(key));
+  const down = (code: string, key: string, repeat = false) => win.fire('keydown', { code, key, repeat, ctrlKey: false, metaKey: false, altKey: false, preventDefault() {} });
+  const up = (code: string, key: string) => win.fire('keyup', { code, key });
+  const hold = (code: string, key: string, repeats: number) => {
+    down(code, key);
+    for (let i = 0; i < repeats; i++) down(code, key, true);
+    up(code, key);
+  };
+  c.onAnyKey(toField);
+  hold('KeyE', 'e', 8);
+  check('19 : E tenu pour passer l\'écran : rien dans le champ', field.length === 0, `saisi « ${field.join('')} »`);
+  hold('KeyE', 'e', 2);
+  check('19 : … relâché puis repressé dans le champ : saisi et répété', field.join('') === 'eee', `saisi « ${field.join('')} »`);
+  c.setTextMode(null);
+  field.length = 0;
+  hold('Backspace', 'Backspace', 8);
+  check('19 : Retour arrière tenu pour passer l\'écran : nom prérempli intact', field.length === 0, `${field.length} touches`);
+  hold('Backspace', 'Backspace', 3);
+  check('19 : … pressé dans le champ : répétition gardée', field.length === 4 && field.every((k) => k === 'Backspace'), field.join(','));
+  c.setTextMode(null);
+  field.length = 0;
+  c.onAnyKey(() => {});
+  down('KeyJ', 'j'); // tenue depuis la mort jusqu'au départ automatique (GAME_OVER_HOLD)
+  toField();
+  for (let i = 0; i < 8; i++) down('KeyJ', 'j', true);
+  up('KeyJ', 'j');
+  hold('Enter', 'Enter', 3);
+  c.setTextMode(null);
+  check('19 : touche tenue au départ automatique : rien ; Entrée pressée dans le champ : une fois', field.join(',') === 'Enter', field.join(','));
 });
 
 // ─── 17 et 27 : sourdine avant le déblocage, bruit borné au tampon ──────────
