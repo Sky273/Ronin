@@ -1166,6 +1166,39 @@ function duelInvariant(w: World): boolean {
   const ev2 = run(w, DUEL.FORFEIT_HOLD, press([b]));
   check('… relâché puis tenu FORFEIT_HOLD ticks : abandon de b', ends(ev2)[0]?.why === W.FORFEIT && ends(ev2)[0]?.winner === a.id);
 }
+{
+  // Famine d'entrées (w.starved, posé par la session qui répète le dernier masque) : l'appui d'abandon ne compte que les
+  // entrées reçues ; son compteur est en pause, ni compté ni remis à zéro, quel que soit le masque répété.
+  const starve = (w: World, who: Player, n: number, starved: boolean, script: Script): GameEvent[] => {
+    const out: GameEvent[] = [];
+    for (let i = 0; i < n; i++) {
+      w.starved = starved ? [who.id] : [];
+      out.push(...tick(w, script));
+    }
+    return out;
+  };
+  for (const repeated of [BTN.DUEL, 0]) {
+    const { w, ps } = coopWorld(2);
+    const [a, b] = ps;
+    const d = duel(w, a, b);
+    run(w, 70);
+    const mask = (m: number): Script => (_w, p) => (p === b ? m : 0);
+    const ev = [...starve(w, b, 40, false, mask(BTN.DUEL)), ...starve(w, b, 100, true, mask(repeated)), ...starve(w, b, DUEL.FORFEIT_HOLD - 41, false, mask(BTN.DUEL))];
+    check(`famine pendant l'appui (masque répété ${repeated ? 'avec' : 'sans'} DUEL) : FORFEIT_HOLD − 1 entrées reçues, pas d'abandon`, !ends(ev).length && d.phase !== 'end', `phase ${d.phase}`);
+    const ev2 = starve(w, b, 1, false, mask(BTN.DUEL));
+    check(`… l'entrée reçue suivante atteint FORFEIT_HOLD : abandon (compteur gardé pendant la famine)`, ends(ev2)[0]?.why === W.FORFEIT && ends(ev2)[0]?.winner === a.id);
+  }
+  // Appui commencé avant l'acceptation, puis famine (DUEL répété) : il ne compte toujours pas.
+  const { w, ps, cx } = coopWorld(2);
+  const [a, b] = ps;
+  put(w, a, cx - 60);
+  put(w, b, cx + 60);
+  b.facing = -1;
+  run(w, 5, press([b]));
+  const ev1 = tick(w, press([a, b]));
+  const ev = [...starve(w, b, 50, true, press([a, b])), ...starve(w, b, 3 * DUEL.FORFEIT_HOLD, false, press([a, b]))];
+  check('appui commencé avant l\'acceptation, famine pendant le duel : aucun abandon', ev1.some((x) => x.type === 'duelStart') && !ends(ev).length && w.duels!.length === 1);
+}
 
 // ─── 12. Issue acquise, défis tombés, ennemis engagés, joueurs hors combat ──
 {

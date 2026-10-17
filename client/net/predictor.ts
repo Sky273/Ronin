@@ -5,7 +5,7 @@
 // reconstruit à chaque pas (niveau partagé en lecture seule, ennemis clonés, RNG jetable) :
 // hit-stop, rebond sur la garde de l'oni, pogo et `hitList` sont prédits, et toutes les
 // mutations du monde sont jetées. Le reste du monde n'est jamais re-simulé côté client.
-import { DUEL } from '../../shared/constants';
+import { DUEL, DUEL_QUEUE_LIMIT } from '../../shared/constants';
 import { CORRECTION_SNAP_PX, CORRECTION_TAU_MS } from '../../shared/net/protocol';
 import { Rng } from '../../shared/math';
 import { stepPlayer } from '../../shared/player';
@@ -36,11 +36,12 @@ export interface PendingInput {
 /** Au-delà de ce nombre d'entrées non acquittées, on abandonne la prédiction et on se recale. */
 export const MAX_PENDING = 120;
 /**
- * Seuil en duel : la file stricte du serveur y garde jusqu'à DUEL.QUEUE_MAX entrées (rafale après une coupure), toutes
- * en attente d'accusé. Tant qu'il les garde, tick prédit = tick de consommation : la prédiction tient jusque-là (plus
- * la marge habituelle des entrées en route).
+ * Seuil en duel : la file stricte du serveur y garde jusqu'à DUEL_QUEUE_LIMIT entrées (rafale après une coupure ou un
+ * gel), toutes en attente d'accusé. Tant qu'il les garde, tick prédit = tick de consommation : la prédiction tient
+ * jusque-là (plus la marge habituelle des entrées en route). Au-delà de DUEL.QUEUE_MAX, il retire les plus anciennes :
+ * l'accusé saute d'autant et le tick prédit recule avec lui.
  */
-export const MAX_PENDING_DUEL = DUEL.QUEUE_MAX + MAX_PENDING;
+export const MAX_PENDING_DUEL = DUEL_QUEUE_LIMIT + MAX_PENDING;
 
 /** Événements du joueur local prédits (effets immédiats) ; les autres viennent du serveur. */
 export const PREDICTED_EVENTS: ReadonlySet<GameEvent['type']> = new Set<GameEvent['type']>([

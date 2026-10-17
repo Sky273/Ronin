@@ -5,8 +5,8 @@
 // rapide doit gagner.
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
-import { COOP_DUEL_RULES, duelOf, signalShown, startDuel } from '../shared/duel';
-import { DUEL, DUEL_WHY } from '../shared/constants';
+import { COOP_DUEL_RULES, duelOf, kamaeLength, signalShown, startDuel } from '../shared/duel';
+import { DUEL, DUEL_QUEUE_LIMIT, DUEL_WHY } from '../shared/constants';
 import type { GameEvent } from '../shared/types';
 import { type BenchClient, NetBench, percentile } from './net/harness';
 
@@ -477,12 +477,13 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     for (let k = 0; k < 3000 && !at() && w.duels!.includes(d); k++) bench.run(1000 / 60, script, onFrame);
     const cutAt = w.tick;
     const snaps0 = cs.map((c) => c.src.predictor.snaps);
-    const links = (cs[who].transport as unknown as Record<'up' | 'down', { opts: { lagMs: number } }>);
-    const dirs = both ? [links.up, links.down] : [links.up];
-    for (const l of dirs) l.opts.lagMs = 50 + ms;
-    bench.run(1000 / 60, script, onFrame);
-    for (const l of dirs) l.opts.lagMs = 50;
+    // Vraie coupure (rien ne passe pendant `ms`) : le lien descendant est coupé lui aussi, pas seulement ralenti le temps
+    // d'une image (qui ne porte un instantané qu'une fois sur SNAP_EVERY).
+    const { up, down } = cs[who].transport;
+    const held0 = [up.delayed, down.delayed];
+    bench.cut(cs[who], ms, both ? 'both' : 'up');
     for (let k = 0; k < 600 && w.duels!.includes(d); k++) bench.run(100, script, onFrame);
+    const held = [up.delayed - held0[0], down.delayed - held0[1]];
     const rounds = server.filter((e): e is Extract<DuelEv, { type: 'duelRound' }> => e.type === 'duelRound');
     const resumed = cutAt + (ms * 60) / 1000 + 30; // la rafale est arrivée (lien à 50 ms)
     const after = rounds.filter((_, k) => guards[k] !== undefined && guards[k] > resumed);
@@ -491,14 +492,18 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     const fair = after.every((e) => e.why === DUEL_WHY.IPPON && e.winner === A.pid && ra(e) >= 20 && ra(e) <= 21);
     const resets = cs.map((c, i) => c.src.predictor.snaps - snaps0[i]);
     const ends = server.filter((e) => e.type === 'duelEnd');
-    const safe = fouls === 0 && resets.every((n) => n === 0) && !ends.some((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
+    // La coupure a bien retenu des messages dans chaque sens coupé.
+    const bit = held[0] > 0 && (!both || held[1] > 0);
+    const safe = bit && fouls === 0 && resets.every((n) => n === 0) && !ends.some((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
     return {
       ok: safe && after.length > 0 && fair,
       safe,
-      info: `${after.length}/${rounds.length} manches après la coupure : ${rounds.map((e) => `${e.winner === A.pid ? 'A' : e.winner === B.pid ? 'B' : '-'}:${e.why}(${ra(e)})`).join(' ')} ; recalages ${resets.join('/')} ; fin ${ends.map((e) => e.type === 'duelEnd' && e.why).join(',')}`,
+      down: held[1],
+      info: `${after.length}/${rounds.length} manches après la coupure : ${rounds.map((e) => `${e.winner === A.pid ? 'A' : e.winner === B.pid ? 'B' : '-'}:${e.why}(${ra(e)})`).join(' ')} ; recalages ${resets.join('/')} ; fin ${ends.map((e) => e.type === 'duelEnd' && e.why).join(',')} ; retenus ${held.join('/')}`,
     };
   };
   const MOMENTS: ['enter' | 'kamae' | 'resolve', number][] = [['enter', 10], ['kamae', 20], ['resolve', 10]];
+  const downHeld: number[] = []; // messages descendants retenus, par cas « 2 sens »
   for (const shown of [false, true]) {
     for (const ms of [2000, 3000]) {
       const bad: string[] = [];
@@ -508,6 +513,7 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
           for (const both of [false, true]) {
             const r = fairAfterCut(ms, when, who, both, shown);
             n++;
+            if (both) downHeld.push(r.down);
             if (!r.ok) bad.push(`${when.join('@')} ${who ? 'B' : 'A'} ${both ? '2 sens' : 'montant'} : ${r.info}`);
           }
         }
@@ -515,6 +521,7 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
       check(`coupure TCP de ${ms} ms (mise en place, garde, dénouement ; A ou B ; montant ou 2 sens), script sur le tick ${shown ? 'affiché' : 'prédit'} : ensuite, le plus rapide gagne à sa réaction, sans faute ni recalage`, bad.length === 0, `${n - bad.length}/${n}${bad.length ? ' — ' + bad.slice(0, 3).join(' | ') : ''}`);
     }
   }
+  check('coupures « 2 sens » : le lien descendant est vraiment coupé (instantanés retenus) dans chaque cas', downHeld.length === 24 && downHeld.every((n) => n > 0), `messages descendants retenus : ${downHeld.join(',')}`);
   // Gardes courtes (duels 105 et 110 : gardes de 93 à 118 ticks après la manche 1) : l'arriéré peut dépasser la garde
   // suivante, dont le 斬 est alors affiché dès qu'il est connu (tick affiché monotone, déjà au-delà). Le vidage est
   // borné pour que le tick prédit l'ait atteint : vu un peu tard au pire, jamais en avance (aucune faute fabriquée).
@@ -534,16 +541,68 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     }
     check('coupures de 2 et 3 s, gardes courtes, modèle humain (tick affiché) : aucune faute ni recalage', bad.length === 0, `${n - bad.length}/${n}${bad.length ? ' — ' + bad.slice(0, 3).join(' | ') : ''}`);
   }
-  // Client accéléré (cadence soutenue de 1,5 × ou 2 × 60 Hz) : toujours en forfait FLOOD, et perdant.
+  // Coupure montante de 5,5 s, gel du serveur de 5 ou 8 s, gels de 3 s + 3 s à 500 ms d'écart, pendant une garde d'au
+  // moins 230 ticks (à son tick `at`) : la file stricte dépasse DUEL.QUEUE_MAX à cadence honnête. Pas de forfait FLOOD :
+  // la file est ramenée à sa borne sans avancer les entrées de la garde en cours (A, le plus rapide, gagne la manche à sa
+  // réaction), puis la série se joue jusqu'au bout, sans faute ni recalage de la prédiction.
+  const longStall = (kind: 'coupure' | 'gel' | 'gels', ms: number, at: number) => {
+    const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 120 + ms / 100 + at);
+    const [A, B] = cs;
+    let id = w.nextId;
+    while (kamaeLength(id, 0) < 230) id++;
+    w.nextId = id;
+    const d = startDuel(w, pa, pb, { ...COOP_DUEL_RULES, firstTo: 3 })!;
+    const script = releaseAt(bench, cs, new Map([[A.pid, 20], [B.pid, 30]]));
+    // Files à la réception : pleine (déjà QUEUE_MAX entrées) combien de fois, et la plus longue après l'entrée.
+    let full = 0;
+    let peak = 0;
+    const push = bench.session.pushInput.bind(bench.session);
+    bench.session.pushInput = (pid, msg, atMs) => {
+      if (bench.session.queueLength(pid) >= DUEL.QUEUE_MAX) full++;
+      const ok = push(pid, msg, atMs);
+      peak = Math.max(peak, bench.session.queueLength(pid));
+      return ok;
+    };
+    for (let k = 0; k < 2000 && !(d.phase === 'kamae' && d.t >= at); k++) bench.run(1000 / 60, script, calm);
+    const snaps0 = cs.map((c) => c.src.predictor.snaps);
+    if (kind === 'coupure') bench.cut(B, ms);
+    else bench.freezeServer(ms, script, calm);
+    if (kind === 'gels') {
+      bench.run(500, script, calm);
+      bench.freezeServer(ms, script, calm);
+    }
+    for (let k = 0; k < 900 && w.duels!.includes(d); k++) bench.run(100, script, calm);
+    const rounds = server.filter((e): e is Extract<DuelEv, { type: 'duelRound' }> => e.type === 'duelRound');
+    const ends = server.filter((e): e is Extract<DuelEv, { type: 'duelEnd' }> => e.type === 'duelEnd');
+    const ra = (e: Extract<DuelEv, { type: 'duelRound' }>) => (d.a.pid === A.pid ? e.ra : e.rb);
+    const first = rounds[0];
+    const fouls = rounds.filter((e) => e.why === DUEL_WHY.FOUL || e.why === DUEL_WHY.DOUBLE_FOUL).length;
+    const resets = cs.map((c, i) => c.src.predictor.snaps - snaps0[i]);
+    const ok = full > 0 && peak <= DUEL_QUEUE_LIMIT && fouls === 0 && resets.every((r) => r === 0) &&
+      !!first && first.why === DUEL_WHY.IPPON && first.winner === A.pid && ra(first) === 20 &&
+      rounds.length >= 3 && ends.length === 1 && ends[0].why === DUEL_WHY.WIN && !w.duels!.includes(d);
+    const info = `file pleine ${full} fois, au plus ${peak} ; ${rounds.map((e) => `${e.winner === A.pid ? 'A' : e.winner === B.pid ? 'B' : '-'}:${e.why}(${ra(e)})`).join(' ')} ; recalages ${resets.join('/')} ; fin ${ends.map((e) => e.why).join(',')}`;
+    return { ok, info };
+  };
+  for (const [kind, ms, at] of [['coupure', 5500, 10], ['gel', 5000, 10], ['gels', 3000, 10], ['gel', 8000, 10], ['gel', 8000, 100]] as ['coupure' | 'gel' | 'gels', number, number][]) {
+    const r = longStall(kind, ms, at);
+    const what = kind === 'coupure' ? `coupure montante de ${ms / 1000} s` : kind === 'gel' ? `gel du serveur de ${ms / 1000} s` : `gels du serveur de ${ms / 1000} s + ${ms / 1000} s à 500 ms d'écart`;
+    check(`${what} pendant une garde (≥ 230 ticks, à son tick ${at}), clients honnêtes : pas de forfait FLOOD, file bornée, manche en cours jugée à son tick, série jouée jusqu'au bout`, r.ok, r.info);
+  }
+  // Client accéléré (cadence soutenue de 1,5 × ou 2 × 60 Hz) : toujours en forfait FLOOD, et perdant, file longue comprise
+  // (après une coupure montante de 5,5 s : la longueur de la file n'est pas un critère, la cadence l'est).
   for (const hz of [90, 120]) {
-    const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 60 + hz);
-    const [, B] = cs;
-    startDuel(w, pa, pb, COOP_DUEL_RULES);
-    bench.run(1000, () => 0, calm);
-    B.sendHz = hz;
-    bench.run(8000, () => 0, calm);
-    const fl = server.filter((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
-    check(`client accéléré à ${hz} Hz pendant un duel : forfait FLOOD, l'adversaire gagne`, fl.length === 1 && fl[0].type === 'duelEnd' && fl[0].winner >= 0 && fl[0].winner !== B.pid, JSON.stringify(fl));
+    for (const cut of [0, 5500]) {
+      const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 60 + hz);
+      const [, B] = cs;
+      startDuel(w, pa, pb, COOP_DUEL_RULES);
+      bench.run(1000, () => 0, calm);
+      B.sendHz = hz;
+      if (cut) bench.cut(B, cut);
+      bench.run(8000 + cut, () => 0, calm);
+      const fl = server.filter((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
+      check(`client accéléré à ${hz} Hz pendant un duel${cut ? `, coupure montante de ${cut / 1000} s` : ''} : forfait FLOOD, l'adversaire gagne`, fl.length === 1 && fl[0].type === 'duelEnd' && fl[0].winner >= 0 && fl[0].winner !== B.pid, JSON.stringify(fl));
+    }
   }
 }
 {
@@ -588,8 +647,9 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     check(`coupure de ${ms} ms après le signal, iai tenu : B frappe quand son relâchement est consommé, pas avant`, !!rd && rd.winner === B.pid && consumed >= 0 && sig + rd.rb === consumed, `${JSON.stringify(rd)} ; relâchement consommé à sig + ${consumed - sig}`);
   }
 
-  // Appui sur G (DUEL) pendant la garde, lien montant de B coupé après `cutAfter` entrées : le masque gardé
-  // pendant la coupure ne doit pas allonger l'appui jusqu'à l'abandon (FORFEIT_HOLD), un vrai abandon passe.
+  // Appui sur G (DUEL) pendant la garde, lien montant de B coupé (bench.cut) après `cutAfter` entrées : le masque gardé
+  // pendant la coupure ne doit pas allonger l'appui jusqu'à l'abandon (FORFEIT_HOLD), un vrai abandon passe. Seules les
+  // entrées reçues comptent : les pas affamés ne s'ajoutent pas aux entrées retardées, comptées à leur arrivée.
   const gThroughCut = (hold: number, cutAfter: number, ms: number) => {
     const { bench, cs, w, calm, pa, pb, server } = netScene([40, 40], 90 + hold + ms);
     const [, B] = cs;
@@ -597,23 +657,69 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     for (let k = 0; k < 2000 && !(d.phase === 'kamae' && d.t >= 20); k++) bench.run(1000 / 60, () => 0, calm);
     let sent = 0; // entrées de B avec DUEL
     const script = (i: number): number => (cs[i] === B && sent < hold ? (sent++, BTN.DUEL) : 0);
-    const up = B.transport.up as unknown as { opts: { lagMs: number } };
     for (let k = 0; k < 300 && sent < cutAfter; k++) bench.run(1000 / 60, script, calm);
-    if (ms > 0) {
-      up.opts.lagMs = 40 + ms;
-      bench.run(1000 / 60, script, calm);
-      up.opts.lagMs = 40;
-    }
+    if (ms > 0) bench.cut(B, ms);
     bench.run(ms + 2000, script, calm);
-    return { end: server.find((e) => e.type === 'duelEnd'), B };
+    const end = server.find((e) => e.type === 'duelEnd');
+    return { end, B, forfeit: end?.type === 'duelEnd' && end.why === DUEL_WHY.FORFEIT && end.winner !== B.pid && end.winner >= 0 };
   };
   for (const [hold, cutAfter] of [[20, 10], [5, 3]]) {
     const { end } = gThroughCut(hold, cutAfter, 1000);
     check(`G tenu ${hold} ticks, coupure d'1 s après ${cutAfter} : pas d'abandon fabriqué`, !end, JSON.stringify(end));
   }
   for (const [hold, cutAfter, ms] of [[70, 10, 1000], [70, 0, 0]]) {
-    const { end, B } = gThroughCut(hold, cutAfter, ms);
-    check(`G tenu ${hold} ticks${ms ? `, coupure d'1 s après ${cutAfter}` : ''} : abandon (FORFEIT), l'adversaire gagne`, end?.type === 'duelEnd' && end.why === DUEL_WHY.FORFEIT && end.winner !== B.pid && end.winner >= 0, JSON.stringify(end));
+    const { end, forfeit } = gThroughCut(hold, cutAfter, ms);
+    check(`G tenu ${hold} ticks${ms ? `, coupure d'1 s après ${cutAfter}` : ''} : abandon (FORFEIT), l'adversaire gagne`, forfeit, JSON.stringify(end));
+  }
+  {
+    // G tenu de 35 à 59 entrées, coupure de 200 ms à 1 s au début, au milieu ou à la fin de l'appui : jamais d'abandon
+    // (les pas affamés, jusqu'à 30 avant, s'ajoutaient à l'appui). Tenu 62 ou 70 entrées : abandon, coupure comprise.
+    const bad: string[] = [];
+    const lost: string[] = [];
+    let n = 0;
+    let m = 0;
+    for (const hold of [35, 40, 45, 50, 55, 59, 62, 70]) {
+      for (const ms of [200, 400, 600, 1000]) {
+        for (const cutAfter of [2, Math.round(hold / 2), hold - 3]) {
+          const { end, forfeit } = gThroughCut(hold, cutAfter, ms);
+          const tag = `G ${hold}, ${ms} ms après ${cutAfter} : ${JSON.stringify(end)}`;
+          if (hold < DUEL.FORFEIT_HOLD) {
+            n++;
+            if (end) bad.push(tag);
+          } else {
+            m++;
+            if (!forfeit) lost.push(tag);
+          }
+        }
+      }
+    }
+    check('G tenu 35 à 59 ticks, coupure de 200 ms à 1 s n\'importe où dans l\'appui : pas d\'abandon fabriqué', bad.length === 0, `${n - bad.length}/${n}${bad.length ? ' — ' + bad.slice(0, 3).join(' | ') : ''}`);
+    check('G tenu 62 ou 70 ticks, coupure de 200 ms à 1 s n\'importe où dans l\'appui : abandon (FORFEIT), l\'adversaire gagne', lost.length === 0, `${m - lost.length}/${m}${lost.length ? ' — ' + lost.slice(0, 3).join(' | ') : ''}`);
+    // Sans coupure, inchangé : FORFEIT_HOLD entrées tenues.
+    const g59 = gThroughCut(59, 0, 0);
+    const g62 = gThroughCut(62, 0, 0);
+    check('G tenu 59 ticks sans coupure : pas d\'abandon ; 62 ticks : abandon', !g59.end && g62.forfeit, `${JSON.stringify(g59.end)} / ${JSON.stringify(g62.end)}`);
+  }
+  {
+    // G tenu depuis le défi (B défie A, qui accepte), toujours tenu pendant le duel, coupure d'1 s : l'appui commencé
+    // avant le duel ne compte pas, et le masque répété pendant la famine garde DUEL (sinon la reprise serait un nouvel
+    // appui, compté jusqu'à l'abandon).
+    const { bench, cs, w, calm, pb, server } = netScene([40, 40], 98);
+    const [, B] = cs;
+    pb.facing = -1; // B regarde A
+    let accepted = false;
+    const script = (i: number): number => {
+      if (cs[i] === B) return BTN.DUEL;
+      if (!accepted && w.duelInvites?.some((x) => x.from === B.pid && !x.cd)) return (accepted = true), BTN.DUEL;
+      return 0;
+    };
+    for (let k = 0; k < 300 && !w.duels!.length; k++) bench.run(1000 / 60, script, calm);
+    const d = w.duels![0];
+    bench.run(500, script, calm);
+    bench.cut(B, 1000);
+    bench.run(5000, script, calm);
+    const end = server.find((e) => e.type === 'duelEnd');
+    check('G tenu depuis le défi, coupure d\'1 s pendant le duel : pas d\'abandon fabriqué', !!d && (d.a.pid === B.pid || d.b.pid === B.pid) && w.duels!.includes(d) && !end, `${d ? `duel ${d.id} ${d.phase}` : 'pas de duel'} ; ${JSON.stringify(end)}`);
   }
   {
     // ATTACK tenu depuis la mise en place (sans effet), coupure d'1 s pendant la garde : le masque gardé ne le relâche

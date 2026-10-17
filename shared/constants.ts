@@ -230,8 +230,19 @@ export const DUEL = {
   SUSPECT_REACT: 10, // réaction < 167 ms (à peine au-dessus du seuil de faute) : journalisée par le serveur
   FLOOD_RATE: 1.25, // duelliste : entrées cumulées au-delà de 60 Hz × FLOOD_RATE (+ marge) : client accéléré, forfait
   FLOOD_SLACK: 30, // marge d'entrées tolérée sur ce cumul (temps réel serveur depuis le début du duel)
-  QUEUE_MAX: 300, // file stricte d'un duelliste : borne mémoire (5 s), au-delà forfait
+  QUEUE_MAX: 300, // file stricte d'un duelliste : borne mémoire (5 s), au-delà ses plus anciennes entrées sont retirées
 } as const;
+
+/**
+ * Duel : dernier tick après le signal où une manche peut encore être tranchée (frappe consommée au plus tard à ROUND_MAX,
+ * coupe sans charge, temps de lame, fenêtre du 相打ち) ; une entrée consommée au-delà est sans effet sur elle.
+ */
+export const DUEL_ROUND_LAST = DUEL.ROUND_MAX + DUEL.SLASH_EXTRA + DUEL.STRIKE_TRAVEL + DUEL.TIE_TICKS;
+/**
+ * File stricte la plus longue d'un duelliste (appuis DUEL à part) : QUEUE_MAX, sauf pendant la garde, où seules les
+ * entrées consommées après le dénouement au plus tard de la manche sont retirées (garde la plus longue, puis la manche).
+ */
+export const DUEL_QUEUE_LIMIT = Math.max(DUEL.QUEUE_MAX, DUEL.KAMAE_MAX + DUEL_ROUND_LAST + 2);
 
 /** Issues d'une manche, d'une série ou d'une invitation (événements `why`). */
 export const DUEL_WHY = {

@@ -529,6 +529,8 @@ const holds = new WeakMap<World, Map<number, number>>();
 /**
  * Abandon : DUEL tenu FORFEIT_HOLD ticks pendant un duel. L'appui doit commencer pendant le duel
  * (le bouton encore tenu depuis l'acceptation ne compte pas). À appeler avant les joueurs.
+ * Seules les entrées reçues comptent : pendant une famine (w.starved, masque répété par la session),
+ * le compteur est en pause, ni compté ni remis à zéro.
  */
 export function stepForfeits(w: World, inputs: Map<number, number>): void {
   if (!w.duels) return;
@@ -544,6 +546,7 @@ export function stepForfeits(w: World, inputs: Map<number, number>): void {
       m.delete(p.id);
       continue;
     }
+    if (w.starved && w.starved.includes(p.id)) continue;
     const b = inputs.get(p.id) ?? 0;
     const n = m.get(p.id) ?? 0;
     const held = (b & BTN.DUEL) !== 0;
