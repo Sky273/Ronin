@@ -172,6 +172,8 @@ const view = (w: SnapshotWire): TestSnap => {
 
 // 4. Latence simulée.
 {
+  /** Canaux en attente d'une LagLine (champ privé). */
+  const channelsOf = (l: LagLine) => (l as unknown as { channels?: Map<string, unknown> }).channels;
   const off = new LagLine(null);
   let ran = false;
   off.run('c', () => (ran = true));
@@ -188,6 +190,85 @@ const view = (w: SnapshotWire): TestSnap => {
   await waitFor(() => order.length === 10, 1000);
   check('latence simulée : délai appliqué, ordre conservé', order.join() === '0,1,2,3,4,5,6,7,8,9' && Math.min(...at) >= 28, `${Math.min(...at).toFixed(0)} à ${Math.max(...at).toFixed(0)} ms`);
   on.clear();
+
+  // Ordre par canal sous gigue, minuteurs réels : 40 canaux en parallèle, chacun un flux à 60 Hz rattrapé sur l'horloge
+  // (un message par tour de boucle, échéances souvent calées sur la précédente) et une rafale de 100 messages au milieu
+  // (à un instant différent par canal). Un minuteur par message les croisait (Node tronque les délais à la milliseconde
+  // et les compte depuis l'heure de boucle) : des entrées arrivaient hors séquence et la session les rejetait.
+  const LAG = 80;
+  const line = new LagLine({ lagMs: LAG, jitterMs: 40 });
+  const lineChannels = channelsOf(line);
+  const CH = 40;
+  const FLOW = 90;
+  const sent = Array.from({ length: CH }, () => 0);
+  const got: number[][] = Array.from({ length: CH }, () => []);
+  let early = 0;
+  let worst = Infinity;
+  const send = (c: number) => {
+    const k = sent[c]++;
+    const at0 = performance.now();
+    line.run(`c${c}`, () => {
+      const d = performance.now() - at0;
+      worst = Math.min(worst, d);
+      if (d < LAG - 1) early++;
+      got[c].push(k);
+    });
+  };
+  const s0 = performance.now();
+  let tickN = 0;
+  await new Promise<void>((resolve) => {
+    const flow = setInterval(() => {
+      const due = Math.min(FLOW, Math.floor((performance.now() - s0) / STEP_MS) + 1);
+      for (; tickN < due; tickN++) {
+        for (let c = 0; c < CH; c++) {
+          send(c);
+          if (tickN === 20 + c) for (let j = 0; j < 100; j++) send(c);
+        }
+      }
+      if (tickN >= FLOW) {
+        clearInterval(flow);
+        resolve();
+      }
+    }, 4);
+  });
+  const total = sent.reduce((n, x) => n + x, 0);
+  await waitFor(() => got.reduce((n, g) => n + g.length, 0) === total, 3000);
+  const inversions: string[] = [];
+  for (let c = 0; c < CH; c++) for (let i = 1; i < got[c].length; i++) if (got[c][i] <= got[c][i - 1]) inversions.push(`c${c} : ${got[c][i]} après ${got[c][i - 1]}`);
+  const delivered = got.reduce((n, g) => n + g.length, 0);
+  check(`latence simulée, flux à 60 Hz + rafale, gigue de 40 ms (${CH} canaux) : ordre strictement croissant`, delivered === total && inversions.length === 0, `${delivered}/${total} livrés, ${inversions.length} inversions ${inversions.slice(0, 3).join(' ; ')}`);
+  check('latence simulée : aucun message livré avant la latence (à 1 ms près)', early === 0, `${early} en avance, délai minimal ${worst.toFixed(1)} ms`);
+  check('latence simulée : canaux vidés retirés', lineChannels?.size === 0, `${lineChannels?.size}`);
+
+  // Beaucoup de calages au même instant (gigue plus grande que la latence) : 200 canaux × 10 messages.
+  const burst = new LagLine({ lagMs: 10, jitterMs: 30 });
+  const bursts: number[][] = Array.from({ length: 200 }, () => []);
+  for (let i = 0; i < 10; i++) for (let c = 0; c < 200; c++) burst.run(`b${c}`, () => bursts[c].push(i));
+  await waitFor(() => bursts.every((g) => g.length === 10), 1000);
+  const badBursts = bursts.filter((g) => g.join() !== '0,1,2,3,4,5,6,7,8,9');
+  check('latence simulée : 200 × 10 messages au même instant (gigue > latence), ordre conservé', badBursts.length === 0, `${badBursts.length} canaux en désordre ${badBursts.slice(0, 2).map((g) => g.join('')).join(' ; ')}`);
+
+  // Départ d'un client et fermeture de la salle : messages en attente abandonnés, aucun canal ni minuteur ne survit.
+  const gone = new LagLine({ lagMs: 20, jitterMs: 10 });
+  const goneChannels = channelsOf(gone);
+  let ranGone = 0;
+  for (let i = 0; i < 5; i++) {
+    gone.run('in:x', () => ranGone++);
+    gone.run('out:x', () => ranGone++);
+    gone.run('in:y', () => ranGone++);
+  }
+  gone.forget('in:x');
+  gone.forget('out:x');
+  const keptY = [...(goneChannels?.keys() ?? [])].join() === 'in:y';
+  gone.forget('inconnu'); // sans effet
+  await waitFor(() => ranGone === 5, 500);
+  await sleep(60);
+  check('latence simulée : forget() abandonne les messages du canal (les autres passent)', keptY && ranGone === 5 && goneChannels?.size === 0, `${ranGone} exécutés`);
+  let ranCleared = 0;
+  for (let i = 0; i < 5; i++) gone.run(`z${i % 2}`, () => ranCleared++);
+  gone.clear();
+  await sleep(60);
+  check('latence simulée : clear() annule tout', ranCleared === 0 && goneChannels?.size === 0);
 }
 
 // 5. Session : fuzz d'arrivées, départs, entrées et durées étranges — jamais d'exception, invariants tenus.
@@ -428,8 +509,25 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
   } catch (err) {
     check('scénario réseau sans exception', false, String(err));
   }
-  await srv.stop();
-  check('serveur arrêté proprement', true);
+  // Arrêt réel : stop() se résout sans erreur, puis le port refuse les connexions.
+  let stopErr = '';
+  try {
+    await srv.stop();
+  } catch (x) {
+    stopErr = String((x as Error)?.stack ?? x).slice(0, 300);
+  }
+  const afterStop = await new Promise<string>((resolve) => {
+    const s = netConnect(srv.port, '127.0.0.1');
+    const done = (r: string) => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(r);
+    };
+    const timer = setTimeout(() => done('délai'), 5000);
+    s.on('connect', () => done('connexion acceptée'));
+    s.on('error', (e: NodeJS.ErrnoException) => done(e.code ?? e.message));
+  });
+  check('serveur arrêté proprement (stop() résolu, port fermé : ECONNREFUSED)', stopErr === '' && afterStop === 'ECONNREFUSED', stopErr || afterStop);
 }
 
 // ─── (c) Robustesse du serveur réel : salle pleine, messages malformés, départs rapides ─
@@ -629,7 +727,7 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
       delete process.env.JITTER_MS;
     });
     await waitFor(() => !!w.welcome, 3000);
-    const lagOf = (r: CoopRoom | undefined) => (r as unknown as { lag: { enabled: boolean; last: Map<string, number> } } | undefined)?.lag;
+    const lagOf = (r: CoopRoom | undefined) => (r as unknown as { lag: { enabled: boolean; channels: Map<string, unknown> } } | undefined)?.lag;
     check('latence simulée : active dans la salle', !!lagOf(roomOf(w.room.roomId))?.enabled);
     for (let k = 0; k < 5; k++) {
       const c = await connect(url2, `lag${k}`);
@@ -641,15 +739,130 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     const room2 = roomOf(w.room.roomId);
     check('latence simulée + départs : session cohérente', room2?.coop.playerCount === 1 && room2.coop.world.players.length === 1, `${room2?.coop.playerCount}`);
     check('latence simulée + départs : la salle continue', await flowing(w) && !w.left);
-    // Un ping retardé exécuté après le départ ne recrée pas le canal de sortie du client parti.
-    const chans = [...(lagOf(room2)?.last.keys() ?? [])];
-    check('latence simulée + départs : aucun canal des clients partis ne survit', chans.length > 0 && chans.every((k) => k.endsWith(`:${w.room.sessionId}`)), chans.join(', '));
+    // Un ping retardé exécuté après le départ ne recrée pas le canal de sortie du client parti ; les canaux (et leurs
+    // minuteurs) des partis sont abandonnés. Restent au plus ceux du témoin, dont les instantanés sont toujours en route.
+    const chanMap = lagOf(room2)?.channels;
+    const chans = [...(chanMap?.keys() ?? [])];
+    check('latence simulée + départs : aucun canal des clients partis ne survit', chanMap instanceof Map && chans.every((k) => k.endsWith(`:${w.room.sessionId}`)), chans.join(', '));
     await w.room.leave();
   } catch (err) {
     check('scénario de latence sans exception', false, String(err));
   }
   await srv2.stop();
   check('aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
+  process.off('uncaughtException', onCrash);
+  process.off('unhandledRejection', onCrash);
+}
+
+// ─── (c bis) Duel en vraie salle sous latence simulée (80 ms + 0 à 40 ms par sens) ─
+// Latence posée sur la salle elle-même (sa LagLine remplacée avant toute entrée, comme avec LAG_MS=80 JITTER_MS=40),
+// sans variable d'environnement globale. Ordre conservé par canal, comme sur TCP : aucune entrée refusée par la session
+// comme hors séquence, réactions de duel exactes. Pilotes comme en (e) : iai tenu pendant la garde, relâché quand le
+// tick prédit (tick de l'instantané + entrées non acquittées) atteint sigTick + r ; r = 40 pour A, 20 pour B.
+{
+  const crashes: string[] = [];
+  const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
+  process.on('uncaughtException', onCrash);
+  process.on('unhandledRejection', onCrash);
+  const srv = await startServer({ port: 0 });
+  const url = `ws://localhost:${srv.port}`;
+  const timers: ReturnType<typeof setInterval>[] = [];
+  const LAG = 80;
+  try {
+    const a = await connect(url, 'Ayame');
+    const b = await connect(url, 'Benkei');
+    await waitFor(() => !!a.welcome && !!b.welcome, 3000);
+    const room = matchMaker.getLocalRoomById(a.room.roomId) as unknown as CoopRoom;
+    (room as unknown as { lag: LagLine }).lag = new LagLine({ lagMs: LAG, jitterMs: 40 });
+    const s = room.coop;
+    const w = s.world;
+    const calm = (): void => {
+      w.enemies = [];
+      w.projectiles = [];
+      w.spawnTimer = 1e6;
+      w.wave.phase = 'calm';
+      w.wave.t = 0;
+      for (const p of w.players) p.iframes = 1e6;
+    };
+    calm();
+    timers.push(setInterval(calm, 20));
+    // Entrées vues par la session : séquences acceptées, et refusées (pas plus grandes que la précédente).
+    const got = new Map<number, number[]>();
+    const refused: string[] = [];
+    const push = s.pushInput.bind(s);
+    s.pushInput = (pid, msg, atMs) => {
+      const ok = push(pid, msg, atMs);
+      if (!ok) refused.push(`pid ${pid} s=${msg.s}`);
+      else if (got.has(pid)) got.get(pid)!.push(msg.s);
+      else got.set(pid, [msg.s]);
+      return ok;
+    };
+    const rounds: Extract<GameEvent, { type: 'duelRound' }>[] = [];
+    const flush = s.flushEvents.bind(s);
+    s.flushEvents = () => {
+      for (const ev of s.pendingEvents) if (ev.type === 'duelRound') rounds.push(ev);
+      flush();
+    };
+    // Pings de A (même canal montant que ses entrées, écho sur le canal descendant des instantanés) : ordre et aller-retour.
+    const echoes: { t: number; rtt: number }[] = [];
+    a.room.onMessage(MSG.ping, (m: { t: number }) => echoes.push({ t: m.t, rtt: performance.now() - m.t }));
+    timers.push(setInterval(() => a.room.send(MSG.ping, { t: performance.now() }), 100));
+    interface Pilot { c: TestClient; pid: number; seq: number; r: number }
+    const pilots: Pilot[] = [a, b].map((c, i) => ({ c, pid: c.welcome!.pid, seq: 0, r: i === 0 ? 40 : 20 }));
+    const [pA, pB] = pilots;
+    const t0 = performance.now();
+    timers.push(setInterval(() => {
+      const due = Math.floor((performance.now() - t0) / STEP_MS);
+      for (const p of pilots) {
+        while (p.seq < due) {
+          const snap = last(p.c.snaps);
+          const predicted = snap ? snap.t + p.seq - Math.max(snap.ack, 0) : 0;
+          const d = snap?.duels.find((x) => x.a.pid === p.pid || x.b.pid === p.pid);
+          const iai = !!d && d.sigTick >= 0 && (d.phase === 'kamae' || d.phase === 'open') && predicted < d.sigTick + p.r;
+          p.c.room.send(MSG.input, { s: ++p.seq, b: iai ? BTN.IAI : 0 });
+        }
+      }
+    }, 4));
+    await sleep(1000);
+    // Gardes courtes aux deux premières manches (id choisi en conséquence) : la série se joue en moins de 10 s.
+    let id = w.nextId;
+    while (kamaeLength(id, 0) > 100 || kamaeLength(id, 1) > 100) id++;
+    w.nextId = id;
+    const pa = w.players.find((p) => p.id === pA.pid)!;
+    const pb = w.players.find((p) => p.id === pB.pid)!;
+    pb.x = pa.x + 120;
+    pb.y = pa.y;
+    const duel = startDuel(w, pa, pb, COOP_DUEL_RULES);
+    check('salle sous latence simulée : duel engagé', !!duel, `${w.players.length} joueurs`);
+    if (duel) await waitFor(() => rounds.length >= 2, 15000);
+    for (const t of timers) clearInterval(t);
+    timers.length = 0;
+    await sleep(2 * (LAG + 40) + 200); // messages encore en route dans les deux sens
+    const tag = `salle sous latence simulée (${LAG} ms + 0 à 40 ms par sens)`;
+    const rtt = echoes.length ? Math.min(...echoes.map((e) => e.rtt)) : 0;
+    check(`${tag} : latence appliquée (aller-retour d'un ping ≥ ${2 * LAG} ms à 1 ms près par sens)`, echoes.length >= 5 && rtt >= 2 * LAG - 2, `${echoes.length} échos, aller-retour minimal ${rtt.toFixed(1)} ms`);
+    check(`${tag} : aucune entrée refusée par la session (séquence hors d'ordre)`, refused.length === 0, `${refused.length} refusées, ex. ${refused.slice(0, 3).join(' ; ')}`);
+    const inOrder = pilots.every((p) => {
+      const g = got.get(p.pid) ?? [];
+      return g.length === p.seq && g.every((x, i) => x === i + 1);
+    });
+    check(`${tag} : toutes les entrées reçues, dans l'ordre d'envoi`, inOrder, pilots.map((p) => `${got.get(p.pid)?.length ?? 0}/${p.seq}`).join(', '));
+    check(`${tag} : échos de ping et instantanés reçus dans l'ordre`, echoes.every((e, i) => i === 0 || e.t > echoes[i - 1].t) && [a, b].every((c) => c.snaps.every((x, i) => i === 0 || x.t > c.snaps[i - 1].t)));
+    const reactB = rounds.slice(0, 2).map((rd) => (duel?.a.pid === pB.pid ? rd.ra : rd.rb));
+    check(
+      `${tag} : deux manches sans faute, B (le plus rapide) gagne à sa réaction`,
+      rounds.length >= 2 && rounds.slice(0, 2).every((rd, i) => rd.why === DUEL_WHY.IPPON && rd.winner === pB.pid && reactB[i] >= 20 && reactB[i] <= 21),
+      JSON.stringify(rounds.slice(0, 2)),
+    );
+    check(`${tag} : les duellistes restent connectés`, !a.left && !b.left);
+    await a.room.leave();
+    await b.room.leave();
+  } catch (err) {
+    check('scénario de duel sous latence simulée sans exception', false, String((err as Error)?.stack ?? err).slice(0, 400));
+  }
+  for (const t of timers) clearInterval(t);
+  await srv.stop();
+  check('duel sous latence simulée : aucune exception non rattrapée', crashes.length === 0, crashes.slice(0, 2).join(' | '));
   process.off('uncaughtException', onCrash);
   process.off('unhandledRejection', onCrash);
 }
@@ -743,9 +956,13 @@ function rawRequest(port: number, text: string): Promise<string> {
 
     // Corps HTTP : bornés à MAX_HTTP_BODY (le framework les lirait en entier, sans limite).
     const MIB = 1 << 20;
+    // Seul un court début du corps est écrit (le reste n'est jamais envoyé : la réponse doit venir avant ; un serveur qui
+    // attendrait le corps annoncé finirait en « délai »). Au-delà de ce que Node lit d'office (environ 16 Kio, la réserve
+    // du flux de requête), des octets restent non lus à la fermeture qui suit le 413 : Windows envoie alors un RST et
+    // le client perd le 413 qu'il n'avait pas encore lu (ECONNRESET, environ 0,5 % des essais à 16 Kio, 15 % à 64 Kio).
     const big = await rawPost(srv.port, { 'content-length': MIB }, (req) => {
       req.flushHeaders();
-      req.write('{"name":"' + 'N'.repeat(16 * 1024)); // le reste n'est jamais envoyé : la réponse doit venir avant
+      req.write('{"name":"' + 'N'.repeat(512));
     });
     check('corps HTTP annoncé de 1 Mio : 413 sans lire le corps', big.status === 'HTTP 413', big.status);
     const chunked = await rawPost(srv.port, {}, (req) => {
