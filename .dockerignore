@@ -1,0 +1,20 @@
+# Contexte de build Docker : tout sauf ce qui est réinstallé, reconstruit, local ou secret.
+# tests/ est gardé : « npm run build » lance tsc --noEmit, qui inclut les tests.
+node_modules
+dist
+dist-ssr
+dist-server
+*.tsbuildinfo
+.vite
+.git
+.gitignore
+.claude
+.env
+.env.*
+*.log
+coverage
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini
