@@ -792,8 +792,8 @@ for (const net of [false, true]) {
     return { fp: `${h.toString(16)} étape=${w.level.stage} over=${w.over}`, keys };
   };
   const golden: [number, DifficultyId, number, number, string][] = [
-    [4242, 'normal', 1, 9000, '4bc51c69 étape=2 over=false'],
-    [7, 'veryEasy', 2, 9000, 'b985761f étape=3 over=false'],
+    [4242, 'normal', 1, 9000, '592f6d52 étape=2 over=false'],
+    [7, 'veryEasy', 2, 9000, '3ff24d30 étape=3 over=false'],
   ];
   for (const [seed, diff, n, ticks, want] of golden) {
     const plain = soloFingerprint(seed, diff, n, ticks, 0);

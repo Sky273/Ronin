@@ -412,6 +412,9 @@ for (const lag of LATS) {
       const p = bench.serverPlayer(c.pid);
       if (!p) return;
       p.iframes = 600;
+      // Offre toujours en attente : une montée de niveau ne tire pas d'offre dans w.rng, et le
+      // scénario ne dépend pas du moment où les orbes (non prédites) sont ramassées.
+      if (!p.offer.length) p.offer = ['edge', 'reach', 'swift'];
       if (w.enemies.filter((e) => Math.abs(e.x - p.x) < 260).length < 2) {
         const x = p.x + p.facing * 70;
         const gy = findGround(w.level, x, p.y);

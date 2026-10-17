@@ -618,9 +618,11 @@ function nonFinite(w: World): string[] {
   check('plus aucun Honneur au sol : le repère de A disparaît (lostX = NaN)', Number.isNaN(a.lostX), `lostX=${a.lostX}`);
 }
 
-// ─── 13. Solo : empreintes de référence calculées avec la simulation de 60fb237 ─
+// ─── 13. Solo : empreintes de référence de la simulation solo ───────────────────
 // Toute modification de la simulation solo change ces empreintes : c'est voulu (le solo
-// doit rester strictement identique tant qu'on ne le modifie pas exprès).
+// doit rester strictement identique tant qu'on ne le modifie pas exprès). Dernière mise à jour
+// voulue : passe de test globale (orbes attirées pilotées, repère d'Honneur perdu, renforts de la
+// Marée qui poursuivent, renforts posés sur un corps libre).
 {
   const soloFingerprint = (seed: number, difficulty: DifficultyId, nPlayers: number, ticks: number): string => {
     const w = createWorld(seed, { difficulty });
@@ -675,13 +677,13 @@ function nonFinite(w: World): string[] {
     return `${h.toString(16)} étape=${w.level.stage} over=${w.over}`;
   };
   const golden: [number, DifficultyId, number, number, string][] = [
-    [4242, 'normal', 1, 9000, '4bc51c69 étape=2 over=false'],
-    [7, 'veryEasy', 2, 9000, 'b985761f étape=3 over=false'],
-    [99991, 'hard', 1, 6000, 'e2e14bbb étape=2 over=true'],
+    [4242, 'normal', 1, 9000, '592f6d52 étape=2 over=false'],
+    [7, 'veryEasy', 2, 9000, '3ff24d30 étape=3 over=false'],
+    [99991, 'hard', 1, 6000, '8fb79a59 étape=2 over=true'],
   ];
   for (const [seed, diff, n, ticks, want] of golden) {
     const got = soloFingerprint(seed, diff, n, ticks);
-    check(`solo identique à 60fb237 (graine ${seed}, ${diff}, ${n} joueur(s), ${ticks} ticks)`, got === want, `obtenu ${got}, attendu ${want}`);
+    check(`solo identique à la référence (graine ${seed}, ${diff}, ${n} joueur(s), ${ticks} ticks)`, got === want, `obtenu ${got}, attendu ${want}`);
   }
 }
 
@@ -1151,7 +1153,7 @@ function nonFinite(w: World): string[] {
 
 // K15. Les sabres ne traversent pas le kekkai (gardien → joueur dehors, joueur dehors → gardien).
 // B reste dehors, collé à la barrière, et attaque ; le gardien, collé de l'autre côté, balaie vers lui.
-// Témoin en solo (même scène, barrière pleine) : les coups portent, le test discrimine.
+// En solo aussi, la barrière fermée arrête les coups (le test qui discrimine est tests/enemies.test.ts §7).
 {
   const duel = (mode: 'solo' | 'coop') => {
     const w = createWorld(808, { mode });
@@ -1195,7 +1197,7 @@ function nonFinite(w: World): string[] {
   };
   const solo = duel('solo');
   const coop = duel('coop');
-  check('témoin solo : gardien et B se touchent à travers la barrière pleine (le test discrimine)', solo.locked && solo.bHurt && solo.gHurt, `PV B ${solo.hp}, gardien ${solo.ghp}`);
+  check('solo : la barrière pleine arrête aussi les coups (gardien ↔ B)', solo.locked && !solo.bHurt && !solo.gHurt, `PV B ${solo.hp}, gardien ${solo.ghp}`);
   check('kekkai : le gardien collé à la barrière ne touche pas B dehors', coop.locked && coop.arena && !coop.bHurt, `PV B ${coop.hp}`);
   check('kekkai : B dehors ne touche pas le gardien à travers la barrière', coop.locked && !coop.gHurt, `PV gardien ${coop.ghp}`);
 }
