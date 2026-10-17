@@ -536,6 +536,193 @@ function drawYagura(ctx: CanvasRenderingContext2D, x: number, y: number, r: Rand
   cFill(ctx, [{ x: x - w * 0.6, y: ry - 2 }, { x: x + w * 0.6, y: ry - 2 }, { x: x + w * 0.45, y: ry - 14 }, { x: x - w * 0.45, y: ry - 14 }], rgba(C.ink, 0.12));
 }
 
+/** Rectangle (x0, y0) – (x1, y1) pour cFill. */
+function box(x0: number, y0: number, x1: number, y1: number): Pt[] {
+  return [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+}
+
+// Dojo : hauteurs (dans la texture) des pièces du mur du fond. La couche est remontée de SHOJI_LIFT :
+// au repos, le haut de la texture déborde de l'écran (marge pour les sauts) et le seuil se tient
+// un peu au-dessus du plancher du premier plan ; dessous, le plancher fuit vers le mur.
+const SHOJI = { ceil: 58, beam: 64, ranTop: 76, ranBot: 148, kamoi: 158, top: 164, sill: 462 };
+const SHOJI_BAY = 256; // 8 travées : la texture reste tuilable
+/** Double travée ouverte (sans pilier au milieu) : au centre de la vue tant que la caméra est dans le dojo. */
+const SHOJI_OPEN = { x0: 512, x1: 1024 };
+
+/** Dojo : piliers, poutres, imposte à claire-voie et travées de shōji ; une double travée ouverte sur le paysage. */
+function makeShojiLayer(scene: Phaser.Scene, key: string, h: number): string {
+  const W = LAYER_W;
+  const { tex, ctx } = canvas(scene, key, W, h);
+  const r = seeded(97);
+  const S = SHOJI;
+  const WOOD = (a: number) => rgba(C.wood, a);
+
+  // Plafond de bois sombre, puis plâtre clair de l'imposte jusqu'au linteau.
+  cFill(ctx, box(0, 0, W, S.ceil), WOOD(0.36));
+  for (let k = 0; k < 3; k++) {
+    const y = 12 + k * 15 + (r() - 0.5) * 4;
+    for (let x0 = 0; x0 < W; x0 += 256) cDry(ctx, [{ x: x0, y }, { x: x0 + 256, y: y + (r() - 0.5) * 2 }], WOOD(0.22), 3, r, 3);
+  }
+  cFill(ctx, box(0, S.ceil, W, S.kamoi), rgba(C.paper, 0.9));
+  for (let i = 0; i < 40; i++) cBlob(ctx, r() * W, S.ceil + 10 + r() * 80, 10 + r() * 22, rgba(C.paperDark, 0.12), r, 0.3);
+
+  // Travées : imposte (ranma) au-dessus, deux panneaux de shōji coulissants dessous.
+  for (let bx = 0; bx < W; bx += SHOJI_BAY) {
+    const open = bx >= SHOJI_OPEN.x0 && bx < SHOJI_OPEN.x1;
+    if (open && bx !== SHOJI_OPEN.x0) continue; // la double travée est traitée d'un seul tenant
+    const x0 = bx + 12;
+    const x1 = (open ? SHOJI_OPEN.x1 : bx + SHOJI_BAY) - 12;
+    drawRanma(ctx, x0, x1, S.ranTop, S.ranBot, seeded(bx + 5));
+    if (open) drawOpening(ctx, x0, x1, S.kamoi + 4, S.sill - 4, seeded(bx + 7));
+    else {
+      const mid = (x0 + x1) / 2;
+      // Le panneau de droite glisse dans le rail de devant : il chevauche un peu celui de gauche.
+      drawShojiPanel(ctx, x0, mid + 2, S.top, S.sill - 4, seeded(bx * 3 + 1));
+      drawShojiPanel(ctx, mid - 2, x1, S.top, S.sill - 4, seeded(bx * 3 + 2));
+    }
+  }
+
+  // Linteau (kamoi) et seuil (shikii), par segments comme l'enceinte du château.
+  for (let x0 = 0; x0 < W; x0 += 256) {
+    const x1 = x0 + 256;
+    cStroke(ctx, [{ x: x0 - 2, y: S.kamoi }, { x: x1 + 2, y: S.kamoi + (r() - 0.5) * 1.2 }], WOOD(0.82), { width: 9, taperStart: 0, taperEnd: 0, jitter: 0.08 }, r);
+    cStroke(ctx, [{ x: x0 - 2, y: S.sill }, { x: x1 + 2, y: S.sill + (r() - 0.5) * 1.2 }], WOOD(0.85), { width: 10, taperStart: 0, taperEnd: 0, jitter: 0.08 }, r);
+    cDry(ctx, [{ x: x0, y: S.sill + 6 }, { x: x1, y: S.sill + 6 }], rgba(C.ink, 0.22), 2, r, 2);
+  }
+
+  // Piliers (hashira) : celui de x = 0 est repeint en x = W pour le raccord.
+  for (let k = 0; k <= W / SHOJI_BAY; k++) {
+    const px = k * SHOJI_BAY;
+    if (px > SHOJI_OPEN.x0 && px < SHOJI_OPEN.x1) continue;
+    drawPillar(ctx, px, S.sill + 3, seeded(((k % (W / SHOJI_BAY)) + 1) * 131));
+  }
+  // Poutre haute (nageshi) posée devant les piliers, cache-clous au droit de chacun.
+  for (let x0 = 0; x0 < W; x0 += 256) {
+    cStroke(ctx, [{ x: x0 - 2, y: S.beam }, { x: x0 + 128, y: S.beam + (r() - 0.5) * 1.5 }, { x: x0 + 258, y: S.beam }], WOOD(0.88), { width: 14, taperStart: 0, taperEnd: 0, jitter: 0.06 }, r, 2);
+    cDry(ctx, [{ x: x0, y: S.beam + 8 }, { x: x0 + 256, y: S.beam + 8 }], rgba(C.ink, 0.3), 2.4, r, 2);
+  }
+  for (let k = 0; k <= W / SHOJI_BAY; k++) {
+    const px = k * SHOJI_BAY;
+    if (px > SHOJI_OPEN.x0 && px < SHOJI_OPEN.x1) continue;
+    cBlob(ctx, px, S.beam, 4, rgba(C.ink, 0.5), seeded(k % (W / SHOJI_BAY) + 3), 0.2);
+  }
+
+  // Ombre du plafond qui descend sur le haut du mur.
+  const shade = ctx.createLinearGradient(0, S.ceil, 0, S.top + 60);
+  shade.addColorStop(0, rgba(C.wood, 0.18));
+  shade.addColorStop(1, rgba(C.wood, 0));
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, S.ceil, W, S.top + 60 - S.ceil);
+
+  drawShojiFloor(ctx, S.sill + 5, h, r);
+  tex.refresh();
+  return key;
+}
+
+/** Pilier de bois : fût au lavis, arêtes à l'encre légère, veine au pinceau sec. */
+function drawPillar(ctx: CanvasRenderingContext2D, x: number, y1: number, r: Rand): void {
+  const w = 22;
+  cStroke(ctx, [{ x, y: -2 }, { x: x + (r() - 0.5) * 1.5, y: y1 }], rgba(C.wood, 0.84), { width: w, taperStart: 0, taperEnd: 0, jitter: 0.03 }, r);
+  for (const sx of [-1, 1]) cStroke(ctx, [{ x: x + sx * (w / 2 - 1), y: -2 }, { x: x + sx * (w / 2 - 1), y: y1 }], rgba(C.ink, 0.32), { width: 1.6, taperStart: 0, taperEnd: 0, jitter: 0.2 }, r);
+  cDry(ctx, [{ x: x - 4, y: 10 }, { x: x - 3 + (r() - 0.5) * 2, y: y1 * 0.5 }, { x: x - 4, y: y1 - 6 }], rgba(C.paper, 0.16), 5, r, 3);
+  cDry(ctx, [{ x: x + 5, y: 30 + r() * 40 }, { x: x + 5, y: y1 - 20 - r() * 60 }], rgba(C.ink, 0.18), 2, r, 2);
+}
+
+/** Imposte (ranma) : cadre de bois et lattes verticales serrées. */
+function drawRanma(ctx: CanvasRenderingContext2D, x0: number, x1: number, y0: number, y1: number, r: Rand): void {
+  for (let lx = x0 + 8; lx < x1 - 4; lx += 9) {
+    cStroke(ctx, [{ x: lx, y: y0 + 2 }, { x: lx + (r() - 0.5) * 0.8, y: y1 - 2 }], rgba(C.wood, 0.34), { width: 1.5, taperStart: 0.05, taperEnd: 0.05, jitter: 0.15 }, r);
+  }
+  for (const y of [y0, y1]) cStroke(ctx, [{ x: x0, y }, { x: x1, y: y + (r() - 0.5) }], rgba(C.wood, 0.62), { width: 3, taperStart: 0, taperEnd: 0, jitter: 0.1 }, r);
+  for (const x of [x0, x1]) cStroke(ctx, [{ x, y: y0 }, { x, y: y1 }], rgba(C.wood, 0.62), { width: 3, taperStart: 0, taperEnd: 0, jitter: 0.1 }, r);
+}
+
+/** Panneau de shōji : papier lumineux, treillis (kumiko), soubassement de bois et cadre. */
+function drawShojiPanel(ctx: CanvasRenderingContext2D, a: number, b: number, y0: number, y1: number, r: Rand): void {
+  const kick = 34; // soubassement (koshi-ita)
+  const py = y1 - kick;
+  cFill(ctx, box(a, y0, b, py), rgba(C.snow, 0.9));
+  // Le jour traverse le papier : plus clair en haut, un peu voilé vers le bas.
+  const g = ctx.createLinearGradient(0, y0, 0, py);
+  g.addColorStop(0, 'rgba(255,253,245,0.18)');
+  g.addColorStop(1, rgba(C.paperDark, 0.2));
+  ctx.fillStyle = g;
+  ctx.fillRect(a, y0, b - a, py - y0);
+  for (let i = 0; i < 3; i++) cBlob(ctx, a + r() * (b - a), y0 + 20 + r() * (py - y0 - 40), 12 + r() * 16, rgba(C.paperDark, 0.1), r, 0.3);
+  cFill(ctx, box(a, py, b, y1), rgba(C.wood, 0.44));
+  cDry(ctx, [{ x: a + 6, y: py + kick * 0.45 }, { x: b - 6, y: py + kick * 0.5 }], rgba(C.ink, 0.16), 6, r, 3);
+  const lat = rgba(C.wood, 0.5);
+  for (let i = 1; i < 3; i++) {
+    const lx = a + ((b - a) * i) / 3;
+    cStroke(ctx, [{ x: lx, y: y0 }, { x: lx, y: py }], lat, { width: 1.8, taperStart: 0, taperEnd: 0, jitter: 0.1 }, r);
+  }
+  for (let ly = y0 + 36; ly < py - 10; ly += 36) cStroke(ctx, [{ x: a, y: ly }, { x: b, y: ly }], lat, { width: 1.8, taperStart: 0, taperEnd: 0, jitter: 0.1 }, r);
+  const frame = rgba(C.wood, 0.8);
+  for (const x of [a + 2, b - 2]) cStroke(ctx, [{ x, y: y0 }, { x, y: y1 }], frame, { width: 4, taperStart: 0, taperEnd: 0, jitter: 0.06 }, r);
+  for (const y of [y0 + 2, py]) cStroke(ctx, [{ x: a, y }, { x: b, y }], frame, { width: 4, taperStart: 0, taperEnd: 0, jitter: 0.06 }, r);
+  // Poignée creuse (hikite) à mi-hauteur.
+  cBlob(ctx, b - 12, (y0 + py) / 2 + 20, 3, rgba(C.ink, 0.35), r, 0.15);
+}
+
+/** Ouverture sur la véranda : store de bambou à demi roulé en haut, garde-corps en bas. */
+function drawOpening(ctx: CanvasRenderingContext2D, x0: number, x1: number, y0: number, y1: number, r: Rand): void {
+  // Store (sudare) : lamelles fines, ficelles, rouleau ; le paysage reste visible entre les lamelles.
+  const bot = y0 + 44;
+  for (let y = y0 + 2; y < bot; y += 3.2) {
+    cStroke(ctx, [{ x: x0, y }, { x: x1, y: y + (r() - 0.5) * 0.6 }], rgba(C.wood, 0.2 + r() * 0.06), { width: 1.4, taperStart: 0.01, taperEnd: 0.01, jitter: 0.25 }, r);
+  }
+  for (let k = 1; k < 5; k++) {
+    const sx = x0 + ((x1 - x0) * k) / 5;
+    cStroke(ctx, [{ x: sx, y: y0 }, { x: sx, y: bot + 4 }], rgba(C.wood, 0.4), { width: 1.2, taperStart: 0, taperEnd: 0 }, r);
+  }
+  cStroke(ctx, [{ x: x0, y: bot + 2 }, { x: (x0 + x1) / 2, y: bot + 3 }, { x: x1, y: bot + 2 }], rgba(C.wood, 0.62), { width: 6, taperStart: 0.02, taperEnd: 0.02, jitter: 0.15 }, r, 2);
+  // Garde-corps de la véranda (kōran) : deux lisses et des balustres.
+  const rail = rgba(C.wood, 0.6);
+  for (const y of [y1 - 52, y1 - 22]) cStroke(ctx, [{ x: x0 - 4, y }, { x: x1 + 4, y: y + (r() - 0.5) * 1.5 }], rail, { width: y < y1 - 30 ? 5 : 3.5, taperStart: 0, taperEnd: 0, jitter: 0.1 }, r);
+  for (let px = x0 + 30; px < x1 - 10; px += 64) {
+    cStroke(ctx, [{ x: px, y: y1 - 54 }, { x: px, y: y1 }], rail, { width: 4, taperStart: 0, taperEnd: 0, jitter: 0.08 }, r);
+    cBlob(ctx, px, y1 - 57, 3, rgba(C.wood, 0.7), r, 0.15);
+  }
+}
+
+/** Plancher qui fuit vers le mur du fond : lavis de bois, lames en perspective, reflets des piliers. */
+function drawShojiFloor(ctx: CanvasRenderingContext2D, y0: number, h: number, r: Rand): void {
+  const W = LAYER_W;
+  const g = ctx.createLinearGradient(0, y0, 0, h);
+  g.addColorStop(0, rgba(C.wood, 0.26));
+  g.addColorStop(1, rgba(C.wood, 0.05));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, y0, W, h - y0);
+  // Reflets du bois ciré : piliers renversés et lueur de l'ouverture.
+  for (let k = 0; k <= W / SHOJI_BAY; k++) {
+    const px = k * SHOJI_BAY;
+    if (px > SHOJI_OPEN.x0 && px < SHOJI_OPEN.x1) continue;
+    const rg = ctx.createLinearGradient(0, y0, 0, y0 + 64);
+    rg.addColorStop(0, rgba(C.wood, 0.16));
+    rg.addColorStop(1, rgba(C.wood, 0));
+    ctx.fillStyle = rg;
+    ctx.fillRect(px - 10, y0, 20, 64);
+  }
+  ctx.save();
+  ctx.translate((SHOJI_OPEN.x0 + SHOJI_OPEN.x1) / 2, y0 + 16);
+  ctx.scale(1, 0.12);
+  cBlob(ctx, 0, 0, 220, 'rgba(255,252,240,0.16)', r, 0.12);
+  ctx.restore();
+  // Joints des lames, de plus en plus espacés vers le premier plan.
+  const OFF = [5, 12, 21, 32, 46, 63, 84, 110, 140];
+  OFF.forEach((o, k) => {
+    const y = y0 + o;
+    if (y >= h - 4) return;
+    for (let x0 = 0; x0 < W; x0 += 256) cDry(ctx, [{ x: x0, y }, { x: x0 + 256, y: y + (r() - 0.5) * 1.2 }], rgba(C.wood, 0.24 - k * 0.018), 1.8, r, 2);
+  });
+  // Brume basse : la couche se fond dans le papier sous le plancher du premier plan.
+  const mist = ctx.createLinearGradient(0, h * 0.86, 0, h);
+  mist.addColorStop(0, 'rgba(240,231,211,0)');
+  mist.addColorStop(1, 'rgba(240,231,211,0.9)');
+  ctx.fillStyle = mist;
+  ctx.fillRect(0, h * 0.86, W, h * 0.14);
+}
+
 /** Génère (une seule fois) la couche proche d'un biome. */
 function makeNearLayer(scene: Phaser.Scene, key: string, kind: NearKind, h: number): string {
   switch (kind) {
@@ -543,6 +730,7 @@ function makeNearLayer(scene: Phaser.Scene, key: string, kind: NearKind, h: numb
     case 'roofs': return makeRoofLayer(scene, key, h);
     case 'snowPines': return makeSnowPineLayer(scene, key, h);
     case 'ramparts': return makeRampartLayer(scene, key, h);
+    case 'shoji': return makeShojiLayer(scene, key, h);
   }
 }
 
@@ -552,6 +740,12 @@ const NEAR_H = 620;
 const NEAR_Y = 120;
 /** Décalage vertical de la couche proche pour les biomes à silhouettes posées (village, neige, château). */
 const NEAR_LIFT = -130;
+/**
+ * Dojo : le mur du fond doit couvrir tout le haut de l'écran, même pendant un double saut
+ * (la caméra monte d'environ 190 px, la couche descend d'un quart), et son seuil se tenir
+ * vers y = 405 à l'écran, un peu au-dessus du plancher du premier plan (y ≈ 451 au repos).
+ */
+const SHOJI_LIFT = -190;
 
 /** Génère paresseusement les trois couches d'un biome ; les textures déjà créées sont réutilisées. */
 function ensureLayers(scene: Phaser.Scene, look: BiomeLook): BiomeLook['keys'] {
@@ -616,7 +810,8 @@ export class Backdrop {
     near.spr.setTexture(keys.near);
     // Toits, pins et remparts reposent au bas de leur texture : on remonte la couche pour que
     // leurs bases se tiennent sur l'horizon, derrière le terrain (le bambou couvre toute la hauteur).
-    near.baseY = NEAR_Y + (id === 'bamboo' ? 0 : NEAR_LIFT);
+    // Le mur du dojo, lui, monte jusqu'au-dessus de l'écran.
+    near.baseY = NEAR_Y + (id === 'bamboo' ? 0 : look.near === 'shoji' ? SHOJI_LIFT : NEAR_LIFT);
     this.sun.setTexture(ensureOrb(this.scene, look.orb));
     this.sunBase = { x: this.scene.scale.width * look.orbPos.x, y: this.scene.scale.height * look.orbPos.y };
     this.sun.setPosition(this.sunBase.x, this.sunBase.y);

@@ -9,7 +9,7 @@ import { C } from './palette';
 export type OrbKind = 'sun' | 'dusk' | 'moon' | 'blood';
 
 /** Couche proche, en parallaxe devant les montagnes. */
-export type NearKind = 'bamboo' | 'roofs' | 'snowPines' | 'ramparts';
+export type NearKind = 'bamboo' | 'roofs' | 'snowPines' | 'ramparts' | 'shoji';
 
 export interface MountainLook {
   seed: number;
@@ -83,14 +83,16 @@ export const BIOME_LOOK: Record<BiomeId, BiomeLook> = {
     near: 'ramparts',
     keys: { far: 'mFar_castle', mid: 'mMid_castle', near: 'near_castle' },
   },
-  // Dojo (M5) : provisoire, en attendant son propre fond (cloisons shoji).
+  // Dojo : intérieur de bois et de papier (piliers, shōji, imposte). Une double travée ouverte,
+  // au centre de la vue, laisse voir une lune pâle (à droite du rouleau de la finale) au-dessus de
+  // crêtes lointaines et d'une pagode ; vers le bout droit de la salle, elle passe derrière les shōji.
   dojo: {
     paperTint: 0xf3ead9,
     orb: 'moon',
-    orbPos: { x: 0.7, y: 0.18 },
-    far: { seed: 27, base: 335, amp: 200, alpha: 0.12, pines: false, pagodas: [] },
-    mid: { seed: 71, base: 360, amp: 140, alpha: 0.2, pines: true, pagodas: [] },
-    near: 'ramparts',
+    orbPos: { x: 0.62, y: 0.33 },
+    far: { seed: 33, base: 300, amp: 220, alpha: 0.14, pines: false, pagodas: [], ink: C.inkWarm },
+    mid: { seed: 79, base: 300, amp: 150, alpha: 0.22, pines: true, pagodas: [860], ink: C.inkWarm },
+    near: 'shoji',
     keys: { far: 'mFar_dojo', mid: 'mMid_dojo', near: 'near_dojo' },
   },
 };

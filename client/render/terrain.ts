@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
-import { TILE } from '../../shared/constants';
+import { DUEL, TILE } from '../../shared/constants';
 import type { BiomeId } from '../../shared/biomes';
+import { DOJO_FINAL_X, DOJO_TATAMIS } from '../../shared/dojoLevel';
 import { type Deco, type Level, T_ONEWAY, T_SOLID, tileAt } from '../../shared/level';
 import { cBlob, cDry, cFill, cStroke, hash2, type Pt, type Rand, ringPoints, seeded } from './brush';
 import { C, rgba } from './palette';
@@ -10,6 +11,9 @@ type Ctx = CanvasRenderingContext2D;
 
 const CHUNK = 2048;
 const INK = (a: number) => rgba(C.ink, a);
+/** Paille des tatamis (jonc igusa séché) et sa trame, propres au dojo. */
+const IGUSA = 0xa59c5e;
+const IGUSA_DARK = 0x5d5a2e;
 
 /** Rectangle en pixels de la tranche, bornes entières, x1 et y1 exclus. */
 interface Rect {
@@ -228,14 +232,16 @@ interface TerrainLook {
   soot: boolean;
   snow: boolean;
   joints: boolean;
+  /** Dojo : plancher de lames de bois, murs de bois, ni herbe ni mousse. */
+  boards: boolean;
 }
 
 const TERRAIN_LOOK: Record<BiomeId, TerrainLook> = {
-  bamboo: { wash: C.ink, stops: [0.24, 0.11, 0.025], grass: true, soot: false, snow: false, joints: false },
-  village: { wash: C.inkWarm, stops: [0.26, 0.13, 0.035], grass: true, soot: true, snow: false, joints: false },
-  snow: { wash: C.inkCold, stops: [0.2, 0.085, 0.02], grass: false, soot: false, snow: true, joints: false },
-  castle: { wash: C.stone, stops: [0.27, 0.17, 0.07], grass: false, soot: false, snow: false, joints: true },
-  dojo: { wash: C.stone, stops: [0.27, 0.17, 0.07], grass: false, soot: false, snow: false, joints: true }, // provisoire (M5)
+  bamboo: { wash: C.ink, stops: [0.24, 0.11, 0.025], grass: true, soot: false, snow: false, joints: false, boards: false },
+  village: { wash: C.inkWarm, stops: [0.26, 0.13, 0.035], grass: true, soot: true, snow: false, joints: false, boards: false },
+  snow: { wash: C.inkCold, stops: [0.2, 0.085, 0.02], grass: false, soot: false, snow: true, joints: false, boards: false },
+  castle: { wash: C.stone, stops: [0.27, 0.17, 0.07], grass: false, soot: false, snow: false, joints: true, boards: false },
+  dojo: { wash: C.wood, stops: [0.32, 0.2, 0.1], grass: false, soot: false, snow: false, joints: false, boards: true },
 };
 
 function lookOf(l: Level): TerrainLook {
@@ -275,7 +281,7 @@ function paintTerrain(ctx: Ctx, l: Level, x0: number, x1: number): void {
       if (!solid(tx, ty)) continue;
       depth = ty > 0 && solid(tx, ty - 1) ? depth + 1 : 0;
       const r = seeded(hash2(tx * 131 + 7, ty));
-      if (depth <= 2) {
+      if (depth <= 2 && !look.boards) {
         for (let k = 0; k < 2; k++) {
           const bx = tx * TILE + r() * TILE;
           const by = ty * TILE + r() * TILE;
@@ -287,7 +293,7 @@ function paintTerrain(ctx: Ctx, l: Level, x0: number, x1: number): void {
           ctx.fillRect(bx - rad, by - rad, rad * 2, rad * 2);
         }
       }
-      if (depth <= 1) {
+      if (depth <= 1 && !look.boards) {
         for (let k = 0; k < 3; k++) {
           const hx = tx * TILE + r() * TILE;
           const hy = ty * TILE + 6 + r() * (TILE - 8);
@@ -297,8 +303,26 @@ function paintTerrain(ctx: Ctx, l: Level, x0: number, x1: number): void {
       // Générateurs à part : le tirage du rendu historique reste inchangé.
       if (look.soot && depth <= 1) soot(ctx, tx, ty, depth, seeded(hash2(tx * 59 + 13, ty + 4099)));
       if (look.joints && (depth <= 3 || !solid(tx - 1, ty) || !solid(tx + 1, ty))) joints(ctx, tx, ty, depth, seeded(hash2(tx * 37 + 3, ty + 8191)));
+      // Dojo : les tuiles qui bordent la salle sont des murs de bois (fil vertical continu par colonne).
+      if (look.boards && [-2, -1, 1, 2].some((d) => !solid(tx + d, ty))) woodWall(ctx, tx, ty, seeded(hash2(tx * 43 + 5, ty + 12011)));
     }
   }
+
+  // 2 bis. Dojo : lames du plancher sous chaque surface, puis tatamis aux places des duels.
+  if (look.boards) {
+    for (let ty = 0; ty < l.h; ty++) {
+      let run = -1;
+      for (let tx = 0; tx <= l.w; tx++) {
+        const exposed = tx < l.w && solid(tx, ty) && !solid(tx, ty - 1);
+        if (exposed && run < 0) run = tx;
+        if (!exposed && run >= 0) {
+          if (tx - run >= 4 && inRange(run * TILE, tx * TILE)) floorBoards(ctx, l, run, tx - 1, ty, x0, x1);
+          run = -1;
+        }
+      }
+    }
+  }
+  if (l.biome === 'dojo') dojoTatamis(ctx, l, inRange);
 
   // 3. Contours : surfaces supérieures (trait principal + herbes)
   for (let ty = 0; ty < l.h; ty++) {
@@ -361,6 +385,7 @@ function topRun(ctx: Ctx, a: number, b: number, ty: number, r: Rand, look: Terra
   cStroke(ctx, pts, INK(0.92), { width: 6.5, taperStart: 0.03, taperEnd: 0.05, jitter: 0.22 }, r, 2);
   cDry(ctx, pts.map((p) => ({ x: p.x, y: p.y + 4.5 })), INK(0.35), 3, r, 3);
   if (look.snow) return snowCap(ctx, pts, 1, seeded(hash2(a * 17 + 9, ty + 3001)));
+  if (look.boards) return; // plancher ciré : rien ne pousse
   if (!look.grass) return mossRun(ctx, a, b, y, seeded(hash2(a * 23 + 1, ty + 5003)));
   // Herbes
   for (let x = a * TILE + 3; x < (b + 1) * TILE - 3; x += 5 + r() * 9) {
@@ -484,6 +509,138 @@ function joints(ctx: Ctx, tx: number, ty: number, depth: number, r: Rand): void 
   if (r() < 0.25) cDry(ctx, [{ x: x + 6, y: y + TILE * 0.6 }, { x: x + TILE - 8, y: y + TILE * 0.55 }], rgba(C.stone, a * 0.5), 3, r, 2);
 }
 
+/** Dojo : mur de bois, veines verticales tirées par colonne pour qu'elles se suivent d'une tuile à l'autre. */
+function woodWall(ctx: Ctx, tx: number, ty: number, r: Rand): void {
+  const x = tx * TILE;
+  const y = ty * TILE;
+  // Fond de papier presque opaque : le mur de bout cache le fond (piliers, shōji) qu'il borde.
+  const tile = [{ x, y }, { x: x + TILE + 0.5, y }, { x: x + TILE + 0.5, y: y + TILE + 0.5 }, { x, y: y + TILE + 0.5 }];
+  cFill(ctx, tile, rgba(C.paper, 0.82));
+  cFill(ctx, tile, rgba(C.wood, 0.52));
+  const rc = seeded(hash2(tx * 43 + 5, 12011));
+  for (let k = 0; k < 3; k++) {
+    const gx = x + 4 + rc() * (TILE - 8);
+    const a = 0.12 + rc() * 0.12;
+    cStroke(ctx, [{ x: gx, y: y - 1 }, { x: gx + (r() - 0.5) * 1.5, y: y + TILE + 1 }], rgba(C.wood, a), { width: 1.3, taperStart: 0, taperEnd: 0, jitter: 0.3 }, r);
+  }
+  if (r() < 0.06) cBlob(ctx, x + 6 + r() * (TILE - 12), y + 8 + r() * (TILE - 16), 2.2, rgba(C.wood, 0.4), r, 0.3);
+}
+
+/** Joints des lames du plancher (px sous la surface), de plus en plus espacés vers le premier plan. */
+const BOARD_OFF = [10, 22, 36, 53, 73, 97, 126, 160];
+
+/**
+ * Dojo : plancher de lames vu en fuyant. Lignes de joints sous la surface, aboutements décalés
+ * d'une rangée à l'autre, veine sèche. Chaque segment a son propre tirage : la peinture d'une
+ * tranche ne dépend pas de ce que voient ses voisines.
+ */
+function floorBoards(ctx: Ctx, l: Level, a: number, b: number, ty: number, x0: number, x1: number): void {
+  const top = ty * TILE;
+  const xa = a * TILE;
+  const xb = (b + 1) * TILE;
+  // Profondeur de la masse sous la surface (au milieu de la course).
+  const mx = Math.floor((a + b) / 2);
+  let end = ty;
+  while (end + 1 < l.h && tileAt(l, mx, end + 1) === T_SOLID) end++;
+  const bottom = (end + 1) * TILE - 4;
+  const SEG = 128;
+  BOARD_OFF.forEach((o, k) => {
+    const y = top + o;
+    if (y >= bottom) return;
+    const alpha = 0.3 - k * 0.026;
+    for (let sx = xa, i = 0; sx < xb; sx += SEG, i++) {
+      const ex = Math.min(xb, sx + SEG);
+      if (ex < x0 || sx > x1) continue;
+      const r = seeded(hash2(i * 31 + k + a * 1009, ty * 7 + 14009));
+      cDry(ctx, [{ x: sx - 1, y: y + (r() - 0.5) * 0.8 }, { x: ex + 1, y: y + (r() - 0.5) * 0.8 }], rgba(C.wood, alpha), 1.8, r, 2);
+      // Veine du bois, à peine posée, dans la rangée au-dessus du joint.
+      if (r() < 0.6) {
+        const gy = top + (k ? BOARD_OFF[k - 1] : 4) + (o - (k ? BOARD_OFF[k - 1] : 4)) * (0.3 + r() * 0.4);
+        const gx = sx + r() * SEG * 0.5;
+        cDry(ctx, [{ x: gx, y: gy }, { x: Math.min(ex, gx + 30 + r() * 60), y: gy + (r() - 0.5) * 1.2 }], rgba(C.wood, alpha * 0.4), 1.4, r, 2);
+      }
+    }
+    // Aboutements des lames dans la rangée au-dessus du joint (la première est sous le trait de sol).
+    if (k === 0) return;
+    const yTop = top + BOARD_OFF[k - 1];
+    const len = 84 + k * 24;
+    const off = seeded(hash2(k, ty * 13 + 14011 + a))() * len;
+    for (let jx = xa + off, j = 0; jx < xb - 6; jx += len, j++) {
+      if (jx < x0 - 4 || jx > x1 + 4) continue;
+      const r = seeded(hash2(j * 17 + k + a * 1013, ty + 14017));
+      const x = jx + (r() - 0.5) * 10;
+      cStroke(ctx, [{ x, y: yTop + 1.5 }, { x: x + (r() - 0.5) * 1.5, y: y - 1.5 }], rgba(C.wood, alpha * 0.85), { width: 1.4, taperStart: 0.15, taperEnd: 0.15, jitter: 0.2 }, r);
+    }
+  });
+}
+
+/** Demi-longueur d'un tatami (marges de 18 px au-delà des marques de duel). */
+const TATAMI_HW = DUEL.GAP / 2 + 18;
+/** Élargissement du bord avant du tatami (perspective du plancher). */
+const TATAMI_SPREAD = 8;
+
+/** Dojo : tatamis tracés sur le plancher aux places des duels, marques des deux duellistes, centre de la finale. */
+function dojoTatamis(ctx: Ctx, l: Level, inRange: (px0: number, px1: number) => boolean): void {
+  const half = DUEL.GAP / 2;
+  // Surface sous une abscisse : première tuile pleine de la colonne.
+  const ground = (x: number) => {
+    const tx = Math.floor(x / TILE);
+    for (let ty = 0; ty < l.h; ty++) if (tileAt(l, tx, ty) === T_SOLID) return ty * TILE;
+    return l.pxH;
+  };
+  // Biais d'une marque : parallèle à la trame du tatami le plus proche.
+  const slant = (x: number) => {
+    const c = DOJO_TATAMIS.reduce((best, t) => (Math.abs(t - x) < Math.abs(best - x) ? t : best), DOJO_TATAMIS[0]);
+    return ((x - c) / TATAMI_HW) * TATAMI_SPREAD;
+  };
+  DOJO_TATAMIS.forEach((cx, i) => {
+    if (!inRange(cx - TATAMI_HW - 20, cx + TATAMI_HW + 20)) return;
+    const y = ground(cx);
+    tatami(ctx, cx, y, seeded(hash2(i, 15013)));
+    for (const sx of [-1, 1]) duelMark(ctx, cx + sx * half, y, slant(cx + sx * half), INK(0.82), seeded(hash2(i * 2 + (sx > 0 ? 1 : 0), 15017)));
+  });
+  // Finale, au milieu de la salle : ensō vermillon entre les deux tatamis du centre, marques vermillon.
+  const fx = DOJO_FINAL_X;
+  if (!inRange(fx - half - 20, fx + half + 20)) return;
+  const fy = ground(fx);
+  const rf = seeded(15031);
+  ctx.save();
+  ctx.translate(fx, fy + 18);
+  ctx.scale(1, 0.3);
+  cBlob(ctx, 0, 0, 25, rgba(C.paper, 0.55), rf, 0.08); // papier ravivé : les joints du plancher s'effacent
+  cStroke(ctx, ringPoints(0, 0, 20, -Math.PI * 0.42, Math.PI * 1.42, 22), rgba(C.red, 0.78), { width: 6, taperStart: 0.25, taperEnd: 0.5, jitter: 0.2 }, rf, 2);
+  ctx.restore();
+  for (const sx of [-1, 1]) duelMark(ctx, fx + sx * half, ground(fx + sx * half), slant(fx + sx * half), rgba(C.red, 0.85), seeded(hash2(sx > 0 ? 1 : 0, 15037)));
+}
+
+/** Tatami posé sur le plancher, vu en fuyant : natte claire, trame d'igusa, liserés (heri) sombres. */
+function tatami(ctx: Ctx, cx: number, y: number, r: Rand): void {
+  const hw = TATAMI_HW;
+  const sp = TATAMI_SPREAD;
+  const y0 = y + 6;
+  const y1 = y + 30;
+  const quad = [{ x: cx - hw, y: y0 }, { x: cx + hw, y: y0 }, { x: cx + hw + sp, y: y1 }, { x: cx - hw - sp, y: y1 }];
+  // Le papier ravivé efface les lames sous la natte, puis le lavis paille de l'igusa.
+  cFill(ctx, quad, rgba(C.paper, 0.6));
+  cFill(ctx, quad, rgba(IGUSA, 0.3));
+  for (let x = -hw + 5; x < hw - 4; x += 5.5) {
+    const t = x / hw;
+    cStroke(ctx, [{ x: cx + x, y: y0 + 3 }, { x: cx + x + t * sp, y: y1 - 3 }], rgba(IGUSA_DARK, 0.16 + r() * 0.1), { width: 0.9, taperStart: 0.1, taperEnd: 0.1, jitter: 0.2 }, r);
+  }
+  cStroke(ctx, [{ x: cx - hw, y: y0 + 1 }, { x: cx + hw, y: y0 + 1 }], rgba(C.inkSoft, 0.72), { width: 3.2, taperStart: 0.02, taperEnd: 0.02, jitter: 0.12 }, r);
+  cStroke(ctx, [{ x: cx - hw - sp, y: y1 - 1.5 }, { x: cx + hw + sp, y: y1 - 1.5 }], rgba(C.inkSoft, 0.8), { width: 4.4, taperStart: 0.02, taperEnd: 0.02, jitter: 0.12 }, r);
+  // Bouts courts à peine marqués : les marques des duellistes, plus appuyées, ne s'y confondent pas.
+  for (const sx of [-1, 1]) cStroke(ctx, [{ x: cx + sx * hw, y: y0 }, { x: cx + sx * (hw + sp), y: y1 }], INK(0.3), { width: 1.5, taperStart: 0.05, taperEnd: 0.05 }, r);
+}
+
+/** Marque d'un duelliste sur le tatami : trait court appuyé, en biais avec la trame. */
+function duelMark(ctx: Ctx, x: number, y: number, slant: number, style: string, r: Rand): void {
+  const y0 = y + 9;
+  const y1 = y + 27;
+  cStroke(ctx, [{ x: x - slant * 0.1, y: y0 }, { x: x + slant * 0.5, y: (y0 + y1) / 2 }, { x: x + slant, y: y1 }], style, { width: 4, taperStart: 0.08, taperEnd: 0.55, jitter: 0.15 }, r, 2);
+  cBlob(ctx, x - slant * 0.1, y0 + 1, 2.4, style, r, 0.25);
+}
+
 // ─── Décors ────────────────────────────────────────────────────────────────
 
 function drawDeco(ctx: Ctx, d: Deco, r: Rand, biome: BiomeId): void {
@@ -499,9 +656,8 @@ function drawDeco(ctx: Ctx, d: Deco, r: Rand, biome: BiomeId): void {
     case 'sakura': return sakura(ctx, d.x, d.y, d.s, r);
     case 'house': return house(ctx, d.x, d.y, d.s, r, biome === 'village');
     case 'rampart': return rampart(ctx, d.x, d.y, d.s, r);
-    case 'scroll': // provisoire (M5) : rouleau et râtelier du dojo
-    case 'rack':
-      return;
+    case 'scroll': return hangingScroll(ctx, d.x, d.y, d.s, r);
+    case 'rack': return swordRack(ctx, d.x, d.y, d.s, r);
   }
 }
 
@@ -855,4 +1011,169 @@ function rampart(ctx: Ctx, x: number, y: number, s: number, r: Rand): void {
     cStroke(ctx, [{ x: tx - tw * 0.7 - 6 * s, y: r2 - 5 * s }, { x: tx - tw * 0.4, y: r2 }, { x: tx + tw * 0.4, y: r2 }, { x: tx + tw * 0.7 + 6 * s, y: r2 - 5 * s }], INK(0.95), { width: 5.5 * s, taperStart: 0.14, taperEnd: 0.14 }, r, 3);
     for (const sx of [-1, 1]) cBlob(ctx, tx + sx * (tw * 0.4 - 1), r2 - 3 * s, 2.4 * s, INK(0.9), r);
   }
+}
+
+// ─── Dojo : rouleau calligraphié et râtelier ───────────────────────────────
+
+/** Trait d'un caractère dans une case unité (x vers la droite, y vers le bas). */
+interface GlyphStroke {
+  p: [number, number][];
+  /** Épaisseur relative. */
+  w: number;
+  /** Point ou trait jeté : la fin s'effile davantage. */
+  flick?: boolean;
+  /** Grand trait balayé (le 辶 de 道) : le pinceau s'appuie en avançant. */
+  sweep?: boolean;
+}
+
+/** 道 : 首 (deux points, barre, 丿, 目) dans la marche 辶 (point, zigzag, grand balayé). */
+const GLYPH_DO: GlyphStroke[] = [
+  { p: [[0.47, 0.05], [0.54, 0.15]], w: 1.15, flick: true },
+  { p: [[0.8, 0.04], [0.72, 0.15]], w: 1.15, flick: true },
+  { p: [[0.36, 0.21], [0.64, 0.205], [0.93, 0.19]], w: 1 },
+  { p: [[0.64, 0.22], [0.56, 0.31]], w: 0.9, flick: true },
+  { p: [[0.45, 0.31], [0.455, 0.71]], w: 0.95 },
+  { p: [[0.45, 0.31], [0.84, 0.3], [0.83, 0.71]], w: 1 },
+  { p: [[0.47, 0.44], [0.82, 0.435]], w: 0.8 },
+  { p: [[0.47, 0.57], [0.82, 0.565]], w: 0.8 },
+  { p: [[0.47, 0.7], [0.82, 0.695]], w: 0.85 },
+  { p: [[0.13, 0.12], [0.21, 0.21]], w: 1.2, flick: true },
+  { p: [[0.05, 0.35], [0.23, 0.345], [0.11, 0.53], [0.21, 0.59]], w: 0.95 },
+  { p: [[0.2, 0.59], [0.2, 0.8], [0.32, 0.88], [0.62, 0.9], [0.97, 0.95]], w: 1, sweep: true },
+];
+
+/** 場 : 土 à gauche, 昜 à droite (日, longue barre, 勿). */
+const GLYPH_JO: GlyphStroke[] = [
+  { p: [[0.05, 0.4], [0.3, 0.385]], w: 0.9 },
+  { p: [[0.18, 0.16], [0.185, 0.8]], w: 1 },
+  { p: [[0.04, 0.86], [0.34, 0.74]], w: 0.9, flick: true },
+  { p: [[0.47, 0.05], [0.475, 0.34]], w: 0.85 },
+  { p: [[0.47, 0.05], [0.86, 0.045], [0.855, 0.34]], w: 0.9 },
+  { p: [[0.49, 0.195], [0.85, 0.19]], w: 0.75 },
+  { p: [[0.49, 0.33], [0.85, 0.325]], w: 0.8 },
+  { p: [[0.37, 0.45], [0.66, 0.44], [0.97, 0.43]], w: 1 },
+  { p: [[0.57, 0.5], [0.5, 0.59], [0.38, 0.67]], w: 0.9, flick: true },
+  { p: [[0.5, 0.58], [0.91, 0.575], [0.88, 0.84], [0.82, 0.95], [0.74, 0.9]], w: 0.9 },
+  { p: [[0.69, 0.62], [0.62, 0.76], [0.5, 0.87]], w: 0.8, flick: true },
+  { p: [[0.83, 0.64], [0.74, 0.82], [0.6, 0.95]], w: 0.8, flick: true },
+];
+
+/** Calligraphie d'un caractère dans la case (x, y) – (x + size, y + size), trait par trait. */
+function glyph(ctx: Ctx, g: GlyphStroke[], x: number, y: number, size: number, style: string, r: Rand): void {
+  for (const st of g) {
+    const pts = st.p.map(([u, v]) => ({ x: x + u * size + (r() - 0.5) * size * 0.012, y: y + v * size + (r() - 0.5) * size * 0.012 }));
+    const width = size * 0.085 * st.w;
+    if (st.sweep) cStroke(ctx, pts, style, { width, widthFn: (t) => 0.6 + t * 0.9, taperStart: 0.06, taperEnd: 0.14, jitter: 0.12 }, r, 3);
+    else cStroke(ctx, pts, style, { width, taperStart: st.flick ? 0.05 : 0.12, taperEnd: st.flick ? 0.7 : 0.3, jitter: 0.14 }, r);
+  }
+}
+
+/**
+ * Rouleau suspendu (kakejiku) : cordon montant au plafond, baguette, monture de soie, bandes
+ * ichimonji, papier calligraphié 道場, signature et sceau vermillon, rouleau lesté du bas.
+ * Il pend au-dessus de la place de la finale, entre les deux duellistes.
+ */
+function hangingScroll(ctx: Ctx, x: number, y: number, s: number, r: Rand): void {
+  const w = 34 * s; // demi-largeur de la monture
+  const T = y - 236 * s; // baguette du haut
+  const B = y - 56 * s; // rouleau du bas
+  const hook = T - 16 * s;
+  // Cordon : du crochet jusqu'au plafond, et les deux brins vers la baguette.
+  cStroke(ctx, [{ x, y: hook }, { x, y: y - 440 * s }], INK(0.5), { width: 1.4 * s, taperStart: 0, taperEnd: 0 }, r);
+  for (const sx of [-1, 1]) cStroke(ctx, [{ x: x + sx * w * 0.6, y: T }, { x, y: hook }], INK(0.7), { width: 1.3 * s, taperStart: 0, taperEnd: 0 }, r);
+  cBlob(ctx, x, hook, 2.4 * s, INK(0.85), r, 0.2);
+  // Ombre portée sur le mur, puis la monture.
+  cFill(ctx, [{ x: x - w + 4 * s, y: T + 4 * s }, { x: x + w + 4 * s, y: T + 4 * s }, { x: x + w + 4 * s, y: B + 3 * s }, { x: x - w + 4 * s, y: B + 3 * s }], INK(0.1));
+  cFill(ctx, [{ x: x - w, y: T }, { x: x + w, y: T }, { x: x + w, y: B }, { x: x - w, y: B }], rgba(C.paper, 0.92));
+  cFill(ctx, [{ x: x - w, y: T }, { x: x + w, y: T }, { x: x + w, y: B }, { x: x - w, y: B }], rgba(C.wood, 0.5));
+  cDry(ctx, [{ x: x - w + 3 * s, y: T + 4 * s }, { x: x - w + 4 * s, y: B - 4 * s }], rgba(C.paper, 0.14), 4 * s, r, 3);
+  // Bordure intérieure (chūberi) claire autour du papier.
+  const hw = 22 * s;
+  const p0 = T + 32 * s;
+  const p1 = B - 26 * s;
+  cFill(ctx, [{ x: x - hw - 5 * s, y: p0 - 5 * s }, { x: x + hw + 5 * s, y: p0 - 5 * s }, { x: x + hw + 5 * s, y: p1 + 5 * s }, { x: x - hw - 5 * s, y: p1 + 5 * s }], rgba(C.paperDark, 0.85));
+  // Bandes ichimonji au-dessus et au-dessous du papier.
+  for (const by of [p0 - 3 * s, p1 + 3 * s]) cStroke(ctx, [{ x: x - hw - 5 * s, y: by }, { x: x + hw + 5 * s, y: by }], rgba(C.redDeep, 0.55), { width: 3 * s, taperStart: 0, taperEnd: 0, jitter: 0.08 }, r);
+  // Papier (honshi).
+  cFill(ctx, [{ x: x - hw, y: p0 }, { x: x + hw, y: p0 }, { x: x + hw, y: p1 }, { x: x - hw, y: p1 }], rgba(C.snow, 0.96));
+  // Fūtai : deux bandes qui pendent de la baguette.
+  for (const sx of [-1, 1]) {
+    const fx = x + sx * w * 0.4;
+    cStroke(ctx, [{ x: fx, y: T + 1 }, { x: fx, y: T + 30 * s }], rgba(C.paperDark, 0.75), { width: 4 * s, taperStart: 0, taperEnd: 0 }, r);
+    cStroke(ctx, [{ x: fx, y: T + 29 * s }, { x: fx, y: T + 30 * s }], INK(0.45), { width: 4 * s, taperStart: 0, taperEnd: 0 }, r);
+  }
+  // 道場, de haut en bas.
+  const size = 40 * s;
+  const ink = INK(0.92);
+  glyph(ctx, GLYPH_DO, x - size / 2, p0 + 6 * s, size, ink, r);
+  glyph(ctx, GLYPH_JO, x - size / 2, p0 + 50 * s, size, ink, r);
+  // Sceau vermillon, en bas à gauche du papier.
+  const q = 3.4 * s;
+  const sx0 = x - 11.5 * s;
+  const sy = p0 + 108 * s;
+  cFill(ctx, [{ x: sx0 - q, y: sy - q }, { x: sx0 + q, y: sy - q }, { x: sx0 + q, y: sy + q }, { x: sx0 - q, y: sy + q }], rgba(C.red, 0.82));
+  cStroke(ctx, [{ x: sx0 - q * 0.5, y: sy }, { x: sx0 + q * 0.5, y: sy }], rgba(C.snow, 0.7), { width: 0.9 * s, taperStart: 0, taperEnd: 0 }, r);
+  // Baguette du haut et rouleau du bas (jiku), embouts sombres.
+  cStroke(ctx, [{ x: x - w - 2 * s, y: T }, { x: x + w + 2 * s, y: T }], rgba(C.wood, 0.95), { width: 4 * s, taperStart: 0, taperEnd: 0 }, r);
+  cStroke(ctx, [{ x: x - w - 1 * s, y: B }, { x: x + w + 1 * s, y: B }], rgba(C.wood, 0.95), { width: 6.5 * s, taperStart: 0, taperEnd: 0 }, r);
+  for (const sx of [-1, 1]) cBlob(ctx, x + sx * (w + 4.5 * s), B, 3.6 * s, INK(0.88), r, 0.15);
+}
+
+/**
+ * Râtelier (katana-kake) : socle, deux montants à crochets, chapeau. Trois bokken de chêne clair
+ * et, en haut, un sabre au fourreau laqué, cordon vermillon pendant.
+ */
+function swordRack(ctx: Ctx, x: number, y: number, s: number, r: Rand): void {
+  const hw = 30 * s; // demi-écart des montants
+  const h = 96 * s;
+  const wood = rgba(C.wood, 0.9);
+  cStroke(ctx, [{ x: x - hw - 14 * s, y: y - 3 }, { x: x + hw + 14 * s, y: y - 3 }], wood, { width: 6 * s, taperStart: 0.04, taperEnd: 0.04, jitter: 0.1 }, r);
+  for (const sx of [-1, 1]) {
+    const px = x + sx * hw;
+    cStroke(ctx, [{ x: px - sx * 8 * s, y: y - 4 }, { x: px + sx * 8 * s, y: y - 4 }], wood, { width: 5 * s, taperStart: 0.1, taperEnd: 0.1 }, r);
+    cStroke(ctx, [{ x: px, y: y - 5 }, { x: px + (r() - 0.5) * 1.5, y: y - h }], wood, { width: 5 * s, taperStart: 0, taperEnd: 0.04, jitter: 0.08 }, r);
+    cDry(ctx, [{ x: px + 1.2 * s, y: y - 8 }, { x: px + 1.2 * s, y: y - h + 6 }], rgba(C.paper, 0.18), 1.6 * s, r, 2);
+  }
+  cStroke(ctx, [{ x: x - hw - 9 * s, y: y - h - 1 }, { x, y: y - h + 1 }, { x: x + hw + 9 * s, y: y - h - 1 }], wood, { width: 5 * s, taperStart: 0.1, taperEnd: 0.1, jitter: 0.1 }, r, 2);
+  // Étages : crochets relevés sur chaque montant, un sabre posé sur chaque paire.
+  const tiers = [22, 42, 62, 82];
+  tiers.forEach((t, k) => {
+    const yy = y - t * s;
+    for (const sx of [-1, 1]) {
+      const px = x + sx * hw;
+      cStroke(ctx, [{ x: px, y: yy + 2 * s }, { x: px + sx * 6 * s, y: yy + 2 * s }, { x: px + sx * 7.5 * s, y: yy - 2.5 * s }], INK(0.7), { width: 2.2 * s, taperStart: 0, taperEnd: 0.3 }, r);
+    }
+    if (k === tiers.length - 1) sheathedSword(ctx, x, yy - 1.5 * s, s, r);
+    else bokken(ctx, x, yy - 1 * s, s, 0.5 + k * 0.08, r);
+  });
+}
+
+/** Sabre de bois (bokken) posé à plat, poignée à gauche, pointe à droite légèrement relevée. */
+function bokken(ctx: Ctx, x: number, y: number, s: number, a: number, r: Rand): void {
+  const L = 48 * s;
+  const blade = [{ x: x - L, y }, { x: x - L * 0.2, y: y - 1.6 * s }, { x: x + L * 0.6, y: y - 2.4 * s }, { x: x + L, y: y - 4.2 * s }];
+  cStroke(ctx, blade, rgba(C.wood, a), { width: 3.8 * s, taperStart: 0.02, taperEnd: 0.18, jitter: 0.08 }, r, 3);
+  cStroke(ctx, [{ x: x - L, y }, { x: x - L * 0.45, y: y - 1 * s }], rgba(C.wood, Math.min(0.95, a + 0.3)), { width: 4.2 * s, taperStart: 0.04, taperEnd: 0 }, r);
+  // Garde (tsuba) : bague d'encre au bout de la poignée.
+  cStroke(ctx, [{ x: x - L * 0.45, y: y - 4.4 * s }, { x: x - L * 0.45, y: y + 3 * s }], INK(0.8), { width: 2.4 * s, taperStart: 0.1, taperEnd: 0.1 }, r);
+  cDry(ctx, [{ x: x - L * 0.35, y: y - 2.6 * s }, { x: x + L * 0.85, y: y - 4.2 * s }], rgba(C.paper, 0.2), 1.2 * s, r, 2);
+}
+
+/** Sabre au fourreau (saya) laqué d'encre, tranchant vers le haut ; poignée tressée et cordon (sageo) vermillon. */
+function sheathedSword(ctx: Ctx, x: number, y: number, s: number, r: Rand): void {
+  const L = 50 * s;
+  const saya = [{ x: x - L * 0.4, y: y - 0.6 * s }, { x: x + L * 0.2, y: y - 2.4 * s }, { x: x + L * 0.75, y: y - 3.4 * s }, { x: x + L, y: y - 5.6 * s }];
+  cStroke(ctx, saya, INK(0.9), { width: 4.4 * s, taperStart: 0, taperEnd: 0.06, jitter: 0.06 }, r, 3);
+  cDry(ctx, saya.map((p) => ({ x: p.x, y: p.y - 1 * s })), rgba(C.paper, 0.22), 1.2 * s, r, 2);
+  // Poignée (tsuka) et sa tresse en losanges.
+  const g0 = x - L;
+  const g1 = x - L * 0.48;
+  cStroke(ctx, [{ x: g0, y: y + 1.4 * s }, { x: g1, y }], INK(0.85), { width: 4 * s, taperStart: 0.04, taperEnd: 0 }, r);
+  for (let gx = g0 + 3 * s; gx < g1 - 2 * s; gx += 4.2 * s) {
+    cStroke(ctx, [{ x: gx - 1.2 * s, y: y - 1.2 * s }, { x: gx + 1.2 * s, y: y + 1.6 * s }], rgba(C.paper, 0.5), { width: 0.8 * s, taperStart: 0, taperEnd: 0 }, r);
+  }
+  cBlob(ctx, g0 - 0.6 * s, y + 1.4 * s, 2.2 * s, INK(0.9), r, 0.15);
+  // Garde ronde et cordon qui pend sous le fourreau.
+  cBlob(ctx, g1 + 1 * s, y - 0.4 * s, 3.8 * s, INK(0.9), r, 0.12);
+  cStroke(ctx, [{ x: g1 + 8 * s, y: y + 1.5 * s }, { x: g1 + 10 * s, y: y + 9 * s }, { x: g1 + 6 * s, y: y + 15 * s }, { x: g1 + 9 * s, y: y + 19 * s }], rgba(C.red, 0.8), { width: 1.6 * s, taperStart: 0.05, taperEnd: 0.5 }, r, 3);
 }
