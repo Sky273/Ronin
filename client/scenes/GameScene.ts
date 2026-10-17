@@ -543,7 +543,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number): void {
-    const dt = Math.min(delta, 50) / 1000;
+    // En solo, le jeu ralentit sous 20 images/s ; en ligne, le temps réel (assez d'entrées jusqu'à 15 images/s).
+    const dt = Math.min(delta, this.src === this.local ? 50 : RemoteSource.MAX_FRAME_MS) / 1000;
     this.timeScale = 1;
     this.scoreboard.update(dt);
     // Menus à la manette (fronts montants traduits en codes clavier).

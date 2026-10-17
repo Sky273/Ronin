@@ -5,6 +5,7 @@
 // reconstruit à chaque pas (niveau partagé en lecture seule, ennemis clonés, RNG jetable) :
 // hit-stop, rebond sur la garde de l'oni, pogo et `hitList` sont prédits, et toutes les
 // mutations du monde sont jetées. Le reste du monde n'est jamais re-simulé côté client.
+import { DUEL } from '../../shared/constants';
 import { CORRECTION_SNAP_PX, CORRECTION_TAU_MS } from '../../shared/net/protocol';
 import { Rng } from '../../shared/math';
 import { stepPlayer } from '../../shared/player';
@@ -153,9 +154,9 @@ export class Predictor {
     }
     this.server = clonePlayer(self);
     while (this.pending.length && this.pending[0].seq <= ack) this.pending.shift();
-    if (stageChanged) this.pending.length = 0;
 
-    // Rejeu des entrées non acquittées, sans effets, depuis l'état exact du serveur.
+    // Rejeu des entrées non acquittées, sans effets, depuis l'état exact du serveur. Changement d'étape
+    // compris : le serveur consommera ces entrées dans le nouveau niveau (ctx.level), elles sont gardées.
     let state = clonePlayer(self);
     let before = state;
     for (let i = 0; i < this.pending.length; i++) {
@@ -281,7 +282,9 @@ function simulate(p: Player, b: number, enemies: Enemy[], ctx: PredictionContext
   };
   // Duels et défis copiés en profondeur : les mutations de la prédiction sont jetées avec le monde.
   // Absents du contexte (solo, anciens appels) : le monde jetable n'en a pas, comportement inchangé.
-  if (ctx.duels) w.duels = ctx.duels.map(cloneDuel);
+  // Fin de série : le serveur libère les duellistes à un tick connu d'avance (END_TICKS après l'entrée
+  // en phase end) ; au-delà, la copie de l'instantané n'est plus rejouée (joueur prédit libre, pas figé).
+  if (ctx.duels) w.duels = ctx.duels.filter((d) => !(d.phase === 'end' && d.t + (tick - ctx.serverTick) >= DUEL.END_TICKS)).map(cloneDuel);
   if (ctx.duelInvites) w.duelInvites = ctx.duelInvites.map((i) => ({ ...i }));
   stepPlayer(w, p, b);
   return w.events;

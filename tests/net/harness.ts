@@ -227,6 +227,27 @@ export class NetBench {
     };
   }
 
+  /**
+   * Gel du serveur pendant `ms` (boucle bloquée : ramasse-miettes, machine chargée) : ni pas ni
+   * instantané, les clients continuent de tourner. À la reprise (premier update suivant), un seul appel
+   * rattrape au plus MAX_STEPS_PER_UPDATE pas, comme CoopRoom.tick : le reste du temps est perdu et la
+   * chronologie du serveur recule d'autant par rapport aux horloges des clients.
+   */
+  freezeServer(ms: number, input: (i: number, frame: number) => number, onFrame?: (frame: number) => void): void {
+    const s = this.session as unknown as { update(elapsedMs: number): number };
+    const orig = s.update;
+    let owed = 0;
+    s.update = (elapsedMs) => {
+      owed += elapsedMs;
+      return 0;
+    };
+    this.run(ms, input, onFrame);
+    s.update = (elapsedMs) => {
+      s.update = orig;
+      return orig.call(this.session, elapsedMs + owed);
+    };
+  }
+
   /** Joueur du serveur (état de référence). */
   serverPlayer(pid: number): Player | undefined {
     return this.session.world.players.find((p) => p.id === pid);

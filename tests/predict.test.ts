@@ -2,7 +2,8 @@
 // Lancer : npm run test:predict
 import { clonePlayer, type PredictionContext, Predictor } from '../client/net/predictor';
 import { createEnemy, findGround } from '../shared/enemy';
-import { TILE as TILE_PX } from '../shared/constants';
+import { DUEL_WHY, TILE as TILE_PX } from '../shared/constants';
+import { COOP_DUEL_RULES, duelOf, forfeit, startDuel } from '../shared/duel';
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
 import type { Duel, DuelInvite, Enemy, GameEvent, Player, World } from '../shared/types';
@@ -286,6 +287,45 @@ function combatDirect(jitterMs: number, seed: number): { px: number[]; snapped: 
   check('changement d’étape : recalage net', pred.snaps > snaps1 && Math.abs(me2.x - sv2.x) < 1 && a.src.world.level.stage === w.level.stage, `snaps ${snaps1} → ${pred.snaps}`);
 }
 
+// 4 bis. Changement d'étape en marchant, latence fixe : les entrées en vol (que le serveur consomme dans
+// le nouveau niveau) ne sont pas jetées. Un seul recalage net, puis aucune correction ; le tick prédit
+// reste le tick de consommation (marque PICK3, sans effet hors du bilan) et le monde affiché ne se fige pas.
+for (const lag of [50, 150]) {
+  const bench = new NetBench({ seed: 21, lagMs: lag, jitterMs: 0 });
+  const a = bench.addClient('a');
+  const w = bench.session.world;
+  bench.run(1500, () => 0, () => calm(w));
+  bench.run(500, () => BTN.RIGHT, () => calm(w));
+  const log = logCorrections(a);
+  const sentAt: number[] = [];
+  const usedAt: number[] = [];
+  let marked = false;
+  bench.onServerStep((t) => {
+    const on = ((bench.serverPlayer(a.pid)?.prevButtons ?? 0) & BTN.PICK3) !== 0;
+    if (on && !marked) usedAt.push(t);
+    marked = on;
+  });
+  const stage0 = w.level.stage;
+  nextStage(w);
+  let frozen = 0;
+  let last = a.src.world.tick;
+  bench.run(2000, (_i, frame) => {
+    if (frame % 10 !== 0) return BTN.RIGHT;
+    sentAt.push(bench.predictedTick(a));
+    return BTN.RIGHT | BTN.PICK3;
+  }, () => {
+    calm(w);
+    if (a.src.world.tick === last) frozen++;
+    last = a.src.world.tick;
+  });
+  bench.run(600, () => 0, () => calm(w));
+  const px = log.px.filter((_, i) => !log.snapped[i]);
+  const gaps = usedAt.map((u, k) => u - sentAt[k]);
+  const worst = Math.max(...gaps.map(Math.abs));
+  check(`changement d’étape en marchant (${lag} ms) : un recalage net, puis aucune correction`, a.src.world.level.stage === stage0 + 1 && log.snapped.filter(Boolean).length === 1 && Math.max(0, ...px) === 0, `${log.snapped.filter(Boolean).length} recalage(s), corrections max ${Math.max(0, ...px).toFixed(2)} px`);
+  check(`… tick prédit = tick de consommation, monde affiché jamais figé`, sentAt.length >= 10 && usedAt.length === sentAt.length && worst === 0 && frozen === 0, `${usedAt.length}/${sentAt.length} marques, écart max ${worst} tick(s), ${frozen} image(s) figée(s)`);
+}
+
 // Banc direct : un monde serveur, un prédicteur, des stepWorld (pas de réseau).
 function directSetup(seed: number): { w: World; p: Player; pred: Predictor; ctx: () => PredictionContext } {
   const w = createWorld(seed, { mode: 'coop' });
@@ -460,6 +500,51 @@ function directSetup(seed: number): { w: World; p: Player; pred: Predictor; ctx:
   check('duel du contexte copié dans le monde jetable (lu à chaque pas)', reads > 0 && !threw, `${reads} lectures`);
   check('duel et défi originaux inchangés après step et reconcile', JSON.stringify([duels[0], invites[0]]) === before);
   check('duel d’autres joueurs dans le contexte : prédiction identique à celle sans duel', same && pred.pending.length === twin.pending.length);
+}
+
+// 8 bis. Fin de duel : le serveur libère les duellistes à un tick connu d'avance (END_TICKS après le
+// forfait). Le duelliste prédit repart à ce tick, sans rester figé sur sa marque jusqu'à l'instantané
+// sans duel. Première pose prédite de chaque tick comparée à la pose serveur du même tick.
+for (const lag of [50, 100]) {
+  const bench = new NetBench({ seed: 3, lagMs: lag, jitterMs: 0 });
+  const A = bench.addClient('A');
+  const B = bench.addClient('B');
+  const w = bench.session.world;
+  const still = (): void => {
+    calm(w);
+    w.wave.phase = 'calm';
+    w.wave.t = 0;
+    for (const p of w.players) p.iframes = 1e6;
+  };
+  bench.run(1500, () => 0, still);
+  const pa = bench.serverPlayer(A.pid)!;
+  const pb = bench.serverPlayer(B.pid)!;
+  pb.x = pa.x + 120;
+  pb.y = pa.y;
+  bench.run(300, () => 0, still);
+  const d = startDuel(w, pa, pb, COOP_DUEL_RULES);
+  bench.run(1000, () => 0, still);
+  if (d) forfeit(w, B.pid, DUEL_WHY.FORFEIT);
+  const predX = new Map<number, number>();
+  const srvX = new Map<number, number>();
+  const pred = A.src.predictor;
+  const origStep = pred.step.bind(pred);
+  pred.step = (s, b, v, enemies, ctx) => {
+    const t = pred.tick;
+    const evs = origStep(s, b, v, enemies, ctx);
+    if (pred.predicted && !predX.has(t)) predX.set(t, pred.predicted.x);
+    return evs;
+  };
+  let release = -1;
+  bench.onServerStep((t) => {
+    srvX.set(t, bench.serverPlayer(A.pid)!.x);
+    if (release < 0 && !duelOf(w, A.pid)) release = t;
+  });
+  bench.run(4000, () => BTN.RIGHT, still);
+  let worst = 0;
+  for (let t = release + 1; t <= release + 60; t++) worst = Math.max(worst, Math.abs((predX.get(t) ?? NaN) - (srvX.get(t) ?? NaN)));
+  const moved = (srvX.get(release + 60) ?? 0) - (srvX.get(release) ?? 0);
+  check(`fin de duel (${lag} ms) : le duelliste prédit repart au tick de libération (écart prédit − serveur nul)`, !!d && release > 0 && moved > 50 && worst < 0.01, `libération au tick ${release}, ${moved.toFixed(0)} px parcourus en 1 s, écart max ${worst.toFixed(2)} px`);
 }
 
 if (failures) {

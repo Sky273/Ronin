@@ -337,6 +337,36 @@ function simulate(opts: { seed: number; lagMs: number; jitterMs: number; duratio
 }
 
 // ---------------------------------------------------------------------------
+// 4 bis. Changement d'étape : jamais d'interpolation entre un instantané de l'ancienne étape et un de
+// la nouvelle (entités de l'ancien niveau, joueurs à leur ancienne position) ; l'horloge est gardée.
+// ---------------------------------------------------------------------------
+{
+  const base = createWorld(1, { mode: 'coop' });
+  const snap = (t: number, stage: number, others: Player[], enemies: Enemy[]): Snapshot => ({
+    t, ack: 0, stage, stageInfo: base.stage, wave: base.wave, shrine: 0, self: null,
+    others, enemies, projectiles: [], orbs: [], events: [], away: [], duels: [], invites: [],
+  });
+  const enemy = (id: number, x: number): Enemy => createEnemy(id, 'ashigaru', x, 500);
+  const player = (id: number, x: number): Player => createPlayer(id, `p${id}`, x, 500);
+  const it = new Interpolator(() => 0);
+  it.push(snap(100, 1, [player(10, 500)], [enemy(1, 984)]), 0);
+  it.push(snap(103, 1, [player(10, 506)], [enemy(1, 984)]), 50);
+  const r0 = it.renderTick(150);
+  // Nouvelle étape : le joueur repart du départ (x = 208), les ennemis sont ceux du nouveau niveau.
+  it.push(snap(106, 2, [player(10, 208)], [enemy(7, 1500)]), 100);
+  const ids = (es: { id: number }[]): string => es.map((e) => e.id).sort().join(',');
+  const mid = it.sample(104.5, -1);
+  check('changement d’étape : aucun ennemi de l’ancienne étape interpolé', ids(mid.enemies) === '7', ids(mid.enemies));
+  check('changement d’étape : joueur à sa position de la nouvelle étape', mid.players.length === 1 && mid.players[0].x === 208, `${mid.players.map((p) => p.x).join()}`);
+  check('changement d’étape : la prédiction reçoit les ennemis du nouveau niveau', ids(it.enemiesAt(104)) === '7' && ids(it.enemiesAt(100)) === '7', `${ids(it.enemiesAt(104))} / ${ids(it.enemiesAt(100))}`);
+  const r1 = it.renderTick(160);
+  check('changement d’étape : horloge gardée (rendu monotone, pas de remise à zéro)', it.clock.synced && r1 >= r0 && r0 > 0, `${r0.toFixed(2)} → ${r1.toFixed(2)}`);
+  it.push(snap(109, 2, [player(10, 214)], [enemy(7, 1500)]), 150);
+  const after = it.sample(107.5, -1);
+  check('nouvelle étape : interpolation normale ensuite', Math.abs(after.players[0].x - 211) < 1e-9, `${after.players[0].x}`);
+}
+
+// ---------------------------------------------------------------------------
 // 5. Mesure sur le banc réseau (75 ms par sens + 20 ms de gigue, 6 joueurs).
 // ---------------------------------------------------------------------------
 {

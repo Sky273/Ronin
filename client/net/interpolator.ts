@@ -118,6 +118,8 @@ export class Interpolator {
   push(s: Snapshot, recvAt: number): void {
     const last = this.buf[this.buf.length - 1];
     if (last && s.t <= last.t) return; // doublon ou retardataire
+    // Nouvelle étape : jamais d'interpolation d'un niveau à l'autre (l'horloge est gardée).
+    if (last && s.stage !== last.stage) this.buf.length = 0;
     this.buf.push(s);
     this.clock.observe(s.t, recvAt);
     // On garde ~1 s, et toujours l'instantané qui encadre le tick de rendu courant.
@@ -125,10 +127,16 @@ export class Interpolator {
     while (this.buf.length > 2 && (this.buf[1].t <= keepFrom || this.buf.length > MAX_BUFFERED)) this.buf.shift();
   }
 
-  /** Tick serveur à afficher pour les entités distantes, à l'instant `now` (ms). Fractionnaire, monotone. */
+  /**
+   * Tick serveur à afficher pour les entités distantes, à l'instant `now` (ms). Fractionnaire, monotone,
+   * jamais au-delà de ce qui est réellement affiché (dernier instantané + extrapolation) : faute
+   * d'instantané, l'horloge s'arrête (c'est aussi le tick de vue jugé par la compensation de latence).
+   */
   renderTick(now: number): number {
     if (!this.buf.length) return 0;
-    const r = this.clock.tickAt(now) - this.clock.delayTicks();
+    const shown = this.buf[this.buf.length - 1].t + MAX_EXTRAP_TICKS;
+    const d = this.clock.delayTicks();
+    const r = Math.min(this.clock.tickAt(now, shown + d) - d, shown);
     if (r > this.lastR) this.lastR = r;
     return Math.max(0, this.lastR);
   }

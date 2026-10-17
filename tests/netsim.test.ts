@@ -1,8 +1,10 @@
 // Mesures du mode en ligne sur le banc réseau virtuel (75 ms par sens + gigue 20 ms, 12 joueurs).
 // Lancer : npm run test:netsim
 // Les seuils d'acceptation de M2 ne sont appliqués qu'une fois les lots intégrés (ENFORCE).
+import { RemoteSource } from '../client/net/remoteSource';
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
+import { SNAP_EVERY } from '../shared/net/protocol';
 import { mean, NetBench, percentile } from './net/harness';
 
 export {};
@@ -129,6 +131,75 @@ check('latence mesurée cohérente (2 × 75 ms + gigue)', rtt >= 140 && rtt <= 2
   duo.run(duo.frameMs, () => 0, calm);
   const q1 = duo.session.queueLength(a.pid);
   check('rafale : séquences consécutives, entrées en file au serveur', sent.every((m, k) => k === 0 || m.s === sent[k - 1].s + 1) && q1 >= q0 + 4, `file ${q0} → ${q1}`);
+}
+
+// 5. Moins de 20 images/s : en ligne, la scène ne borne la durée d'image qu'au-delà de
+//    RemoteSource.MAX_FRAME_MS (borne de GameScene.update), pour que les entrées partent à 60 Hz
+//    jusqu'à 15 images/s. Client à 15 images/s (une image sur 4, temps cumulé) qui marche, 50 ms par
+//    sens : entrées par seconde, corrections, équité (marque PICK3 comme en 4). Le serveur tourne à 60 Hz.
+{
+  const lowFps = (maxFrameMs: number): { rate: number; nz: number; n: number; worst: number } => {
+    const bench = new NetBench({ seed: 11, lagMs: 50, jitterMs: 0 });
+    const c = bench.addClient('A');
+    const w = bench.session.world;
+    const calm = (): void => {
+      w.enemies = [];
+      w.projectiles = [];
+      w.spawnTimer = 1e6;
+    };
+    bench.run(1500, () => 0, calm);
+    const px: number[] = [];
+    const pred = c.src.predictor;
+    const orig = pred.reconcile.bind(pred);
+    pred.reconcile = (self, ack, ctx, enemiesAt) => {
+      orig(self, ack, ctx, enemiesAt);
+      px.push(pred.lastCorrectionPx);
+    };
+    const sentAt: number[] = [];
+    const usedAt: number[] = [];
+    let marked = false;
+    bench.onServerStep((tick) => {
+      const on = ((bench.serverPlayer(c.pid)?.prevButtons ?? 0) & BTN.PICK3) !== 0;
+      if (on && !marked) usedAt.push(tick);
+      marked = on;
+    });
+    const sent0 = c.transport.sent.length;
+    let since = 0;
+    let owed = 0;
+    let k = 0;
+    const FRAMES = 1200;
+    for (let f = 0; f < FRAMES; f++) {
+      bench.clock.advance(bench.frameMs);
+      c.transport.up.flush();
+      since += bench.session.update(bench.frameMs);
+      if (since >= SNAP_EVERY) {
+        since %= SNAP_EVERY;
+        c.transport.deliverSnapshot(bench.session.snapshotFor(c.pid));
+        bench.session.flushEvents();
+      }
+      c.transport.down.flush();
+      calm();
+      owed += bench.frameMs;
+      if (f % 4 !== 3) continue; // la scène ne tourne qu'une image sur 4
+      const dt = Math.min(owed, maxFrameMs) / 1000;
+      owed = 0;
+      c.src.advance(dt, () => {
+        const b = (Math.floor(f / 90) % 2 ? BTN.LEFT : BTN.RIGHT) | (k++ % 30 === 0 ? BTN.PICK3 : 0);
+        if (b & BTN.PICK3) sentAt.push(bench.predictedTick(c));
+        return b;
+      }, () => undefined);
+    }
+    // La première marque mesure le raccord avec le banc à 60 images/s ; la dernière peut être encore en route.
+    const n = Math.min(sentAt.length, usedAt.length) - 2;
+    const gaps = Array.from({ length: n }, (_, i) => usedAt[i + 1] - sentAt[i + 1]);
+    const settled = px.slice(20);
+    return { rate: ((c.transport.sent.length - sent0) * 60) / FRAMES, nz: settled.filter((x) => x > 0).length / settled.length, n, worst: Math.max(0, ...gaps.map(Math.abs)) };
+  };
+  const online = lowFps(RemoteSource.MAX_FRAME_MS);
+  const solo = lowFps(50);
+  const info = (r: ReturnType<typeof lowFps>): string => `${r.rate.toFixed(1)} entrées/s, ${(100 * r.nz).toFixed(1)} % de corrections non nulles, ${r.n} marques, écart max ${r.worst} tick(s)`;
+  check('15 images/s en ligne : 60 entrées/s, aucune correction en marche, tick prédit = tick de consommation (± 1)', online.rate >= 59 && online.nz === 0 && online.n >= 20 && online.worst <= 1, info(online));
+  check('témoin : avec la borne du solo (50 ms), entrées manquantes et prédiction décalée (le test discrimine)', solo.rate < 50 && solo.worst >= 2, info(solo));
 }
 
 if (failures) {
