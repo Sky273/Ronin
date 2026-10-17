@@ -53,7 +53,7 @@ export class ServerClock {
   private tickNow = NaN;
   /** Estimation sans plafond : en avance sur `tick` tant que le plafond de tickAt retient l'horloge. */
   private est = 0;
-  /** Recul de chronologie supposé (ticks) : repris d'un coup s'il est démenti avant `owedUntil` (pic passager). */
+  /** Recul de chronologie supposé (ticks) : repris d'un coup s'il est démenti avant `owedUntil` (pic passager, arriéré d'une coupure). */
   private owed = 0;
   private owedUntil = -Infinity;
   private delay: number = INTERP_TICKS;
@@ -143,7 +143,14 @@ export class ServerClock {
     if (Math.abs(err) > SNAP_TICKS) {
       // En arrière, l'estimation revient sur la cible sans passer sous le tick déjà rendu : recul de
       // chronologie que la fenêtre n'a pas vu (trou de mesures plus long qu'elle, gel du serveur).
+      const e0 = this.est;
       this.est = Math.max(err > 0 ? this.est : this.tick, want);
+      // Comme le recul vu par observe(), il reste dû : si la cible remonte (arriéré d'une coupure livré
+      // progressivement, chronologie intacte), il est repris d'un coup ; après un vrai gel, elle ne remonte pas.
+      if (e0 > this.est) {
+        this.owed = (now < this.owedUntil ? this.owed : 0) + e0 - this.est;
+        this.owedUntil = now + OWED_MS;
+      }
     } else {
       const skew = err < -SLOW_FROM ? Math.max(-1, -MAX_SKEW + (err + SLOW_FROM) * SLOW_GAIN) : clamp(err * SKEW_GAIN, -MAX_SKEW, MAX_SKEW);
       // Sur un long intervalle, ne pas dépasser la cible à cause de la correction.
