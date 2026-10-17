@@ -11,14 +11,25 @@ type Ctx = CanvasRenderingContext2D;
 const CHUNK = 2048;
 const INK = (a: number) => rgba(C.ink, a);
 
+/** Rectangle en pixels de la tranche, bornes entières, x1 et y1 exclus. */
+interface Rect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 interface Chunk {
   key: string;
   x: number;
   w: number;
   tex: Phaser.Textures.CanvasTexture;
   ctx: Ctx;
-  dirty: boolean;
+  /** Zone salie par les taches depuis le dernier envoi au GPU (null : à jour). */
+  dirty: Rect | null;
 }
+
+const isPow2 = (n: number) => n > 0 && (n & (n - 1)) === 0;
 
 /**
  * Le terrain est peint une fois dans des canvas (par tranches de 2048 px),
@@ -31,6 +42,8 @@ export class Terrain {
   private gen = 0;
   private builtW = 0;
   private builtH = 0;
+  /** Canvas de transit des envois partiels (créé au premier besoin). */
+  private scratch: { canvas: HTMLCanvasElement; ctx: Ctx } | null = null;
 
   constructor(private scene: Phaser.Scene, private level: Level, private put: Put) {
     this.build();
@@ -45,7 +58,7 @@ export class Terrain {
       const key = this.gen === 0 ? `terrain${i}` : `terrain${this.gen}_${i}`;
       const tex = scene.textures.createCanvas(key, w, level.pxH)!;
       const ctx = tex.context;
-      const chunk: Chunk = { key, x, w, tex, ctx, dirty: false };
+      const chunk: Chunk = { key, x, w, tex, ctx, dirty: null };
       this.paintChunk(chunk);
       this.images.push(this.put(scene.add.image(x, 0, key).setOrigin(0).setDepth(2), 'world'));
       this.chunks.push(chunk);
@@ -69,7 +82,7 @@ export class Terrain {
     paintTerrain(c.ctx, this.level, c.x - 160, c.x + c.w + 160);
     c.ctx.restore();
     c.tex.refresh();
-    c.dirty = false;
+    c.dirty = null;
   }
 
   /**
@@ -94,27 +107,96 @@ export class Terrain {
 
   /** Tache d'encre écrasée au sol. */
   stain(x: number, y: number, r: number, dir: number, color: number, seed: number): void {
+    // Emprise de drawSplat : gouttes satellites jusqu'à ~5,6 r dans le sens du coup, le tout
+    // aplati (× 0,42), trait à ±(1,5 + 0,2 r) en hauteur ; marge pour l'anticrénelage.
+    const ex = r * 6 * Math.max(1, Math.abs(dir)) + 3;
+    const ey = r * 0.8 + 4;
     for (const c of this.chunks) {
       if (x + r * 5 < c.x || x - r * 5 > c.x + c.w) continue;
       c.ctx.save();
       c.ctx.translate(-c.x, 0);
       drawSplat(c.ctx, x, y, r, dir, color, seeded(seed));
       c.ctx.restore();
-      c.dirty = true;
+      this.soil(c, x - c.x - ex, y - ey, x - c.x + ex, y + ey);
     }
   }
 
+  /** Étend la zone salie de la tranche au rectangle donné (arrondi au pixel, rogné à la tranche). */
+  private soil(c: Chunk, x0: number, y0: number, x1: number, y1: number): void {
+    const r: Rect = {
+      x0: Math.max(0, Math.floor(x0)),
+      y0: Math.max(0, Math.floor(y0)),
+      x1: Math.min(c.w, Math.ceil(x1)),
+      y1: Math.min(this.builtH, Math.ceil(y1)),
+    };
+    if (r.x0 >= r.x1 || r.y0 >= r.y1) return;
+    const d = c.dirty;
+    if (!d) {
+      c.dirty = r;
+      return;
+    }
+    d.x0 = Math.min(d.x0, r.x0);
+    d.y0 = Math.min(d.y0, r.y0);
+    d.x1 = Math.max(d.x1, r.x1);
+    d.y1 = Math.max(d.y1, r.y1);
+  }
+
+  /** Envoie au GPU ce que les taches ont changé depuis la dernière image. */
   flush(): void {
     for (const c of this.chunks) {
       if (!c.dirty) continue;
-      c.tex.refresh();
-      c.dirty = false;
+      if (!this.upload(c, c.dirty)) c.tex.refresh();
+      c.dirty = null;
     }
+  }
+
+  /**
+   * WebGL : n'envoie que le rectangle sali, là où refresh() renverrait tout le canvas de la
+   * tranche (2048 × 768, 6 Mo). Le rectangle est recopié tel quel (pixels prémultipliés,
+   * opérateur « copy ») dans un petit canvas de transit, téléversé par texSubImage2D avec les
+   * réglages de Phaser 3.90 (WebGLTextureWrapper._processTexture) : la texture obtenue est celle
+   * qu'aurait donnée refresh(). Faux si l'envoi partiel est impossible ou sans intérêt (rendu
+   * Canvas, contexte perdu, rectangle presque aussi grand que la tranche) : refresh() s'en charge.
+   */
+  private upload(c: Chunk, d: Rect): boolean {
+    const renderer = this.scene.renderer;
+    const gl = 'gl' in renderer ? renderer.gl : null;
+    const glt = c.tex.source[0]?.glTexture;
+    if (!gl || !glt?.webGLTexture || glt.flipY || gl.isContextLost()) return false;
+    const w = d.x1 - d.x0;
+    const h = d.y1 - d.y0;
+    if (w * h > (c.w * this.builtH) / 2) return false;
+    const s = this.scratch ?? (this.scratch = makeScratch());
+    if (!s) return false;
+    if (s.canvas.width !== w || s.canvas.height !== h) {
+      s.canvas.width = w;
+      s.canvas.height = h;
+    }
+    s.ctx.globalCompositeOperation = 'copy';
+    s.ctx.drawImage(c.tex.canvas, d.x0, d.y0, w, h, 0, 0, w, h);
+    // Même séquence que Phaser : unité 0, puis la texture qui y était liée est rétablie
+    // (les pipelines gardent en cache la texture liée à chaque unité).
+    gl.activeTexture(gl.TEXTURE0);
+    const prev = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
+    gl.bindTexture(gl.TEXTURE_2D, glt.webGLTexture);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, glt.pma);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texSubImage2D(gl.TEXTURE_2D, glt.mipLevel, d.x0, d.y0, glt.format, gl.UNSIGNED_BYTE, s.canvas);
+    if (isPow2(c.w) && isPow2(this.builtH)) gl.generateMipmap(gl.TEXTURE_2D);
+    gl.bindTexture(gl.TEXTURE_2D, prev);
+    return true;
   }
 
   get lvl(): Level {
     return this.level;
   }
+}
+
+/** Canvas de transit, en lecture fréquente comme les CanvasTexture de Phaser (même chemin d'envoi). */
+function makeScratch(): { canvas: HTMLCanvasElement; ctx: Ctx } | null {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return ctx ? { canvas, ctx } : null;
 }
 
 function drawSplat(ctx: Ctx, x: number, y: number, r: number, dir: number, color: number, rand: Rand): void {
