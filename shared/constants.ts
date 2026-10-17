@@ -253,6 +253,7 @@ export const DUEL_WHY = {
   WIN: 15, // série gagnée
   TIDE: 16, // la Marée se lève : défis en attente annulés
   FLOOD: 17, // entrées envoyées trop vite pendant un duel : forfait
+  BUSY: 18, // la cible du défi entre dans un autre duel : défi tombé
 } as const;
 
 /** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */

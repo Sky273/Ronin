@@ -8,7 +8,7 @@ import type { Sfx } from '../audio/sfx';
 import { gStroke, hash2, type Pt, ringPoints, seeded } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT, hexCss } from '../render/palette';
 import {
-  cancelText, createDuelMemo, type DuelBoutView, type DuelMemo, type DuelSideView, type DuelViewModel, endToast, seriesText,
+  cancelText, createDuelMemo, type DuelBoutView, type DuelMemo, type DuelSideView, type DuelViewModel, endToast, inviteText, seriesText,
 } from './duelView';
 
 type Text = Phaser.GameObjects.Text;
@@ -144,13 +144,14 @@ export class DuelOverlay {
     const H = this.scene.scale.height;
 
     // ─── Invitations ─────────────────────────────────────────────────────
+    // Défi reçu et défi envoyé ensemble : le bandeau dit que G annule d'abord le second.
     const mine = view.mine;
     const inc = mine ? null : view.incoming;
-    const out = mine || inc ? null : view.outgoing;
+    const out = mine ? null : view.outgoing;
     if (inc || out) {
       const iv = (inc ?? out)!;
       this.rememberName(iv.pid, iv.name);
-      setT(this.invite, inc ? `決闘  ${iv.name} challenges you — G to accept` : `Challenge sent to ${iv.name}… G to cancel`);
+      setT(this.invite, inviteText(inc, out));
       this.invite.setVisible(true);
       // Barre de temps restant, sous le bandeau.
       const bw = Math.max(220, this.invite.width);
@@ -254,9 +255,11 @@ export class DuelOverlay {
         if (ev.to === meId) sfx?.duelInvite();
         else if (ev.from === meId) sfx?.tick();
         break;
-      case 'duelCancel':
-        if (ev.from === meId || ev.to === meId) this.showToast(cancelText(ev, meId, this.nameOf));
+      case 'duelCancel': {
+        const s = ev.from === meId || ev.to === meId ? cancelText(ev, meId, this.nameOf) : '';
+        if (s) this.showToast(s);
         break;
+      }
       case 'duelStart':
         this.memo.rounds.delete(ev.id);
         this.memo.ends.delete(ev.id);
@@ -464,7 +467,7 @@ export class DuelOverlay {
         nameB: mk(13, false, hexCss(C.ink)),
         markA: mk(15, true, red),
         markB: mk(15, true, red),
-        zan: mk(54, true, red).setOrigin(0.5),
+        zan: mk(54, true, red).setOrigin(0.5).setText('斬'),
         sig: false,
         zanAt: 0,
         used: false,

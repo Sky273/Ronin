@@ -5,7 +5,7 @@ import { COOP_DUEL_RULES, findDuelSpot, isDueling, setPairCooldown, startDuel } 
 import { BTN } from './input';
 import { arenaInside, kekkaiSplits } from './level';
 import { isAway } from './stage';
-import type { DuelInvite, Player, World } from './types';
+import type { DuelInvite, EnemyState, Player, World } from './types';
 
 /** Joueur touché ou mort : un défi en cours qui le concerne tombe. */
 const hitOrDead = (p: Player): boolean => p.state === 'dead' || p.state === 'hurt';
@@ -24,10 +24,17 @@ export function pairCooling(w: World, a: number, b: number): boolean {
   return list.some((i) => i.cd && w.tick < i.until && ((i.from === a && i.to === b) || (i.from === b && i.to === a)));
 }
 
-/** Un ennemi engagé (poursuite, préparation, attaque) est-il à moins de ENGAGED_RANGE de `p` ? */
+/**
+ * États d'un ennemi en plein échange : poursuite, préparation, attaque, mais aussi récupération,
+ * coup encaissé, étourdi ou caché (tous reviennent d'eux-mêmes à l'assaut). Même ensemble que
+ * calmHordeOnRespawn (interactions.ts).
+ */
+const ENGAGED = new Set<EnemyState>(['chase', 'windup', 'attack', 'recover', 'hitstun', 'stunned', 'hidden']);
+
+/** Un ennemi engagé (voir ENGAGED) est-il à moins de ENGAGED_RANGE de `p` ? */
 function engaged(w: World, p: Player): boolean {
   for (const e of w.enemies) {
-    if (e.state !== 'chase' && e.state !== 'windup' && e.state !== 'attack') continue;
+    if (!ENGAGED.has(e.state)) continue;
     if (Math.hypot(e.x - p.x, e.y - p.y) < DUEL.ENGAGED_RANGE) return true;
   }
   return false;
@@ -106,9 +113,10 @@ function accept(w: World, inv: DuelInvite, a: Player, b: Player): void {
     return;
   }
   drop(w, inv);
-  // Les autres défis en attente des deux duellistes tombent.
+  // Les autres défis en attente des deux duellistes tombent (BUSY, sans délai de paire : personne ne
+  // s'est dérobé). Ce sont des défis reçus par `a` : chacun n'a qu'un défi sortant, et `b` n'en a plus.
   for (const o of (w.duelInvites ?? []).slice()) {
-    if (!o.cd && (o.from === a.id || o.to === a.id || o.from === b.id || o.to === b.id)) cancel(w, o, DUEL_WHY.CANCEL, false);
+    if (!o.cd && (o.from === a.id || o.to === a.id || o.from === b.id || o.to === b.id)) cancel(w, o, DUEL_WHY.BUSY, false);
   }
   startDuel(w, a, b, COOP_DUEL_RULES, spot);
 }

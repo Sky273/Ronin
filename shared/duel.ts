@@ -192,6 +192,9 @@ const reactSums = new WeakMap<Duel, [number, number]>();
 
 const emptySide = (pid: number): DuelSide => ({ pid, wins: 0, strikeT: -1, parryT: -1, foul: false, react: -1 });
 
+/** Joueur en état de croiser le fer : vivant (ni mort ni à 0 PV) et encore dans la partie. */
+const standing = (p: Player): boolean => p.state !== 'dead' && p.hp > 0 && !p.out;
+
 function resetRound(d: Duel): void {
   for (const s of [d.a, d.b]) {
     s.strikeT = -1;
@@ -205,10 +208,11 @@ function resetRound(d: Duel): void {
 /**
  * Engage un duel entre `a` et `b` (public : le dojo de M5 l'appelle). `spot` : centre au sol ;
  * par défaut, un sol plat autour du point médian (findDuelSpot). Le joueur de gauche devient le
- * côté a. Renvoie null (sans rien changer) si aucun emplacement ne convient ou si l'un se bat déjà.
+ * côté a. Renvoie null (sans rien changer) si aucun emplacement ne convient, si l'un se bat déjà, est
+ * mort ou est sorti de la partie (la pose du duel ne doit jamais relever un mort).
  */
 export function startDuel(w: World, a: Player, b: Player, rules: DuelRules, spot?: { x: number; y: number }): Duel | null {
-  if (a === b || isDueling(w, a.id) || isDueling(w, b.id)) return null;
+  if (a === b || isDueling(w, a.id) || isDueling(w, b.id) || !standing(a) || !standing(b)) return null;
   const at = spot ?? findDuelSpot(w.level, (a.x + b.x) / 2, (a.y + b.y) / 2, DUEL.GAP, w.duels ?? []);
   if (!at) return null;
   const [l, r] = a.x <= b.x ? [a, b] : [b, a];
@@ -472,32 +476,42 @@ function release(w: World, d: Duel): void {
   setPairCooldown(w, d.a.pid, d.b.pid, DUEL.AFTER_COOLDOWN);
 }
 
-/** Fin immédiate (sans phase end) : interruption au passage d'étape. */
+/**
+ * Série déjà décidée par la manche en cours de dénouement : son issue (WIN ou DRAW) est acquise avant
+ * la fin de l'animation, et ni un abandon ni une interruption ne la renversent. null sinon.
+ */
+function decided(d: Duel): { winner: number; why: number } | null {
+  return d.phase === 'resolve' ? seriesOutcome(d, reactSums.get(d)) : null;
+}
+
+/** Fin immédiate (sans phase end) : interruption au passage d'étape (une série décidée garde son issue). */
 function endNow(w: World, d: Duel, winner: number, why: number): void {
-  if (d.phase !== 'end') w.events.push({ type: 'duelEnd', id: d.id, winner, wa: d.a.wins, wb: d.b.wins, why });
-  d.winner = winner;
-  d.last = why;
+  const out = decided(d) ?? { winner, why };
+  if (d.phase !== 'end') w.events.push({ type: 'duelEnd', id: d.id, winner: out.winner, wa: d.a.wins, wb: d.b.wins, why: out.why });
+  d.winner = out.winner;
+  d.last = out.why;
   release(w, d);
 }
 
 /**
- * Le joueur `pid` quitte son duel : abandon (FORFEIT) ou déconnexion (DISCONNECT), l'autre gagne la
- * série ; INTERRUPT : sans résultat. Le duel passe en phase end (sans effet s'il y est déjà).
+ * Le joueur `pid` quitte son duel : abandon (FORFEIT), déconnexion (DISCONNECT) ou entrées trop rapides
+ * (FLOOD), l'autre gagne la série ; INTERRUPT : sans résultat. Le duel passe en phase end (sans effet
+ * s'il y est déjà). Pendant le dénouement de la manche qui a décidé la série, c'est son issue qui est émise.
  */
 export function forfeit(w: World, pid: number, why: number): void {
   const d = duelOf(w, pid);
   if (!d || d.phase === 'end') return;
-  const winner = why === DUEL_WHY.INTERRUPT ? -1 : d.a.pid === pid ? d.b.pid : d.a.pid;
+  const out = decided(d) ?? { winner: why === DUEL_WHY.INTERRUPT ? -1 : d.a.pid === pid ? d.b.pid : d.a.pid, why };
   d.phase = 'end';
   d.t = 0;
-  d.winner = winner;
-  d.last = why;
-  w.events.push({ type: 'duelEnd', id: d.id, winner, wa: d.a.wins, wb: d.b.wins, why });
+  d.winner = out.winner;
+  d.last = out.why;
+  w.events.push({ type: 'duelEnd', id: d.id, winner: out.winner, wa: d.a.wins, wb: d.b.wins, why: out.why });
 }
 
 /**
- * Passage d'étape (bilan, étape suivante) : tous les duels s'arrêtent sans résultat et les défis en
- * attente tombent. Sans effet en solo.
+ * Passage d'étape (bilan, étape suivante) : tous les duels s'arrêtent sans résultat (hors série déjà
+ * décidée) et les défis en attente tombent. Sans effet en solo.
  */
 export function interruptDuels(w: World): void {
   if (w.duels) for (const d of w.duels.slice()) endNow(w, d, -1, DUEL_WHY.INTERRUPT);
