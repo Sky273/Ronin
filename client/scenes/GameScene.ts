@@ -29,9 +29,12 @@ import type { ScoreTable } from '../scores/types';
 import { DifficultySelect } from '../ui/difficultySelect';
 import { DIFFICULTY_TEXT, fmtScore, foesLabel, livesLabel } from '../ui/difficultyText';
 import { AllyMarkers } from '../ui/allies';
+import { BracketOverlay } from '../ui/bracket';
+import { bracketView, entrantName, resultBanner } from '../ui/bracketView';
 import { DuelOverlay } from '../ui/duel';
 import { COOP_DUEL_RULES, startDuel } from '../../shared/duel';
-import { duelView } from '../ui/duelView';
+import { ROOMS, type RoomName } from '../../shared/net/protocol';
+import { BOT_MARK, duelView, isDojoBot } from '../ui/duelView';
 import { Hud } from '../ui/hud';
 import { NameEntry } from '../ui/nameEntry';
 import { Results } from '../ui/results';
@@ -79,10 +82,14 @@ export class GameScene extends Phaser.Scene {
   private terrain!: Terrain;
   private fx!: Fx;
   private hud!: Hud;
-  /** Repères des coéquipiers hors de la vue (coop). */
+  /** Repères des coéquipiers hors de la vue (coop, dojo). */
   private allies!: AllyMarkers;
-  /** Duels iaidō (coop) : invitation, signal 斬, issues, toasts. */
+  /** Duels iaidō (coop, dojo) : invitation, signal 斬, issues, toasts. */
   private duel!: DuelOverlay;
+  /** Dojo : petit panneau d'état, grand tableau du tournoi (Tab), toasts des forfaits. */
+  private bracket!: BracketOverlay;
+  /** Dojo : dernier tour annoncé par un coup de taiko (« n:tour »). */
+  private dojoRound = '';
   private results!: Results;
   private gBack!: G;
   private gChars!: G;
@@ -96,6 +103,8 @@ export class GameScene extends Phaser.Scene {
   private onlineMenu!: OnlineMenu;
   /** Salle rejointe dont on attend le premier instantané (le menu en ligne reste affiché). */
   private pending: RemoteSource | null = null;
+  /** Salle visée par le menu en ligne : la route partagée ou le dojo. */
+  private room: RoomName = ROOMS.coop;
   /** Jeton de tentative de connexion : une réponse arrivée après un retour en arrière est abandonnée. */
   private joinToken = 0;
   /** Select maintenu 1 s à la manette : quitter la salle en ligne. */
@@ -209,6 +218,7 @@ export class GameScene extends Phaser.Scene {
     this.hud = new Hud(this, this.put);
     this.allies = new AllyMarkers(this, this.put);
     this.duel = new DuelOverlay(this, this.put, { sfx: this.sfx, shake: (v) => this.addShake(v) });
+    this.bracket = new BracketOverlay(this, this.put);
     this.results = new Results(this, this.put, () => {
       this.sfx.drum(0, true);
       this.addShake(6);
@@ -227,6 +237,10 @@ export class GameScene extends Phaser.Scene {
     this.controls.onChar('m', shortcut(() => this.sfx.toggleMute()));
     this.controls.onChar('n', shortcut(() => (this.musicOn = this.music ? this.music.toggle() : !this.musicOn)));
     this.controls.onChar('h', shortcut(() => this.hud.toggleHelp()));
+    // Dojo : Tab ouvre ou referme le grand tableau du tournoi (son action par défaut est bloquée par Controls).
+    this.controls.onKey('Tab', () => {
+      if (this.screen === 'play' && this.world.mode === 'dojo') this.bracket.tab();
+    });
     for (const code of MENU_KEYS) this.controls.onKey(code, () => this.menuKey(code));
     // « press any key » : n'importe quelle touche passe l'écran 討死, après le délai minimal.
     this.controls.onAnyKey(() => {
@@ -278,6 +292,8 @@ export class GameScene extends Phaser.Scene {
         this.clearCharacters();
         this.results.hide();
         this.duel.clear();
+        this.bracket.clear();
+        this.dojoRound = '';
         this.fx.clear();
         this.hud.banner('道場', 'The dojo', 'G: ready — bots fill the bracket', '#15120e', 2000);
       });
@@ -295,10 +311,11 @@ export class GameScene extends Phaser.Scene {
         if (!this.scoresUnsaved) this.scores = loadScores();
         this.goScores(this.difficulty, -1);
       },
-      onOnline: () => this.goOnline(),
+      onOnline: () => this.goOnline(ROOMS.coop),
+      onDojo: () => this.goOnline(ROOMS.dojo),
     });
     this.onlineMenu = new OnlineMenu(this, this.put, {
-      onJoin: (name) => void this.joinOnline(name),
+      onJoin: (name, room) => void this.joinOnline(name, room),
       onBack: () => this.leaveOnline(null),
     });
     this.diffSelect = new DifficultySelect(this, this.put, {
@@ -369,24 +386,26 @@ export class GameScene extends Phaser.Scene {
     this.scoreboard.show(this.scores, focus, highlight);
   }
 
-  // ─── Mode en ligne (la route partagée) ───────────────────────────────────
+  // ─── Mode en ligne (la route partagée, le dojo) ──────────────────────────
 
-  private goOnline(): void {
+  /** Menu en ligne (saisie du nom) menant à la salle `room`. */
+  private goOnline(room: RoomName = this.room): void {
     this.ensureAudio();
     this.hideScreens();
     this.screen = 'online';
-    this.onlineMenu.show(this.prefs.name);
+    this.room = room;
+    this.onlineMenu.show(this.prefs.name, room);
     this.controls.setTextMode((key, code) => this.onlineMenu.keyText(key, code));
   }
 
   /** Connexion à une salle : le SDK réseau n'est chargé qu'ici (le solo n'en a pas besoin). */
-  private async joinOnline(name: string): Promise<void> {
+  private async joinOnline(name: string, room: RoomName): Promise<void> {
     const token = ++this.joinToken;
     this.prefs = { ...this.prefs, name };
     savePrefs(this.prefs);
     try {
       const net = await import('../net/connection');
-      const conn = await net.connect(net.defaultServerUrl(), name);
+      const conn = await net.connect(net.defaultServerUrl(), name, room);
       if (token !== this.joinToken || this.screen !== 'online') {
         conn.leave();
         return;
@@ -420,7 +439,8 @@ export class GameScene extends Phaser.Scene {
     this.sfx.taiko(false);
     const n = this.world.players.length;
     // En file : arrivé pendant le bilan, l'accueil attend qu'il se referme (rien par-dessus le bilan).
-    this.hud.queueBanner('縁', 'The shared road', `${n} ronin on the road · Esc to leave`, '#15120e', 2400);
+    if (this.world.mode === 'dojo') this.hud.queueBanner('道場', 'The dojo', 'eight duelists, one bracket · G: ready · Tab: bracket · Esc to leave', '#15120e', 2600);
+    else this.hud.queueBanner('縁', 'The shared road', `${n} ronin on the road · Esc to leave`, '#15120e', 2400);
   }
 
   /** Quitte la salle (Échap, retour du menu, connexion perdue) ; `reason` : message d'erreur à afficher. */
@@ -442,7 +462,7 @@ export class GameScene extends Phaser.Scene {
     this.deathText.setAlpha(0);
     this.deathSub.setAlpha(0);
     if (reason) {
-      this.goOnline();
+      this.goOnline(this.room); // retour au menu de la salle visée (route ou dojo)
       this.onlineMenu.setStatus(reason, true);
     } else this.goTitle();
   }
@@ -478,6 +498,7 @@ export class GameScene extends Phaser.Scene {
     this.hud.reset();
     this.allies.clear();
     this.duel.clear();
+    this.bracket.clear();
     this.fx.clear();
     this.controls.reset();
     this.deathText.setAlpha(0);
@@ -502,6 +523,8 @@ export class GameScene extends Phaser.Scene {
     this.timeScale = 1;
     this.allies.clear();
     this.duel.clear();
+    this.bracket.clear();
+    this.dojoRound = '';
     // Les effets tachent le terrain du niveau : ils suivent l'objet niveau de la nouvelle source.
     this.fx.clear();
     this.fx = new Fx(src.world.level, this.terrain);
@@ -657,8 +680,11 @@ export class GameScene extends Phaser.Scene {
     this.gDebug.clear();
     this.gOverlay.clear();
 
-    this.drawCheckpoints(time);
-    this.drawStageProps(time);
+    // Dojo : ni sanctuaires, ni kekkai, ni porte.
+    if (w.mode !== 'dojo') {
+      this.drawCheckpoints(time);
+      this.drawStageProps(time);
+    }
     for (const e of w.enemies) this.drawEnemyEntity(e, alpha, fxDt, time, boil);
     this.drawProjectiles(time);
     this.drawOrbs(time);
@@ -727,6 +753,8 @@ export class GameScene extends Phaser.Scene {
     else this.allies.hide();
     if (this.screen === 'play' && (w.duels || w.duelInvites || this.duel.busy)) this.duel.update(duelView(w, this.src.meId, this.duel.memo), w, this.worldCam, time);
     else this.duel.hide();
+    if (this.screen === 'play' && (w.tournament || this.bracket.busy)) this.bracket.update(bracketView(w, this.src.meId), time);
+    else this.bracket.hide();
     this.updateMusic();
 
     const dead = this.me.state === 'dead' && (this.screen === 'play' || this.screen === 'over');
@@ -734,7 +762,9 @@ export class GameScene extends Phaser.Scene {
     this.deathText.setAlpha(da);
     this.deathSub.setAlpha(da);
     if (dead) {
-      if (this.world.mode === 'coop') {
+      if (this.world.mode === 'dojo') {
+        this.deathSub.setText('you will rise again…');
+      } else if (this.world.mode === 'coop') {
         const lost = this.lastLost > 0 ? `\n${this.lastLost} honor left on the ground — return for it` : '';
         const where = this.world.stage.state === 'arena' ? 'at the arena gate' : 'at the shrine';
         this.deathSub.setText(`${foesLabel(this.me.kills)}${lost}\nyou will be reborn ${where}…`);
@@ -748,13 +778,16 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** L'ambiance musicale suit l'état de l'étape et de la Marée. */
+  /** L'ambiance musicale suit l'état de l'étape et de la Marée ; au dojo, celui du tournoi. */
   private updateMusic(): void {
     if (!this.music) return;
     const st = this.world.stage.state;
     const wave = this.world.wave.phase;
     const inGame = this.screen === 'play';
-    const mood: Mood = !inGame ? 'rest' : st === 'arena' ? 'boss' : st === 'cleared' || st === 'gateOpen' ? 'rest' : wave === 'calm' ? 'calm' : 'tide';
+    const t = this.world.tournament;
+    // Dojo : repos pendant l'attente et la célébration du champion, calme (tendu) pendant les tours.
+    const dojo: Mood | null = t ? (t.phase === 'pause' || t.phase === 'running' ? 'calm' : 'rest') : null;
+    const mood: Mood = !inGame ? 'rest' : dojo ? dojo : st === 'arena' ? 'boss' : st === 'cleared' || st === 'gateOpen' ? 'rest' : wave === 'calm' ? 'calm' : 'tide';
     this.music.setMood(mood);
     this.music.duck(inGame && this.me.state === 'dead');
   }
@@ -967,7 +1000,9 @@ export class GameScene extends Phaser.Scene {
     const t = label ?? this.makeLabel(p);
     // Coop en ligne : un joueur absent (aucun bouton depuis 30 s) est signalé et estompé.
     const away = !!this.world.away?.includes(p.id);
-    const text = away ? `${p.name} · away` : p.name;
+    // Dojo : un bot porte discrètement la marque 木人 à côté de son nom.
+    const name = isDojoBot(this.world, p.id) ? `${p.name} ${BOT_MARK}` : p.name;
+    const text = away ? `${name} · away` : name;
     if (t.text !== text) t.setText(text);
     // En duel, le nom est porté par la surcouche du duel (avec les marques de victoire).
     t.setPosition(pos.x, pos.y - 64).setVisible(show && !this.duel.ownsName(p.id)).setAlpha(away ? 0.5 : 1);
@@ -1170,7 +1205,7 @@ export class GameScene extends Phaser.Scene {
     const hear = (x: number) => mine || this.near(x);
     // Coups : sans auteur (solo) ou du joueur local → toujours entendus ; ceux des autres, de près.
     const hearHit = (x: number) => isMine(ev, this.src.meId) || this.near(x);
-    const shake = () => this.addShake(shakeFor(ev, this.src.meId, this.me, this.world.mode === 'coop'));
+    const shake = () => this.addShake(shakeFor(ev, this.src.meId, this.me, this.world.mode !== 'solo'));
     switch (ev.type) {
       case 'swing':
         if (hear(ev.x)) this.sfx.swing(ATTACKS[ev.attack].heavy);
@@ -1509,6 +1544,67 @@ export class GameScene extends Phaser.Scene {
         this.sfx.gong();
         if (ev.bonus > 0) this.hud.banner('凪', 'The Tide recedes', `+${ev.bonus} honor`, '#15120e', 1600);
         break;
+      case 'dojoStart':
+      case 'dojoMatch':
+      case 'dojoResult':
+      case 'dojoChampion':
+      case 'dojoReset':
+        this.onDojoEvent(ev);
+        break;
     }
+  }
+
+  /**
+   * Dojo : mise en scène des événements du tournoi. Les duels des matchs ont leur propre surcouche
+   * (決闘, 斬, fin de série) : ici, le tirage, les débuts de tour, les forfaits sans duel et le champion.
+   */
+  private onDojoEvent(ev: Extract<GameEvent, { type: 'dojoStart' | 'dojoMatch' | 'dojoResult' | 'dojoChampion' | 'dojoReset' }>): void {
+    const meId = this.src.meId;
+    const t = this.world.tournament;
+    switch (ev.type) {
+      case 'dojoStart':
+        this.sfx.taiko(false);
+        this.hud.banner('組合せ', `Tournament ${ev.n} — the bracket is drawn`, 'quarterfinals in 5 s · Tab: bracket', '#15120e', 2200);
+        break;
+      case 'dojoMatch': {
+        // Début d'un tour : un coup de taiko pour qui ne s'y bat pas (le duel du joueur local a le sien).
+        const key = `${t?.n ?? 0}:${t?.matches[ev.match]?.round ?? -1}`;
+        const fighting = !!t?.matches.some((m) => m.state === 'live' && (m.a === meId || m.b === meId));
+        if (key !== this.dojoRound) {
+          this.dojoRound = key;
+          if (!fighting) this.sfx.drum(0, false);
+        }
+        break;
+      }
+      case 'dojoResult': {
+        // Forfait sans duel au lancement du tour (adversaire parti, tirage au sort) : bannière du joueur local.
+        const b = t ? resultBanner(ev, t, meId, this.bracket.dueled(ev.match)) : null;
+        if (b) {
+          this.hud.banner(b.kanji, b.title, b.sub, b.red ? '#b8321f' : '#15120e', 1800);
+          if (b.red) this.sfx.bell();
+          else this.sfx.drum(0, true);
+        }
+        break;
+      }
+      case 'dojoChampion': {
+        const e = t?.entrants.find((x) => x.pid === ev.pid);
+        if (ev.pid === meId) {
+          this.sfx.bell();
+          this.sfx.gong();
+          this.flash = 0.2;
+          this.hud.banner('優勝', 'You are the champion!', `Tournament ${ev.n} · the dojo bows to you`, '#b8321f', 3000);
+        } else {
+          this.sfx.gong();
+          this.hud.banner('優勝', `Champion: ${e ? entrantName(e) : 'ronin'}`, `Tournament ${ev.n}`, '#15120e', 2600);
+        }
+        break;
+      }
+      case 'dojoReset':
+        this.sfx.tick();
+        this.hud.banner('道場', `Tournament ${ev.n}`, 'waiting for challengers · G: ready', '#15120e', 1800);
+        break;
+    }
+    // Toasts des résultats que les duels n'annoncent pas, mémoire des matchs joués.
+    this.bracket.onEvent(ev, this.world, meId);
   }
 }

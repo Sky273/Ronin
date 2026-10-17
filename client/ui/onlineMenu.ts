@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { MAX_NAME, sanitizePlayerName } from '../../shared/net/protocol';
+import { MAX_NAME, ROOMS, type RoomName, sanitizePlayerName } from '../../shared/net/protocol';
 import { gFill, gStroke, seeded, type Pt } from '../render/brush';
 import { C, FONT_BRUSH, FONT_TEXT } from '../render/palette';
 
@@ -13,7 +13,16 @@ const cpLen = (s: string): number => Array.from(s).length;
 const COL_STATUS = '#4a433b';
 const COL_ERROR = '#b8321f';
 
-/** Menu du mode en ligne (縁, « la route partagée ») : pseudo, puis rejoindre une salle. */
+/** Textes du menu selon la salle visée : la route partagée (縁) ou le dojo (道場). */
+const ROOM_TEXT: Record<RoomName, { kanji: string; title: string; sub: string; join: string }> = {
+  [ROOMS.coop]: { kanji: '縁', title: 'Online — the shared road', sub: 'Up to twelve ronin walk the same path', join: 'Enter — Join a room' },
+  [ROOMS.dojo]: { kanji: '道場', title: 'Dojo — the tournament', sub: 'Eight duelists, one bracket · bots fill the empty places', join: 'Enter — Enter the dojo' },
+};
+
+/**
+ * Menu du mode en ligne : pseudo, puis rejoindre une salle de la route partagée (縁) ou du dojo (道場),
+ * selon la salle passée à `show`.
+ */
 export class OnlineMenu {
   private root: Phaser.GameObjects.Container;
   private panel: Phaser.GameObjects.Graphics;
@@ -23,21 +32,25 @@ export class OnlineMenu {
   private join: Phaser.GameObjects.Text;
   private back: Phaser.GameObjects.Text;
   private status: Phaser.GameObjects.Text;
+  private kanji: Phaser.GameObjects.Text;
+  private title: Phaser.GameObjects.Text;
+  private sub: Phaser.GameObjects.Text;
+  private roomName: RoomName = ROOMS.coop;
   private text = '';
   private shown = false;
   private busy = false;
   private readyAt = 0;
 
-  constructor(private scene: Phaser.Scene, put: Put, private cb: { onJoin(name: string): void; onBack(): void }) {
+  constructor(private scene: Phaser.Scene, put: Put, private cb: { onJoin(name: string, room: RoomName): void; onBack(): void }) {
     const W = scene.scale.width;
     const H = scene.scale.height;
     const cx = W / 2;
     const veil = scene.add.rectangle(0, 0, W, H, C.paper, 0.55).setOrigin(0);
     this.panel = scene.add.graphics();
     this.drawPanel();
-    const kanji = scene.add.text(cx, 176, '縁', { fontFamily: FONT_BRUSH, fontSize: '96px', color: '#15120e' }).setOrigin(0.5);
-    const title = scene.add.text(cx, 250, 'Online — the shared road', { fontFamily: FONT_TEXT, fontSize: '24px', color: '#15120e' }).setOrigin(0.5);
-    const sub = scene.add.text(cx, 284, 'Up to twelve ronin walk the same path', { fontFamily: FONT_TEXT, fontSize: '16px', color: '#6b6359' }).setOrigin(0.5);
+    const kanji = (this.kanji = scene.add.text(cx, 176, '縁', { fontFamily: FONT_BRUSH, fontSize: '96px', color: '#15120e' }).setOrigin(0.5));
+    const title = (this.title = scene.add.text(cx, 250, 'Online — the shared road', { fontFamily: FONT_TEXT, fontSize: '24px', color: '#15120e' }).setOrigin(0.5));
+    const sub = (this.sub = scene.add.text(cx, 284, 'Up to twelve ronin walk the same path', { fontFamily: FONT_TEXT, fontSize: '16px', color: '#6b6359' }).setOrigin(0.5));
     const label = scene.add.text(cx - 210, 344, 'Your name', { fontFamily: FONT_TEXT, fontSize: '16px', color: '#6b6359' }).setOrigin(0, 0.5);
     this.counter = scene.add.text(cx + 210, 344, '', { fontFamily: FONT_TEXT, fontSize: '15px', color: '#6b6359' }).setOrigin(1, 0.5);
     this.field = scene.add.text(cx - 206, 386, '', { fontFamily: FONT_BRUSH, fontSize: '32px', color: '#15120e' }).setOrigin(0, 0.5);
@@ -70,9 +83,21 @@ export class OnlineMenu {
     return this.text;
   }
 
-  show(defaultName: string): void {
+  /** Salle vers laquelle mène le menu. */
+  get room(): RoomName {
+    return this.roomName;
+  }
+
+  /** Affiche le menu pour rejoindre la salle `room` (route partagée par défaut). */
+  show(defaultName: string, room: RoomName = ROOMS.coop): void {
     this.scene.tweens.killTweensOf([this.root, this.cursor, this.join]);
     this.shown = true;
+    this.roomName = room;
+    const tx = ROOM_TEXT[room];
+    this.kanji.setText(tx.kanji);
+    this.title.setText(tx.title);
+    this.sub.setText(tx.sub);
+    this.join.setText(tx.join);
     this.busy = false;
     this.readyAt = this.scene.time.now + INPUT_GUARD_MS;
     this.text = Array.from(defaultName).slice(0, MAX_NAME).join('');
@@ -117,7 +142,7 @@ export class OnlineMenu {
       this.text = name;
       this.refresh();
       this.setStatus('Connecting…');
-      this.cb.onJoin(name);
+      this.cb.onJoin(name, this.roomName);
       return;
     }
     if (this.busy) return; // nom figé pendant la connexion
