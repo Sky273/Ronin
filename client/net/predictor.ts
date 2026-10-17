@@ -35,6 +35,12 @@ export interface PendingInput {
 
 /** Au-delà de ce nombre d'entrées non acquittées, on abandonne la prédiction et on se recale. */
 export const MAX_PENDING = 120;
+/**
+ * Seuil en duel : la file stricte du serveur y garde jusqu'à DUEL.QUEUE_MAX entrées (rafale après une coupure), toutes
+ * en attente d'accusé. Tant qu'il les garde, tick prédit = tick de consommation : la prédiction tient jusque-là (plus
+ * la marge habituelle des entrées en route).
+ */
+export const MAX_PENDING_DUEL = DUEL.QUEUE_MAX + MAX_PENDING;
 
 /** Événements du joueur local prédits (effets immédiats) ; les autres viennent du serveur. */
 export const PREDICTED_EVENTS: ReadonlySet<GameEvent['type']> = new Set<GameEvent['type']>([
@@ -110,7 +116,8 @@ export class Predictor {
       if (this.pending.length > MAX_PENDING) this.pending.shift();
       return [];
     }
-    if (this.pending.length > MAX_PENDING) {
+    const dueling = !!ctx.duels?.some((d) => d.a.pid === this.meId || d.b.pid === this.meId);
+    if (this.pending.length > (dueling ? MAX_PENDING_DUEL : MAX_PENDING)) {
       // Le serveur ne répond plus à nos entrées : on abandonne la prédiction.
       this.pending.length = 0;
       if (this.server) this.hardSet(clonePlayer(this.server));

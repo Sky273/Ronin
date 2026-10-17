@@ -15,7 +15,8 @@ import { makeSnapshot } from '../shared/net/snapshot';
 import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
 import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_WHY } from '../shared/constants';
-import { forfeit, isDueling } from '../shared/duel';
+import { duelOf, forfeit, isDueling, kamaeLength } from '../shared/duel';
+import { BTN } from '../shared/input';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
 import { Samples } from './stats';
 
@@ -54,6 +55,8 @@ interface PlayerSlot {
   /** Duel : heure de référence de la cadence (-1 : hors duel) et entrées reçues depuis. */
   floodSince: number;
   floodCount: number;
+  /** Duel : tick où le client aura rattrapé son tick affiché (monotone), après des entrées retirées de sa file. */
+  caughtUp: number;
 }
 
 /** Tick de vue valide : entier ≥ 0 (sinon ignoré). */
@@ -89,7 +92,7 @@ export class CoopSession {
     if (color >= PLAYER_COLORS) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
-    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, lastRecv: -1, floodSince: -1, floodCount: 0 });
+    this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, lastRecv: -1, floodSince: -1, floodCount: 0, caughtUp: 0 });
     return { pid: p.id, color };
   }
 
@@ -202,6 +205,9 @@ export class CoopSession {
     const w = this.world;
     this.inputs.clear();
     for (const slot of this.slots.values()) {
+      // Arriéré de duelliste seulement : quelques entrées en file absorbent les à-coups des pas du serveur (les retirer
+      // affamerait le client au pas double suivant, ses entrées consommées un tick après son tick prédit).
+      if (slot.queue.length > MAX_INPUT_QUEUE) this.trimDuelBacklog(slot);
       const next = slot.queue.shift();
       if (next) {
         slot.held = next.b;
@@ -213,11 +219,13 @@ export class CoopSession {
         // son retard pour que des frappes différées soient jugées en bloc contre un état plus tardif.
         slot.lag = Math.max(raw, slot.lag - 1);
         this.lagStats.add(slot.lag);
-      } else if (++slot.starved > IDLE_RELEASE_TICKS && !isDueling(w, slot.pid)) {
+      } else if (++slot.starved > IDLE_RELEASE_TICKS) {
         // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.
-        // Pas en duel : relâcher l'iai y serait une frappe (ou une faute) que le joueur n'a pas faite. Un départ
-        // y donne déjà un forfait (DISCONNECT) ; un onglet muet garde son dernier masque sans frapper (TIMEOUT).
-        slot.held = 0;
+        // En duel, seul DUEL est relâché : tenu pendant toute la coupure, il ferait d'un appui bref un abandon
+        // (FORFEIT_HOLD). Relâcher l'iai y serait une frappe (ou une faute) que le joueur n'a pas faite, et ATTACK
+        // ou PARRY relâchés feraient d'un appui encore tenu un nouvel appui à la reprise. Un départ y donne déjà
+        // un forfait (DISCONNECT) ; un onglet muet garde son dernier masque sans frapper (TIMEOUT).
+        slot.held = isDueling(w, slot.pid) ? slot.held & ~BTN.DUEL : 0;
       }
       this.inputs.set(slot.pid, slot.held);
       if (w.net) setLag(w.net, slot.pid, slot.lag);
@@ -231,6 +239,46 @@ export class CoopSession {
       for (const ev of w.events) this.events.push(ev);
       w.events.length = 0;
     }
+  }
+
+  /**
+   * Arriéré d'un duelliste (rafale après une coupure) pendant que ses entrées sont sans effet (mise en place,
+   * dénouement, fin de série) : ramené à sa dernière entrée, sinon la file stricte ne se vide jamais et chaque garde
+   * suivante commence en retard d'autant (signal connu trop tard, prédiction abandonnée). Seul l'abandon tenu y
+   * compte : les entrées avec DUEL restent, chacune précédée d'une entrée sans DUEL (deux appuis ne se soudent pas).
+   * Le tick prédit du client recule d'autant d'entrées retirées, son tick affiché (monotone) attend qu'il le rattrape,
+   * et le 斬 s'afficherait en avance s'il était connu entre-temps. Retrait borné : rattrapage fini avant la prochaine
+   * garde ; ou, si l'arriéré dépasse déjà le signal suivant (affiché dès qu'il sera connu), jusqu'à une garde
+   * d'arriéré : le tick prédit l'aura atteint quand il sera connu (vu à temps ou un peu tard, jamais en avance).
+   */
+  private trimDuelBacklog(slot: PlayerSlot): void {
+    const w = this.world;
+    const d = duelOf(w, slot.pid);
+    if (!d) return;
+    // Ticks avant la prochaine garde et durée de celle-ci (fin de série : un nouveau duel, mise en place comprise).
+    let idle: number;
+    let guard = kamaeLength(d.id, d.played);
+    if (d.phase === 'enter') idle = DUEL.ENTER_TICKS - d.t;
+    else if (d.phase === 'resolve') idle = DUEL.RESOLVE_TICKS - d.t + DUEL.ENTER_TICKS;
+    else if (d.phase === 'end') {
+      idle = DUEL.END_TICKS - d.t + DUEL.ENTER_TICKS;
+      guard = DUEL.KAMAE_MAX;
+    } else return;
+    const q = slot.queue;
+    let budget = Math.max(w.tick + idle - Math.max(slot.caughtUp, w.tick), q.length - guard);
+    if (budget <= 0) return;
+    const kept: InputMsg[] = [];
+    for (let i = 0; i < q.length; i++) {
+      if (budget > 0 && i < q.length - 1 && !((q[i].b | q[i + 1].b) & BTN.DUEL)) {
+        budget--;
+        if (q[i].b !== 0) slot.lastActive = w.tick;
+        continue;
+      }
+      kept.push(q[i]);
+    }
+    if (kept.length === q.length) return;
+    slot.caughtUp = Math.max(slot.caughtUp, w.tick) + q.length - kept.length;
+    slot.queue = kept;
   }
 
   /** Joueurs absents depuis assez longtemps pour être renvoyés de la salle (COOP_KICK_TICKS). */

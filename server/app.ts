@@ -34,11 +34,34 @@ function tooLarge(res: ServerResponse): void {
   res.end('request body too large');
 }
 
+/** Requête refusée avant le framework : réponse 400, puis connexion fermée sans lire la suite. */
+function badRequest(res: ServerResponse): void {
+  res.writeHead(400, { 'content-type': 'text/plain', connection: 'close' });
+  res.end('bad request');
+}
+
+/**
+ * Le framework saura-t-il reconstruire la requête ? Il la recrée en Request fetch (better-call, toNodeHandler :
+ * `${x-forwarded-proto || 'http'}://${host}${url}`) dans une promesse qu'il ne rattrape pas : un Host ou un
+ * X-Forwarded-Proto qui ne forment pas une URL, des identifiants dans Host ou une méthode interdite (TRACE)
+ * y lèveraient une erreur qui arrête tout le processus. Même construction ici, sans le corps.
+ */
+function rebuildable(req: IncomingMessage): boolean {
+  const h = req.headers;
+  try {
+    new Request(`${h['x-forwarded-proto'] || 'http'}://${h[':authority'] || h.host}${req.url}`, { method: req.method, headers: h as Record<string, string> });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Borne les corps HTTP (matchmaking) : le framework les lit en entier, sans limite de taille.
  * Longueur annoncée au-delà de MAX_HTTP_BODY : 413 sans rien lire. Sans longueur annoncée (chunked) :
  * corps lu ici, au plus MAX_HTTP_BODY octets, puis transmis déjà lu (req.body), comme le fait
- * prereadRequestBodies de Colyseus. Les gestionnaires du framework passent derrière ce garde.
+ * prereadRequestBodies de Colyseus. Les gestionnaires du framework passent derrière ce garde,
+ * qui refuse aussi (400) les requêtes que le framework ne saurait pas reconstruire.
  */
 function limitBodies(http: HttpServer): void {
   const listeners = http.listeners('request') as RequestListener[];
@@ -47,6 +70,10 @@ function limitBodies(http: HttpServer): void {
   };
   http.removeAllListeners('request');
   http.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    if (!rebuildable(req)) {
+      badRequest(res);
+      return;
+    }
     const declared = req.headers['content-length'];
     if (declared !== undefined || req.headers['transfer-encoding'] === undefined) {
       if (Number(declared) > MAX_HTTP_BODY) tooLarge(res);

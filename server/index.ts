@@ -7,6 +7,9 @@ import { startServer } from './app';
 const envPort = Number(process.env.PORT || 2567);
 const port = Number.isInteger(envPort) && envPort > 0 && envPort <= 65535 ? envPort : 2567;
 
+// Filet : une promesse rejetée sans gestionnaire (dans le framework) arrêterait le processus et toutes ses salles.
+process.on('unhandledRejection', (reason) => console.error('[serveur] promesse rejetée non rattrapée', reason));
+
 const running = await startServer({ port, handleSignals: true });
 // L'arrêt propre (SIGINT/SIGTERM) est géré par Colyseus : verrouillage et fermeture des salles, puis sortie.
 running.server.onBeforeShutdown(() => console.log('[serveur] arrêt en cours…'));
