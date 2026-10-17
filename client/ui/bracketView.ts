@@ -1,6 +1,7 @@
 // Modèle de vue du tournoi du dojo (道場) : module pur (sans Phaser), testé par tests/dojoui.test.ts.
 // Il traduit le tournoi du monde (w.tournament) en tableau prêt à dessiner (noms, 木人, scores,
 // vainqueurs, partis, champion) et en lignes d'état ; BracketOverlay (bracket.ts) ne fait que les dessiner.
+import { ROUND_COUNT, ROUND_FIRST } from '../../shared/tournament';
 import { DOJO, DT, DUEL_WHY } from '../../shared/constants';
 import type { DojoEntrant, DojoMatch, GameEvent, Tournament, TournamentPhase, World } from '../../shared/types';
 import { playerColor } from '../render/palette';
@@ -68,8 +69,8 @@ export interface BracketModel {
 }
 
 /** Index du premier match et nombre de matchs de chaque tour. */
-const FIRST: readonly number[] = [0, 4, 6];
-const COUNT: readonly number[] = [4, 2, 1];
+const FIRST = ROUND_FIRST;
+const COUNT = ROUND_COUNT;
 const ROUND_NAMES: readonly string[] = ['Quarterfinals', 'Semifinals', 'Final'];
 const MATCH_NAMES: readonly string[] = ['quarterfinal', 'semifinal', 'final'];
 

@@ -284,8 +284,9 @@ export const DOJO = {
   ROUND_PAUSE: 5 * 60, // pause avant chaque tour : le tableau est affiché (5 s)
   CHAMPION_TICKS: 10 * 60, // le champion est célébré, puis la salle revient en attente (10 s)
   ABSENT_TICKS: 15 * 60, // aucun bouton pendant un match : forfait (15 s)
-  SUSPECT_LIMIT: 3, // réactions sous DUEL.SUSPECT_REACT dans un même tournoi : disqualifié
-  BOT_REACT_MIN: 12, // réaction la plus rapide d'un bot (200 ms, au-dessus de SUSPECT_REACT)
+  SUSPECT_REACT: 11, // réaction sous ce seuil (183 ms) : suspecte au dojo (DUEL.SUSPECT_REACT ne fait que journaliser)
+  SUSPECT_LIMIT: 3, // réactions suspectes dans un même tournoi : disqualifié
+  BOT_REACT_MIN: 12, // réaction la plus rapide d'un bot (200 ms, au-dessus de DOJO.SUSPECT_REACT)
   BOT_REACT_MAX: 40, // et la plus lente (667 ms)
 } as const;
 

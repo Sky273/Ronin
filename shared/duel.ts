@@ -513,7 +513,8 @@ function endNow(w: World, d: Duel, winner: number, why: number): void {
 export function forfeit(w: World, pid: number, why: number): void {
   const d = duelOf(w, pid);
   if (!d || d.phase === 'end') return;
-  const out = decided(d) ?? { winner: why === DUEL_WHY.INTERRUPT ? -1 : d.a.pid === pid ? d.b.pid : d.a.pid, why };
+  // Disqualification (dojo) : elle l'emporte même sur une série que la manche en cours vient de décider.
+  const out = (why === DUEL_WHY.SUSPECT ? null : decided(d)) ?? { winner: why === DUEL_WHY.INTERRUPT ? -1 : d.a.pid === pid ? d.b.pid : d.a.pid, why };
   d.phase = 'end';
   d.t = 0;
   d.winner = out.winner;

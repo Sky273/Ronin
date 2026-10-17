@@ -4,7 +4,7 @@
 
 You are a lone ronin with a katana, cutting through hordes along the Tōkaidō road — alone, or online with up to eleven companions. Every stroke on screen is drawn live with a procedural brush, in the style of *sumi-e* (墨絵) ink sketches on rice paper, with a single vermilion accent. Characters, landscapes, effects, sounds and music are all generated in code: the game ships **no image or audio assets**.
 
-> Status: solo campaign complete; **online co-op** (“the shared road”, up to 12 players) with **iaidō duels** between players. Next milestone: a 1v1 tournament dojo.
+> Status: solo campaign complete; **online co-op** (“the shared road”, up to 12 players) with **iaidō duels** between players; the **dojo**, an 8-player iaidō tournament.
 
 ## Features
 
@@ -50,6 +50,14 @@ You are a lone ronin with a katana, cutting through hordes along the Tōkaidō r
 - **Fair at any latency**: the 斬 signal is scheduled by the server in advance and appears at the same game tick for both duelists, and reactions are judged on the server tick each input is consumed — no rewind, nothing to exploit with a forged lag. Over 0–150 ms per direction, the faster player wins 100 % of the time in tests.
 - Duelists are untouchable while the rest of the room plays on and watches. There is nothing to win but glory.
 
+### The dojo (道場) — an iaidō tournament
+- **Dojo** on the title screen: enter your name and join a dojo of **8 places**.
+- **Single elimination**: quarterfinals, semifinals, final, every match a best-of-three iaidō duel with the same rules and network fairness as above. Matches of a round are fought at the same time on four tatami mats; the others watch.
+- The tournament starts when the dojo is full, when everyone present has pressed **G** (ready), or after **60 s**: training **bots** (marked 木人) then fill the empty places. Bots react like people — never faster than 200 ms, sometimes too early.
+- **No draws**: sudden death, then the sum of reaction times, then the lot (抽選).
+- Leaving, holding **G** (forfeit) or staying idle for 15 s loses the match; three inhumanly fast reactions in one tournament disqualify (反則).
+- **Tab** shows the bracket. The champion (優勝) is celebrated, then the dojo waits for the next tournament. A dojo is locked while its tournament runs: newcomers get a new one.
+
 ### Presentation
 - **Ink rendering**: brush strokes that boil like hand-drawn animation, ink stains that build up on the ground, foes cut in half, hit-stop, slow motion (solo).
 - **Adaptive music**, generated in the *In* (Miyako-bushi) scale:
@@ -78,6 +86,7 @@ npm run build:server   # bundle the server (dist-server/)
 npm run start:server   # run the bundled server
 npm run typecheck:server
 npm run bots -- 12     # fill a room with 12 bots and print traffic statistics
+npm run bots -- 8 --room dojo   # the same in a dojo (bots ready up and duel)
 ```
 
 ### Configuration
@@ -86,7 +95,7 @@ npm run bots -- 12     # fill a room with 12 bots and print traffic statistics
 |---|---|---|
 | `VITE_SERVER_URL` | client (see `.env.example`) | game server address (default `ws://localhost:2567`) |
 | `PORT` | server | listening port (default 2567) |
-| `MAX_ROOMS` | server | maximum rooms per process (default 50) |
+| `MAX_ROOMS` | server | maximum rooms per process, co-op and dojo together (default 50) |
 | `LAG_MS`, `JITTER_MS` | server | simulated latency per direction, for testing |
 | `STATS_EVERY_MS` | server | interval of the performance log (0 to disable) |
 | `SERVER_URL` | `npm run bots` | server the bots join (default `ws://localhost:2567`) |
@@ -108,11 +117,13 @@ Client and server must run the same protocol version (checked on join): update b
 | Online: challenge / accept a duel · hold to forfeit | G | R3 |
 | Online: leave the room | Esc | hold Select |
 | Online: ready at the stage results | Space / J | A / X |
+| Dojo: ready (start without waiting) · hold to forfeit a match | G | R3 |
+| Dojo: show / hide the bracket | Tab | — |
 | Help · sound · music · hitboxes | H · M · N · F1 | — |
 
 Game keys are read by physical position (`event.code`), so QWERTY and AZERTY both work without any setting; the H, M and N shortcuts follow the letter printed on the key.
 
-Development shortcuts (dev server, solo only): **F2** next Tide phase, **F3** warp to the guardian's arena, **F4** +100 honor, **F7** next stage, **F8** add a delayed “echo” player, **F9** start a local duel against an echo.
+Development shortcuts (dev server, solo only): **F2** next Tide phase, **F3** warp to the guardian's arena, **F4** +100 honor, **F7** next stage, **F8** add a delayed “echo” player, **F9** start a local duel against an echo, **F10** an offline dojo against bots.
 
 ## Architecture
 
@@ -121,7 +132,7 @@ shared/        deterministic 60 Hz simulation (no DOM, no Math.random): the same
                in solo, on the server and in the client's prediction
                physics, player, combat, enemies, interactions, stages and arena (kekkai),
                level generation and checks, difficulty, co-op rules, duels and challenges,
-               lag compensation (lagcomp)
+               the dojo (level, tournament, duelist bots), lag compensation (lagcomp)
   net/         protocol, compact snapshot codec, snapshot building / applying
 client/        Phaser 3 rendering, fully procedural
   scenes/      the game scene: screens, solo and online play
@@ -131,11 +142,12 @@ client/        Phaser 3 rendering, fully procedural
   render/      brush engine, IK skeletons and key poses, painted backdrops and terrain
   fx/          ink particles, halved corpses, afterimages, per-player effect policy
   audio/       synthesized sound effects and adaptive music
-  ui/          HUD, banners, results and room roster, online menu, duels, teammate markers,
-               title, difficulty, name entry, Hall of Honor
+  ui/          HUD, banners, results and room roster, online menu, duels, tournament bracket,
+               teammate markers, title, difficulty, name entry, Hall of Honor
   scores/      local high scores
-server/        Colyseus game server: a CoopSession per room runs the shared simulation
-               (fixed-step, input queues, away players), rooms, lag simulator, bots
+server/        Colyseus game server: a CoopSession (or DojoSession) per room runs the shared
+               simulation (fixed-step, input queues, away players); co-op and dojo rooms,
+               lag simulator, bots
 tests/         headless tests (esbuild or tsx + Node), including a virtual network bench
 ```
 
@@ -145,7 +157,7 @@ tests/         headless tests (esbuild or tsx + Node), including a virtual netwo
 - the server judges your strikes and parries against what you saw on screen (**lag compensation**, up to 500 ms);
 - snapshots are compact tuples (well under 1 KB with 12 players), sent at 20 Hz and filtered around each player.
 
-**Tests.** `npm test` runs every suite: solo simulation smoke test, player body and honor orbs, enemies and arena, high scores, game over, melody, level generation and stage chaining, snapshots and codec, co-op rules (with reference fingerprints guaranteeing the solo simulation never changes by accident), remote source, server (real Colyseus server with SDK clients, malformed requests, rate limits), effect policy, interface (HUD, banners, keyboard layouts), terrain ink uploads, prediction, interpolation, server clock, lag compensation, a virtual network bench (latency × jitter matrix, outages, server stalls), room roster, duels and duel fairness.
+**Tests.** `npm test` runs every suite: solo simulation smoke test, player body and honor orbs, enemies and arena, high scores, game over, melody, level generation and stage chaining, snapshots and codec, co-op rules (with reference fingerprints guaranteeing the solo simulation never changes by accident), remote source, server (real Colyseus server with SDK clients, malformed requests, rate limits), effect policy, interface (HUD, banners, keyboard layouts), terrain ink uploads, prediction, interpolation, server clock, lag compensation, a virtual network bench (latency × jitter matrix, outages, server stalls), room roster, duels and duel fairness, the dojo (tournament, bracket, real server rooms).
 
 **Stack**: TypeScript (strict), Phaser 3, Vite, Web Audio API, Colyseus 0.18, msgpack.
 

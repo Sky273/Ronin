@@ -2,20 +2,38 @@
 // joués en parallèle dans chaque tour. Le tournoi part quand la salle est pleine ou que tous les présents
 // sont prêts (G), sinon au bout de l'attente, des bots complétant les places. Déterministe (w.rng, hachages),
 // donc simulable et testable sans réseau, comme le reste de la simulation.
-import { DOJO, DUEL, DUEL_WHY } from './constants';
+import { DOJO, DUEL_WHY } from './constants';
 import { BOT_NAMES, botButtons } from './dojoBot';
 import { dojoSpot } from './dojoLevel';
 import { DOJO_DUEL_RULES, forfeit, stepDuels, stepForfeits, startDuel } from './duel';
 import { BTN } from './input';
-import { stageSeed as hash } from './math';
+import { Rng, stageSeed as hash } from './math';
 import { PLAYER_COLORS } from './net/protocol';
 import { stepPlayer } from './player';
 import type { DojoEntrant, DojoMatch, Player, Tournament, World } from './types';
 import { addPlayer, removePlayer } from './world';
 
-/** Tournoi vierge (attente, personne). */
-export function createTournament(): Tournament {
-  return { n: 1, phase: 'waiting', t: 0, startAt: -1, round: -1, entrants: [], matches: [], champion: -1 };
+/** Index du premier match et nombre de matchs de chaque tour (quarts 0-3, demies 4-5, finale 6). */
+export const ROUND_FIRST: readonly number[] = [0, 4, 6];
+export const ROUND_COUNT: readonly number[] = [4, 2, 1];
+
+/**
+ * Sel secret d'un dojo (64 bits) : bots et tirage du tableau en dérivent. Posé par le serveur, jamais transmis
+ * (hors instantané) ; par défaut la graine de la salle (hors ligne, tests : déterministe).
+ */
+export type DojoSalt = readonly [number, number];
+const salts = new WeakMap<Tournament, DojoSalt>();
+
+/** Tournoi vierge (attente, personne), avec son sel. */
+export function createTournament(salt: DojoSalt = [1, 1]): Tournament {
+  const t: Tournament = { n: 1, phase: 'waiting', t: 0, startAt: -1, round: -1, entrants: [], matches: [], champion: -1 };
+  salts.set(t, salt);
+  return t;
+}
+
+/** Sel du dojo d'un monde (celui de son tournoi). */
+export function dojoSalt(w: World): DojoSalt {
+  return (w.tournament && salts.get(w.tournament)) ?? [w.seed, w.seed];
 }
 
 /** État serveur hors instantané : dernier appui de chaque humain, réactions suspectes, disqualifiés. */
@@ -23,17 +41,20 @@ interface Hidden {
   lastPress: Map<number, number>;
   fast: Map<number, number>;
   dq: Set<number>;
+  /** Attente : fin de l'attente normale (première arrivée + WAIT_TICKS), −1 personne. */
+  waitUntil: number;
+  /** Attente : départ anticipé prévu (salle pleine ou tous prêts depuis ce moment + FULL_DELAY), −1 aucun. */
+  quickAt: number;
 }
 const hidden = new WeakMap<Tournament, Hidden>();
 function hiddenOf(t: Tournament): Hidden {
   let h = hidden.get(t);
-  if (!h) hidden.set(t, (h = { lastPress: new Map(), fast: new Map(), dq: new Set() }));
+  if (!h) hidden.set(t, (h = { lastPress: new Map(), fast: new Map(), dq: new Set(), waitUntil: -1, quickAt: -1 }));
   return h;
 }
 
-/** Index des matchs d'un tour dans `matches` (quarts 0-3, demies 4-5, finale 6). */
-const FIRST: readonly number[] = [0, 4, 6];
-const COUNT: readonly number[] = [4, 2, 1];
+const FIRST = ROUND_FIRST;
+const COUNT = ROUND_COUNT;
 
 const entrantOf = (t: Tournament, pid: number): DojoEntrant | undefined => t.entrants.find((e) => e.pid === pid);
 const isBot = (t: Tournament, pid: number): boolean => entrantOf(t, pid)?.bot === true;
@@ -91,13 +112,18 @@ function stepWaiting(w: World, t: Tournament, readied: number[]): void {
     const e = entrantOf(t, pid);
     if (e) e.ready = true;
   }
+  const h = hiddenOf(t);
   if (!t.entrants.length) {
-    t.startAt = -1;
+    t.startAt = h.waitUntil = h.quickAt = -1;
     return;
   }
-  if (t.startAt < 0) t.startAt = w.tick + DOJO.WAIT_TICKS;
-  // Salle pleine, ou tous les présents prêts : départ anticipé.
-  if (t.entrants.length >= DOJO.SIZE || t.entrants.every((e) => e.ready)) t.startAt = Math.min(t.startAt, w.tick + DOJO.FULL_DELAY);
+  if (h.waitUntil < 0) h.waitUntil = w.tick + DOJO.WAIT_TICKS;
+  // Salle pleine, ou tous les présents prêts : départ anticipé, annulé si la condition tombe (un arrivant non prêt,
+  // un départ de la salle pleine).
+  const quick = t.entrants.length >= DOJO.SIZE || t.entrants.every((e) => e.ready);
+  if (!quick) h.quickAt = -1;
+  else if (h.quickAt < 0) h.quickAt = w.tick + DOJO.FULL_DELAY;
+  t.startAt = h.quickAt >= 0 ? Math.min(h.waitUntil, h.quickAt) : h.waitUntil;
   if (w.tick >= t.startAt) drawBracket(w, t);
 }
 
@@ -107,18 +133,20 @@ function freeColor(w: World): number {
   return w.players.length % PLAYER_COLORS;
 }
 
-/** Fin de l'attente : des bots complètent les places, puis le tableau est tiré au sort (w.rng). */
+/** Fin de l'attente : des bots complètent les places, puis le tableau est tiré au sort (sel secret : imprévisible). */
 function drawBracket(w: World, t: Tournament): void {
+  const salt = dojoSalt(w);
+  const rng = new Rng(hash(hash(salt[0], t.n), salt[1]));
   const taken = new Set(w.players.map((p) => p.name));
   const names = BOT_NAMES.filter((n) => !taken.has(n));
   while (t.entrants.length < DOJO.SIZE) {
-    const name = names.length ? names.splice(Math.floor(w.rng.next() * names.length), 1)[0] : `Kage ${t.entrants.length + 1}`;
+    const name = names.length ? names.splice(Math.floor(rng.next() * names.length), 1)[0] : `Kage ${t.entrants.length + 1}`;
     const p = addPlayer(w, name, { color: freeColor(w) });
     t.entrants.push({ pid: p.id, name: p.name, color: p.color, bot: true, gone: false, ready: false });
   }
   const es = t.entrants;
   for (let i = es.length - 1; i > 0; i--) {
-    const j = Math.floor(w.rng.next() * (i + 1));
+    const j = Math.floor(rng.next() * (i + 1));
     [es[i], es[j]] = [es[j], es[i]];
   }
   for (const e of es) e.ready = false;
@@ -137,9 +165,27 @@ function drawBracket(w: World, t: Tournament): void {
 // ─── Tours ──────────────────────────────────────────────────────────────────
 
 const present = (w: World, pid: number): Player | undefined => w.players.find((p) => p.id === pid);
+/** Participant encore en course : présent et non disqualifié. */
+const inRace = (w: World, t: Tournament, pid: number): Player | undefined => (hiddenOf(t).dq.has(pid) ? undefined : present(w, pid));
 
 /** Tirage au sort d'un match sans duel (les deux partis) : hachage du tournoi et du match. */
 const lotOf = (t: Tournament, k: number, m: DojoMatch): number => (hash(t.n, k) & 1 ? m.a : m.b);
+
+/**
+ * Vainqueur d'un match sans duel (un participant au moins hors course) : celui qui est en course ; sinon un parti
+ * plutôt qu'un disqualifié (un disqualifié ne passe jamais devant quelqu'un qui ne l'est pas) ; sinon le tirage au sort.
+ */
+function byDefault(w: World, t: Tournament, k: number, m: DojoMatch): { winner: number; why: number } {
+  const dq = hiddenOf(t).dq;
+  const ra = !!inRace(w, t, m.a);
+  const rb = !!inRace(w, t, m.b);
+  if (ra !== rb) {
+    const out = ra ? m.b : m.a;
+    return { winner: ra ? m.a : m.b, why: dq.has(out) ? DUEL_WHY.SUSPECT : DUEL_WHY.DISCONNECT };
+  }
+  if (dq.has(m.a) !== dq.has(m.b)) return { winner: dq.has(m.a) ? m.b : m.a, why: DUEL_WHY.SUSPECT };
+  return { winner: lotOf(t, k, m), why: DUEL_WHY.LOT };
+}
 
 /** Lance les matchs du tour : un duel par match, ou un forfait sans duel si un participant est parti. */
 function launchRound(w: World, t: Tournament): void {
@@ -148,10 +194,12 @@ function launchRound(w: World, t: Tournament): void {
   for (let k = from; k < from + COUNT[t.round]; k++) {
     const m = t.matches[k];
     if (m.state !== 'pending') continue;
-    const pa = present(w, m.a);
-    const pb = present(w, m.b);
+    const pa = inRace(w, t, m.a);
+    const pb = inRace(w, t, m.b);
     if (!pa || !pb) {
-      finish(w, t, k, pa ? m.a : pb ? m.b : lotOf(t, k, m), pa || pb ? DUEL_WHY.DISCONNECT : DUEL_WHY.LOT, 0, 0);
+      // Forfait sans duel : l'un au moins est parti ou disqualifié.
+      const r = byDefault(w, t, k, m);
+      finish(w, t, k, r.winner, r.why, 0, 0);
       continue;
     }
     const d = startDuel(w, pa, pb, DOJO_DUEL_RULES, dojoSpot(t.round, k - from));
@@ -176,9 +224,9 @@ function stepRunning(w: World, t: Tournament): void {
     if (m.state !== 'live') continue;
     const d = w.duels?.find((x) => x.id === m.duel);
     if (!d) {
-      // Duel disparu sans phase de fin observée (ne devrait pas arriver) : le présent passe.
-      const winner = present(w, m.a) ? m.a : present(w, m.b) ? m.b : lotOf(t, k, m);
-      finish(w, t, k, winner, DUEL_WHY.DISCONNECT, m.wa, m.wb);
+      // Duel disparu sans phase de fin observée (ne devrait pas arriver) : comme un match sans duel.
+      const r = byDefault(w, t, k, m);
+      finish(w, t, k, r.winner, r.why, m.wa, m.wb);
       continue;
     }
     const wa = d.a.pid === m.a ? d.a.wins : d.b.wins;
@@ -188,9 +236,10 @@ function stepRunning(w: World, t: Tournament): void {
     if (d.phase === 'end') {
       let winner = d.winner >= 0 ? d.winner : d.a.pid; // pas de nul au dojo (garde-fou)
       let why = d.last;
-      // Disqualifié : il ne passe jamais, même s'il a gagné la série.
+      // Disqualifié : il ne passe jamais, même s'il a gagné la série (sauf face à un autre disqualifié).
       if (h.dq.has(winner)) {
-        winner = winner === m.a ? m.b : m.a;
+        const other = winner === m.a ? m.b : m.a;
+        if (!h.dq.has(other)) winner = other;
         why = DUEL_WHY.SUSPECT;
       }
       finish(w, t, k, winner, why, wa, wb);
@@ -199,7 +248,7 @@ function stepRunning(w: World, t: Tournament): void {
     // Fin d'une manche : réactions trop rapides d'un humain (DOJO.SUSPECT_LIMIT dans le tournoi : disqualifié).
     if (d.phase === 'resolve' && d.t === 0) {
       for (const s of [d.a, d.b]) {
-        if (isBot(t, s.pid) || s.foul || s.react < 0 || s.react >= DUEL.SUSPECT_REACT) continue;
+        if (isBot(t, s.pid) || s.foul || s.react < 0 || s.react >= DOJO.SUSPECT_REACT) continue;
         const n = (h.fast.get(s.pid) ?? 0) + 1;
         h.fast.set(s.pid, n);
         if (n >= DOJO.SUSPECT_LIMIT && !h.dq.has(s.pid)) {
@@ -222,7 +271,8 @@ function stepRunning(w: World, t: Tournament): void {
       t.phase = 'pause';
     } else {
       t.phase = 'done';
-      t.champion = t.matches[6].winner;
+      // Jamais un disqualifié (finale entre deux disqualifiés) : pas de champion.
+      t.champion = h.dq.has(t.matches[6].winner) ? -1 : t.matches[6].winner;
       w.events.push({ type: 'dojoChampion', pid: t.champion, n: t.n });
     }
     t.t = 0;
@@ -252,7 +302,8 @@ function finish(w: World, t: Tournament, k: number, winner: number, why: number,
 function resetTournament(w: World, t: Tournament): void {
   for (const e of t.entrants) if (e.bot && present(w, e.pid)) removePlayer(w, e.pid);
   const n = t.n + 1;
-  Object.assign(t, createTournament(), { n });
+  // Même objet (et même sel) : seul l'état du tournoi repart de zéro.
+  Object.assign(t, { phase: 'waiting', t: 0, startAt: -1, round: -1, entrants: [], matches: [], champion: -1, n });
   hidden.delete(t);
   w.events.push({ type: 'dojoReset', n });
 }

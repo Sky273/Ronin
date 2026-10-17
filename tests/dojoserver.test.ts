@@ -13,7 +13,7 @@ import { startServer } from '../server/app';
 import { DojoSession } from '../server/dojoSession';
 import { CoopSession } from '../server/session';
 import type { CoopRoom } from '../server/rooms/CoopRoom';
-import type { DojoRoom } from '../server/rooms/DojoRoom';
+import { DojoRoom, MAX_DOJO_ROOMS } from '../server/rooms/DojoRoom';
 import { type BenchClient, NetBench } from './net/harness';
 
 export {}; // module isolé (déclarations locales au fichier)
@@ -122,7 +122,7 @@ class Driver {
   }
   check(`${DOJO.SIZE + 1}e joueur refusé par la session`, threw && s.playerCount === DOJO.SIZE);
   const w = s.welcomeFor(js[3].pid);
-  check('accueil : mode dojo, protocole v7, couleur du joueur', w.mode === 'dojo' && w.v === PROTOCOL_VERSION && PROTOCOL_VERSION === 7 && w.color === 3 && w.stage === s.world.level.stage && w.seed === 5);
+  check('accueil : mode dojo, protocole v7, couleur du joueur, graine non transmise (bots et tirage imprévisibles)', w.mode === 'dojo' && w.v === PROTOCOL_VERSION && PROTOCOL_VERSION === 7 && w.color === 3 && w.stage === s.world.level.stage && w.seed === 0);
   check('accueil de la route : sans mode (coop)', new CoopSession(5).welcomeFor(0).mode === undefined);
   new Driver(s).run(1, () => 0);
   const snap = view(s.snapshotFor(js[0].pid));
@@ -520,6 +520,35 @@ function judge(tag: string, res: ReturnType<typeof dojoBench>): void {
   ];
   configs.forEach(([tag, links, jitter], i) => judge(`dojo ${tag}`, dojoBench(links, jitter, 4, 100 + i)));
   console.log(`  (banc du dojo : ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+}
+
+// ─── (d) Sous-plafond des salles dojo : la coop peut toujours ouvrir des salles ─
+{
+  const srv = await startServer({ port: 0 });
+  const made: string[] = [];
+  let refused = '';
+  try {
+    for (let i = 0; i < MAX_DOJO_ROOMS + 1; i++) {
+      try {
+        made.push((await matchMaker.createRoom(ROOMS.dojo, {})).roomId);
+      } catch (e) {
+        refused = (e as Error).message;
+        break;
+      }
+    }
+    check(`sous-plafond : au plus MAX_DOJO_ROOMS (${MAX_DOJO_ROOMS}) salles dojo, la suivante refusée (« server full »)`, made.length === MAX_DOJO_ROOMS && /server full/.test(refused) && DojoRoom.open === MAX_DOJO_ROOMS,
+      `${made.length} créées, ${DojoRoom.open} ouvertes, refus « ${refused} »`);
+    let coopOk = false;
+    try {
+      coopOk = !!(await matchMaker.createRoom(ROOMS.coop, {})).roomId;
+    } catch {
+      coopOk = false;
+    }
+    check('dojos au sous-plafond : une salle coop se crée encore', coopOk);
+  } finally {
+    await srv.stop();
+  }
+  check('arrêt du serveur : aucune salle dojo comptée ouverte', DojoRoom.open === 0, `${DojoRoom.open}`);
 }
 
 reachedEnd = true;

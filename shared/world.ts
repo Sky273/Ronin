@@ -23,6 +23,8 @@ export { nextStage, setBarrier, warpToArena } from './stage';
 export interface WorldOptions {
   difficulty?: DifficultyId;
   mode?: GameMode;
+  /** Dojo : sel secret des bots et du tirage (serveur ; par défaut dérivé de la graine). */
+  salt?: readonly [number, number];
 }
 
 export function createWorld(seed = 7, opts: WorldOptions = {}): World {
@@ -57,7 +59,7 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
   // Dojo : duels du tournoi (pas de défis : les matchs sont tirés au sort), ni ennemis ni Marée.
   if (w.mode === 'dojo') {
     w.duels = [];
-    w.tournament = createTournament();
+    w.tournament = createTournament(opts.salt ?? [seed, seed ^ 0x5bd1e995]);
     return w;
   }
   openStageStats(w); // coop seulement (aucun joueur encore : enregistrement vide)

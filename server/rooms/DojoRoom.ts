@@ -4,13 +4,40 @@
 import { DOJO, DUEL_WHY } from '../../shared/constants';
 import type { CoopSession } from '../session';
 import { DojoSession } from '../dojoSession';
-import { CoopRoom } from './CoopRoom';
+import { CoopRoom, MAX_ROOMS } from './CoopRoom';
+
+/**
+ * Salles dojo au plus (moitié du plafond commun) : un dojo se verrouille pendant tout un tournoi et chaque arrivant
+ * en ouvre alors un autre ; sans sous-plafond, une affluence au dojo épuiserait MAX_ROOMS et fermerait la coop.
+ */
+export const MAX_DOJO_ROOMS = Math.max(1, Math.ceil(MAX_ROOMS / 2));
+let dojoRooms = 0;
 
 /** Nom d'un tour du tableau (index de match : quarts 0-3, demies 4-5, finale 6). */
 const roundName = (match: number): string => (match < 4 ? 'quart' : match < 6 ? 'demie' : 'finale');
 
 export class DojoRoom extends CoopRoom {
   maxClients = DOJO.SIZE;
+  /** Comptée parmi les salles dojo ouvertes (création acceptée). */
+  private counted = false;
+
+  override onCreate(): void {
+    if (dojoRooms >= MAX_DOJO_ROOMS) throw new Error('server full');
+    super.onCreate();
+    dojoRooms++;
+    this.counted = true;
+  }
+
+  override onDispose(): void {
+    if (this.counted) dojoRooms--;
+    this.counted = false;
+    super.onDispose();
+  }
+
+  /** Salles dojo ouvertes dans ce processus (tests, diagnostics). */
+  static get open(): number {
+    return dojoRooms;
+  }
   protected override readonly label: string = 'dojo';
   /**
    * Verrou explicite posé par la salle : tournoi en cours (pas de spectateurs extérieurs, un arrivant va dans une

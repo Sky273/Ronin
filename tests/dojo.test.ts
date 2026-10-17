@@ -226,6 +226,44 @@ function untilMyMatch(seed: number, script: (w: World, me: number) => (pid: numb
   check(`réactions de ${DUEL.ANTICIPATE} ticks répétées (${DOJO.SUSPECT_LIMIT} fois) : disqualifié (反則), jamais champion`, !!dq && dq.winner !== me.id && w.tournament!.champion !== me.id, JSON.stringify(dq));
 }
 
+{
+  // 10 ticks (167 ms) : suspect au dojo aussi (DOJO.SUSPECT_REACT), alors que DUEL.SUSPECT_REACT ne ferait que journaliser.
+  const w = createWorld(42, { mode: 'dojo' });
+  const me = addPlayer(w, 'Cheat');
+  const evs = run(w, 60 * 60 * 6, (pid) => (pid === me.id ? iaiAt(w, pid, DOJO.SUSPECT_REACT - 1) : 0), champion);
+  check(`réactions de ${DOJO.SUSPECT_REACT - 1} ticks répétées : disqualifié aussi`, results(evs).some((r) => r.why === DUEL_WHY.SUSPECT) && w.tournament!.champion !== me.id);
+  // Disqualifié sur la manche qui lui donne la série : l'issue du duel elle-même est la disqualification.
+  const ends = evs.filter((e): e is Ev<'duelEnd'> => e.type === 'duelEnd' && e.why === DUEL_WHY.SUSPECT);
+  check('disqualification : l\'issue du duel (duelEnd) le donne perdant, même sur une série décidée', ends.length > 0 && ends.every((e) => e.winner !== me.id));
+}
+{
+  // Huit tricheurs : un disqualifié ne passe jamais au tour suivant (son prochain match est un forfait).
+  const w = createWorld(43, { mode: 'dojo' });
+  const ps = Array.from({ length: 8 }, (_, i) => addPlayer(w, `C${i}`, { color: i }));
+  const ids = new Set(ps.map((p) => p.id));
+  const evs = run(w, 60 * 60 * 8, (pid) => (ids.has(pid) ? iaiAt(w, pid, DUEL.ANTICIPATE) : 0), champion);
+  const t = w.tournament!;
+  const dqByRound = t.matches.filter((m) => m.round > 0 && m.state === 'done' && m.why !== DUEL_WHY.SUSPECT && m.why !== DUEL_WHY.LOT);
+  check('tous disqualifiés : le tournoi se termine quand même, sans aucun match joué au-delà d\'une disqualification', champion(evs) && dqByRound.length === 0,
+    t.matches.map((m) => `${m.round}:${m.why}`).join(' '));
+}
+
+// ─── 6 bis. Sel secret : bots et tirage imprévisibles pour le client ─────────
+{
+  const bracket = (salt: [number, number]) => {
+    const w = createWorld(50, { mode: 'dojo', salt });
+    addPlayer(w, 'Luc');
+    run(w, DOJO.WAIT_TICKS + 5, () => 0, (e) => e.some((x) => x.type === 'dojoStart'));
+    return w.tournament!.entrants.map((e) => e.name).join(',');
+  };
+  check('même graine, sels différents : tableaux (et bots) différents', bracket([1, 2]) !== bracket([3, 4]));
+  check('même sel : même tableau', bracket([7, 8]) === bracket([7, 8]));
+  check('les relâchements des bots dépendent du sel, pas seulement de la graine', botRelease([1, 2], 5, 9, 0, 1000) !== botRelease([3, 4], 5, 9, 0, 1000) ||
+    botRelease([1, 2], 6, 9, 0, 1000) !== botRelease([3, 4], 6, 9, 0, 1000));
+  const w = createWorld(50, { mode: 'dojo', salt: [11, 12] });
+  check('le sel n\'est pas dans le monde transmis (JSON du tournoi)', !JSON.stringify(w).includes('"salt"') && !JSON.stringify(w.tournament).includes('11,12'));
+}
+
 // ─── 7. Départage : jamais de nul ───────────────────────────────────────────
 {
   const d = {
@@ -253,7 +291,7 @@ function untilMyMatch(seed: number, script: (w: World, me: number) => (pid: numb
     let k = 0;
     for (let duel = 1; duel <= 60; duel++) {
       const sig = 1000;
-      const r = botRelease(9, pid, duel, duel % 5, sig) - sig;
+      const r = botRelease([9, 9], pid, duel, duel % 5, sig) - sig;
       n++;
       if (r < 0) fouls++;
       else {
@@ -266,11 +304,89 @@ function untilMyMatch(seed: number, script: (w: World, me: number) => (pid: numb
   }
   check('réaction des bots ≥ BOT_REACT_MIN hors faux départs', minReact >= DOJO.BOT_REACT_MIN, `min ${minReact}`);
   check('faux départs des bots : 1 à 10 % des manches', fouls / n > 0.01 && fouls / n < 0.1, `${((100 * fouls) / n).toFixed(1)} %`);
-  check('profils variés (réaction moyenne de 13 à 23 ticks, au moins 6 ticks d\'écart)', Math.min(...means) >= 12.5 && Math.max(...means) <= 23.5 && Math.max(...means) - Math.min(...means) >= 6,
+  check('profils variés (réaction moyenne de 15 à 26 ticks, au moins 6 ticks d\'écart)', Math.min(...means) >= 14.5 && Math.max(...means) <= 26 && Math.max(...means) - Math.min(...means) >= 6,
     `${Math.min(...means).toFixed(1)} à ${Math.max(...means).toFixed(1)}`);
-  const p1 = botProfile(9, 1);
-  const p2 = botProfile(9, 2);
+  const p1 = botProfile([9, 9], 1);
+  const p2 = botProfile([9, 9], 2);
   check('deux bots ont des profils distincts', p1.react !== p2.react);
+}
+
+// ─── 9. Double disqualification : un disqualifié ne rejoue plus et n'est jamais champion ───
+{
+  // Tournoi n° 2 : lotOf ne dépend que du numéro du tournoi et du match (au n° 2 : le pire cas pour ce scénario).
+  const w = createWorld(62, { mode: 'dojo' });
+  const [a, b, c, d, e] = ['CheatA', 'CheatB', 'C', 'D', 'E'].map((n) => addPlayer(w, n).id);
+  const t = w.tournament!;
+  run(w, 60 * 60 * 10, (pid) => iaiAt(w, pid, 20), () => t.n === 2 && t.phase === 'pause');
+  const bots = t.entrants.filter((x) => x.bot).map((x) => x.pid);
+  [[c, bots[0]], [a, b], [d, bots[1]], [e, bots[2]]].forEach(([x, y], k) => {
+    t.matches[k].a = x;
+    t.matches[k].b = y;
+  });
+  let left = false;
+  const evs = run(w, 60 * 60 * 8, (pid) => iaiAt(w, pid, pid === a || pid === b ? DUEL.ANTICIPATE : 11), (ev) => {
+    if (!left && t.phase === 'pause' && t.round === 1) {
+      left = true;
+      for (const p of [c, d, e]) removePlayer(w, p);
+    }
+    return ev.some((x) => x.type === 'dojoChampion');
+  });
+  const q1 = results(evs).find((r) => r.match === 1);
+  const cheat = (pid: number) => pid === a || pid === b;
+  check('double disqualification : quart 1 perdu par SUSPECT', !!q1 && q1.why === DUEL_WHY.SUSPECT, JSON.stringify(q1));
+  check('un disqualifié ne dispute plus aucun match (aucun duel lancé)', !evs.some((x) => x.type === 'dojoMatch' && x.match >= 4 && (cheat(x.a) || cheat(x.b))));
+  check('un disqualifié ne passe aucun tour suivant, même face à un parti', !results(evs).some((r) => r.match >= 4 && cheat(r.winner)), JSON.stringify(results(evs).filter((r) => r.match >= 4)));
+  check("un disqualifié n'est jamais champion", t.phase === 'done' && !cheat(t.champion), `champion ${t.champion}`);
+}
+
+// ─── 10. Départ anticipé annulé quand sa condition tombe ────────────────────
+{
+  const w = createWorld(70, { mode: 'dojo' });
+  const a = addPlayer(w, 'A');
+  let press = true;
+  run(w, 30, (pid) => (press && pid === a.id ? BTN.DUEL : 0));
+  press = false;
+  const quick = w.tournament!.startAt;
+  check('seul présent prêt : départ anticipé prévu', quick > 0 && quick <= w.tick + DOJO.FULL_DELAY);
+  addPlayer(w, 'B'); // arrivant non prêt
+  run(w, 5, () => 0);
+  check('un arrivant non prêt : départ anticipé annulé (retour à la fin de l\'attente)', w.tournament!.startAt > quick && w.tournament!.phase === 'waiting', `${quick} → ${w.tournament!.startAt}`);
+}
+{
+  const w = createWorld(71, { mode: 'dojo' });
+  const ps = Array.from({ length: 8 }, (_, i) => addPlayer(w, `P${i}`, { color: i }));
+  run(w, 10, () => 0);
+  const quick = w.tournament!.startAt;
+  removePlayer(w, ps[7].id);
+  run(w, DOJO.FULL_DELAY + 10, () => 0);
+  check('salle pleine puis un départ : départ anticipé annulé', w.tournament!.phase === 'waiting' && w.tournament!.startAt > quick, `${quick} → ${w.tournament!.startAt}`);
+}
+
+// ─── 11. Force des bots : un humain ordinaire a ses chances ──────────────────
+{
+  /** Part des tournois gagnés et des matchs gagnés par un humain qui réagit en `react` ticks, contre 7 bots. */
+  const rate = (react: number, seeds: number) => {
+    let titles = 0;
+    let won = 0;
+    let played = 0;
+    for (let s = 0; s < seeds; s++) {
+      const w = createWorld(900 + s, { mode: 'dojo' });
+      const me = addPlayer(w, 'Luc');
+      const evs = run(w, 60 * 60 * 6, (pid) => (pid === me.id ? iaiAt(w, pid, react) : 0), champion);
+      for (const r of results(evs)) {
+        const m = w.tournament!.matches[r.match];
+        if (m.a !== me.id && m.b !== me.id) continue;
+        played++;
+        if (r.winner === me.id) won++;
+      }
+      if (w.tournament!.champion === me.id) titles++;
+    }
+    return { titles: titles / seeds, matches: won / played };
+  };
+  const fast = rate(15, 20);
+  const avg = rate(19, 20);
+  check('humain à 250 ms (15 ticks) : champion le plus souvent', fast.titles >= 0.5, `${Math.round(100 * fast.titles)} % des tournois`);
+  check('humain à 317 ms (19 ticks) : à peu près un match sur deux gagné contre les bots', avg.matches > 0.3 && avg.matches < 0.7, `${Math.round(100 * avg.matches)} % des matchs`);
 }
 
 if (failures) {

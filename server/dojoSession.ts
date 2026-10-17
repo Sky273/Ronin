@@ -15,7 +15,9 @@ export class DojoSession extends CoopSession {
    * changerait rien, sinon un historique enregistré pour rien à chaque pas.
    */
   protected override createWorld(seed: number): World {
-    return createWorld(seed, { mode: 'dojo' });
+    // Sel secret (64 bits) des bots et du tirage : jamais transmis, le client ne peut ni prédire un bot ni le tableau.
+    const salt = crypto.getRandomValues(new Uint32Array(2));
+    return createWorld(seed, { mode: 'dojo', salt: [salt[0], salt[1]] });
   }
 
   /**
@@ -39,7 +41,8 @@ export class DojoSession extends CoopSession {
 
   /** Accueil : règles du dojo (le client crée un monde dojo). */
   override welcomeFor(pid: number): WelcomeMsg {
-    return { ...super.welcomeFor(pid), mode: 'dojo' };
+    // Graine inutile au client du dojo (niveau fixe) : non transmise.
+    return { ...super.welcomeFor(pid), seed: 0, mode: 'dojo' };
   }
 
   /** Tournoi de la salle (toujours présent dans un monde dojo). */
