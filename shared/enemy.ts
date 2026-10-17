@@ -1,5 +1,5 @@
 import { bodyRect, boxFromFacing } from './combat';
-import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPEAR_HB, TILE } from './constants';
+import { BOSS, DT, ENEMY, NINJA_SLASH_HB, ONI_SMASH_HB, SPAWN, SPEAR_HB, TILE } from './constants';
 import { enemyCooldownScale, enemyHpScale, guardianRageAt } from './difficulty';
 import { isDueling } from './duel';
 import { damagePlayer, killEnemy, releaseToken, stunEnemy, takeToken } from './interactions';
@@ -85,6 +85,8 @@ interface Ctx {
   speed: number;
   friction: number;
   gravity: boolean;
+  /** Traverse les plateformes à sens unique ce tick-ci (gardien qui descend vers le joueur). */
+  drop: boolean;
 }
 
 export function stepEnemy(w: World, e: Enemy): void {
@@ -104,7 +106,7 @@ export function stepEnemy(w: World, e: Enemy): void {
     dx: t ? t.x - e.x : 0,
     dy: t ? t.y - e.y : 0,
     adx: t ? Math.abs(t.x - e.x) : 0,
-    move: 0, speed: 0, friction: 1400, gravity: true,
+    move: 0, speed: 0, friction: 1400, gravity: true, drop: false,
   };
 
   switch (e.state) {
@@ -141,7 +143,7 @@ export function stepEnemy(w: World, e: Enemy): void {
   else if (e.onGround) e.vx = approach(e.vx, 0, c.friction * DT);
   if (c.gravity) e.vy = Math.min(e.vy + ENEMY.GRAVITY * DT, ENEMY.MAX_FALL);
   else e.vy = 0;
-  moveBody(e, w.level, DT, false);
+  moveBody(e, w.level, DT, c.drop);
 }
 
 function patrol(c: Ctx): void {
@@ -188,9 +190,15 @@ function meleeHit(c: Ctx, box: Rect, dmg: number): void {
   }
 }
 
+/**
+ * Cible hors de portée : retour en patrouille. Un renfort de la Marée apparaît hors de l'écran, parfois
+ * au-delà de cette portée : il marche d'abord vers le joueur (SPAWN.TIDE_CHASE) avant de pouvoir le perdre.
+ */
 function lost(c: Ctx): boolean {
-  if (!c.t || c.adx > ENEMY[c.e.type].sight * 1.6) {
-    setState(c.e, 'patrol', 'none');
+  const e = c.e;
+  const arriving = e.horde && c.w.wave.phase === 'tide' && e.stateT < SPAWN.TIDE_CHASE;
+  if (!c.t || (c.adx > ENEMY[e.type].sight * 1.6 && !arriving)) {
+    setState(e, 'patrol', 'none');
     return true;
   }
   return false;
@@ -464,6 +472,8 @@ function boss(c: Ctx): void {
         c.speed = d.speed * (p2 ? BOSS.RAGE_SPEED : 1);
       }
       if (c.move !== 0 && touchingWall(e, w.level, c.move)) c.move = 0;
+      // Joueur en contrebas, hors de portée du balayage : il traverse sa plateforme pour descendre vers lui.
+      c.drop = c.dy >= 80;
       break;
     }
     case 'windup': {
@@ -488,11 +498,11 @@ function boss(c: Ctx): void {
         e.hornStage++;
         w.events.push({ type: 'horn', x: e.x, y: e.y - e.h });
         for (const side of [-1, 1, -1].slice(0, BOSS.HORN_ADDS)) {
-          // Coop : les renforts du cor restent dans l'arène (le kekkai ne laisse pas entrer les ennemis du dehors).
-          const minX = w.mode === 'coop' ? (w.level.arena.col + 2) * TILE : 3 * TILE;
-          const x = clamp(e.x + side * (150 + w.rng.next() * 80), minX, (w.level.w - 3) * TILE);
+          // Les renforts du cor restent dans l'arène (la barrière ne laisse pas entrer les ennemis du dehors),
+          // le corps entièrement libre.
+          const x = clamp(e.x + side * (150 + w.rng.next() * 80), (w.level.arena.col + 2) * TILE, (w.level.w - 3) * TILE);
           const gy = findGround(w.level, x, e.y);
-          if (gy !== null) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpScale(w));
+          if (gy !== null && fitsAt(w.level, x, gy, ENEMY.ashigaru.w, ENEMY.ashigaru.h)) spawnEnemy(w, 'ashigaru', x, gy, true, enemyHpScale(w));
         }
         setState(e, 'recover');
       } else setState(e, 'chase', 'none');

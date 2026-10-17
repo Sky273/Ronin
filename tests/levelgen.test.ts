@@ -5,7 +5,7 @@ import { TILE } from '../shared/constants';
 import { BTN } from '../shared/input';
 import { buildLevel, type Level, T_EMPTY, T_SOLID, tileAt } from '../shared/level';
 import { reachable, validateLevel } from '../shared/levelcheck';
-import { assembleLevel, generateLevel, planSegments } from '../shared/levelgen';
+import { assembleLevel, generateLevel, planSegments, targetWidth } from '../shared/levelgen';
 import { Rng, stageSeed } from '../shared/math';
 import { touchingWall } from '../shared/physics';
 import { finalArenaPiece, flatPiece, G, SEGMENTS, type SegmentId, type SegmentPiece, startPiece } from '../shared/segments';
@@ -126,6 +126,28 @@ check('4 biomes définis', BIOME_ORDER.length === 4);
   check('au plus 3 tunnels / puits par niveau', hardMax <= 3, `max ${hardMax}`);
   const all = Object.keys(SEGMENTS).every((k) => (uses[k] ?? 0) > 0);
   check('tous les segments du catalogue sont utilisés', all, JSON.stringify(uses));
+}
+{
+  // Largeur minimale sur bien plus de graines (plans seuls : rapide), toutes les étapes 1 à 12.
+  // La fin de plan (BREAK) n'abandonne jamais plus de 11 tuiles avant l'arène, même juste après
+  // une fusion de plats (avant correction : 184 tuiles pour la graine 29984 à l'étape 2).
+  const cases: [number, number][] = [[29984, 2], [12103, 1]];
+  for (let seed = 1; seed <= 3000; seed++) for (let s = 1; s <= 12; s++) cases.push([seed, s]);
+  let minW = 1e9;
+  let short = 0;
+  let first = '';
+  for (const [seed, s] of cases) {
+    const ss = stageSeed(seed, s);
+    const w = planSegments(new Rng(ss), s).reduce((a, p) => a + p.w, 0);
+    const want = targetWidth(new Rng(ss), s) - 11;
+    minW = Math.min(minW, w);
+    if (w < want) {
+      if (!short) first = `graine ${seed} étape ${s} : ${w} < ${want}`;
+      short++;
+    }
+  }
+  check('largeur minimale : 3000 graines × étapes 1 à 12, au plus 11 tuiles sous la largeur visée (≥ 195)', short === 0 && minW >= 195, short ? `${short} niveaux trop courts, ${first}, min ${minW}` : `min ${minW}`);
+  check('graine 29984 étape 2 et graine 12103 étape 1 : niveaux complets', buildStage(2, 29984).w >= 197 && buildStage(1, 12103).w >= 197, `${buildStage(2, 29984).w}, ${buildStage(1, 12103).w}`);
 }
 {
   // Pondération : plus de segments exigeants aux étapes avancées.
