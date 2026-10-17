@@ -1,4 +1,4 @@
-// Serveur en ligne de Ronin.io (mode coopératif « la route partagée »).
+// Serveur en ligne de Ronin.io (la route partagée et le dojo).
 // Lancer : npm run dev:server (développement) ou npm run build:server && npm run start:server.
 // Variables : PORT (défaut 2567), LAG_MS / JITTER_MS (latence simulée), STATS_EVERY_MS (logs de mesures).
 import { lagFromEnv } from './lag';
@@ -17,6 +17,6 @@ running.server.onShutdown(() => console.log('[serveur] arrêté'));
 
 const lag = lagFromEnv();
 console.log(
-  `[serveur] Ronin.io en écoute sur ws://localhost:${running.port} (salle 'coop', santé : /health)` +
+  `[serveur] Ronin.io en écoute sur ws://localhost:${running.port} (salles 'coop' et 'dojo', santé : /health)` +
     (lag ? ` — latence simulée ${lag.lagMs} ms + 0 à ${lag.jitterMs} ms par sens` : ''),
 );

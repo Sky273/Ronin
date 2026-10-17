@@ -76,9 +76,24 @@ export class CoopSession {
   readonly lagStats = new Samples();
 
   constructor(seed: number) {
-    this.world = createWorld(seed, { mode: 'coop', difficulty: 'normal' });
-    // Compensation de latence : posée uniquement ici (jamais en solo ni côté client).
-    this.world.net = createLagComp();
+    this.world = this.createWorld(seed);
+  }
+
+  /**
+   * Monde de la salle, créé par le constructeur (avant l'initialisation des champs d'une sous-classe : n'en lire
+   * aucun ici). La route partagée, avec la compensation de latence, posée uniquement ici (jamais en solo ni côté client).
+   */
+  protected createWorld(seed: number): World {
+    const w = createWorld(seed, { mode: 'coop', difficulty: 'normal' });
+    w.net = createLagComp();
+    return w;
+  }
+
+  /** Couleur d'un arrivant : la première libre parmi celles des places (−1 si toutes sont prises : salle pleine). */
+  protected pickColor(): number {
+    let color = 0;
+    while (color < PLAYER_COLORS && this.usedColors.has(color)) color++;
+    return color < PLAYER_COLORS ? color : -1;
   }
 
   get playerCount(): number {
@@ -87,9 +102,8 @@ export class CoopSession {
 
   /** Ajoute un joueur : première couleur libre, pseudo nettoyé. Lève une erreur si la salle est pleine. */
   join(name: unknown): { pid: number; color: number } {
-    let color = 0;
-    while (color < PLAYER_COLORS && this.usedColors.has(color)) color++;
-    if (color >= PLAYER_COLORS) throw new Error('salle pleine');
+    const color = this.pickColor();
+    if (color < 0) throw new Error('salle pleine');
     const p = addPlayer(this.world, sanitizePlayerName(name), { color });
     this.usedColors.add(color);
     this.slots.set(p.id, { pid: p.id, color, queue: [], lastSeq: -1, ack: -1, held: 0, starved: 0, lag: 0, lastActive: this.world.tick, lastRecv: -1, floodSince: -1, floodCount: 0, caughtUp: 0 });
