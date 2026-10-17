@@ -83,6 +83,16 @@ export const BIOME_LOOK: Record<BiomeId, BiomeLook> = {
     near: 'ramparts',
     keys: { far: 'mFar_castle', mid: 'mMid_castle', near: 'near_castle' },
   },
+  // Dojo (M5) : provisoire, en attendant son propre fond (cloisons shoji).
+  dojo: {
+    paperTint: 0xf3ead9,
+    orb: 'moon',
+    orbPos: { x: 0.7, y: 0.18 },
+    far: { seed: 27, base: 335, amp: 200, alpha: 0.12, pines: false, pagodas: [] },
+    mid: { seed: 71, base: 360, amp: 140, alpha: 0.2, pines: true, pagodas: [] },
+    near: 'ramparts',
+    keys: { far: 'mFar_dojo', mid: 'mMid_dojo', near: 'near_dojo' },
+  },
 };
 
 /** Clé de texture d'un astre (le soleil historique garde la clé `sun`). */

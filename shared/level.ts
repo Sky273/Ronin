@@ -11,7 +11,7 @@ export const T_ONEWAY = 2; // plateforme traversable par le dessous
  */
 export const T_KEKKAI = 3;
 
-export type DecoKind = 'torii' | 'lantern' | 'bamboo' | 'pine' | 'stone' | 'banner' | 'shrine' | 'sakura' | 'house' | 'rampart';
+export type DecoKind = 'torii' | 'lantern' | 'bamboo' | 'pine' | 'stone' | 'banner' | 'shrine' | 'sakura' | 'house' | 'rampart' | 'scroll' | 'rack';
 
 export interface Deco {
   kind: DecoKind;

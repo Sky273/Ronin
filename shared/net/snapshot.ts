@@ -39,6 +39,7 @@ export function snapshotFor(w: World, viewerId: number, events: GameEvent[], ack
     away: w.away ?? [],
     duels: w.duels ?? [],
     invites: w.duelInvites ?? [],
+    tournament: w.tournament ?? null,
   };
 }
 
@@ -114,6 +115,10 @@ export function applySnapshot(w: World, snap: Snapshot): { stageChanged: boolean
     w.away = snap.away;
     w.duels = snap.duels;
     w.duelInvites = snap.invites;
+  } else if (w.mode === 'dojo') {
+    w.away = snap.away;
+    w.duels = snap.duels;
+    if (snap.tournament) w.tournament = snap.tournament;
   }
   setBarrier(w, snap.stageInfo.state === 'arena');
   return { stageChanged };

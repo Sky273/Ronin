@@ -4,7 +4,8 @@ import type { EnemyType } from './types';
 // Biomes successifs du voyage : chaque étape change de paysage (décor, ennemis de départ).
 // L'étape 0 est toujours la forêt de bambous historique ; ensuite le cycle se répète.
 
-export type BiomeId = 'bamboo' | 'village' | 'snow' | 'castle';
+// 'dojo' : salle du tournoi (hors du voyage, jamais dans BIOME_ORDER).
+export type BiomeId = 'bamboo' | 'village' | 'snow' | 'castle' | 'dojo';
 
 export const BIOME_ORDER: BiomeId[] = ['bamboo', 'village', 'snow', 'castle'];
 
@@ -46,6 +47,13 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
     subtitle: 'the lord awaits behind the walls',
     decos: [['rampart', 5], ['banner', 3], ['lantern', 2], ['pine', 1]],
     enemies: [['ashigaru', 4], ['oni', 3], ['archer', 2], ['ninja', 1]],
+  },
+  dojo: {
+    name: 'the dojo',
+    kanji: '道場',
+    subtitle: 'one blade, one breath',
+    decos: [['scroll', 1], ['rack', 1], ['lantern', 1]],
+    enemies: [],
   },
 };
 

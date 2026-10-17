@@ -267,6 +267,20 @@ export class GameScene extends Phaser.Scene {
         for (const ev of this.world.events) this.onEvent(ev);
         this.world.events.length = 0;
       });
+      // F10 : dojo hors ligne contre des bots (tournoi complet ; G pour partir sans attendre l'attente).
+      this.controls.onKey('F10', () => {
+        if (this.screen !== 'play' || this.src !== this.local) return;
+        const w = this.local.world;
+        resetWorld(w, (Date.now() & 0xffff) + 1, { mode: 'dojo' });
+        this.local.reset(addPlayer(w, sanitizeName(this.prefs.name)).id);
+        this.meCache = null;
+        this.applyLevel();
+        this.clearCharacters();
+        this.results.hide();
+        this.duel.clear();
+        this.fx.clear();
+        this.hud.banner('道場', 'The dojo', 'G: ready — bots fill the bracket', '#15120e', 2000);
+      });
       (window as unknown as { __ronin: unknown }).__ronin = this;
     }
   }

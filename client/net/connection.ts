@@ -2,11 +2,12 @@
 // Aucune logique de jeu ici. La scène charge ce module par import() dynamique (le solo ne le télécharge pas).
 import { Client, MatchMakeError, ServerError, type Room } from '@colyseus/sdk';
 import type { SnapshotWire } from '../../shared/net/codec';
-import { AWAY_CLOSE_CODE, MSG, PROTOCOL_VERSION, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
+import { AWAY_CLOSE_CODE, MSG, PROTOCOL_VERSION, ROOMS, type InputMsg, type RoomName, type WelcomeMsg } from '../../shared/net/protocol';
 import type { Transport } from './transport';
 
 /** Nom de la salle coopérative côté serveur. */
-export const ROOM_NAME = 'coop';
+/** Salle rejointe par défaut (la route partagée). */
+export const ROOM_NAME = ROOMS.coop;
 /** Au-delà, la connexion est abandonnée (serveur injoignable ou qui ne répond pas). */
 const CONNECT_TIMEOUT_MS = 8000;
 /** Lissage exponentiel de la latence mesurée. */
@@ -130,10 +131,10 @@ export class Connection implements Transport {
  * Rejoint (ou crée) une salle coopérative. Rejette avec une erreur au message lisible
  * (affichable tel quel dans le menu en ligne).
  */
-export async function connect(url: string, name: string): Promise<Connection> {
+export async function connect(url: string, name: string, room: RoomName = ROOM_NAME): Promise<Connection> {
   const client = new Client(url);
   let timedOut = false;
-  const join = client.joinOrCreate(ROOM_NAME, { name });
+  const join = client.joinOrCreate(room, { name });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {

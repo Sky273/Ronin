@@ -44,6 +44,8 @@ export interface DuelRules {
 
 /** Règles du duel consenti en coop : BO3, nul possible après MAX_ROUNDS manches jouées. */
 export const COOP_DUEL_RULES: DuelRules = { firstTo: DUEL.FIRST_TO, maxRounds: DUEL.MAX_ROUNDS, draw: true };
+/** Règles d'un match du dojo : BO3, jamais de nul (mort subite plafonnée, réactions, puis tirage au sort). */
+export const DOJO_DUEL_RULES: DuelRules = { firstTo: DUEL.FIRST_TO, maxRounds: DUEL.MAX_ROUNDS, draw: false };
 
 // ─── Jugement d'un échange (fonction pure) ──────────────────────────────────
 
@@ -129,20 +131,30 @@ export function seriesOutcome(d: Duel, sums?: [number, number]): { winner: numbe
   if (wa !== wb) return { winner: lead, why: DUEL_WHY.WIN };
   if (d.draw) return { winner: -1, why: DUEL_WHY.DRAW };
   if (d.played < DUEL.SUDDEN_MAX) return null; // mort subite
-  // Mort subite plafonnée : la plus petite somme des réactions l'emporte.
+  // Mort subite plafonnée : la plus petite somme des réactions l'emporte, sinon tirage au sort (抽選).
   if (sums && sums[0] !== sums[1]) return { winner: sums[0] < sums[1] ? d.a.pid : d.b.pid, why: DUEL_WHY.WIN };
-  return { winner: -1, why: DUEL_WHY.DRAW };
+  return { winner: lotWinner(d), why: DUEL_WHY.LOT };
 }
 
-/** Durée de la garde de la manche : hachage déterministe de (id, manches jouées), sans w.rng. */
-export function kamaeLength(id: number, played: number): number {
-  let h = Math.imul(id ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((played + 0x632be5ab) | 0, 0xc2b2ae35);
+/** Tirage au sort d'un duel (抽選) : hachage déterministe de son id, sans w.rng. */
+export function lotWinner(d: Duel): number {
+  return mix(d.id, 0x5bd1e995) & 1 ? d.a.pid : d.b.pid;
+}
+
+/** Hachage 32 bits de deux entiers (garde, tirage au sort). */
+function mix(a: number, b: number): number {
+  let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b + 0x632be5ab) | 0, 0xc2b2ae35);
   h ^= h >>> 15;
   h = Math.imul(h, 0x2c1b3c6d);
   h ^= h >>> 12;
   h = Math.imul(h, 0x297a2d39);
   h ^= h >>> 15;
-  return DUEL.KAMAE_MIN + ((h >>> 0) % (DUEL.KAMAE_MAX - DUEL.KAMAE_MIN + 1));
+  return h >>> 0;
+}
+
+/** Durée de la garde de la manche : hachage déterministe de (id, manches jouées), sans w.rng. */
+export function kamaeLength(id: number, played: number): number {
+  return DUEL.KAMAE_MIN + (mix(id, played) % (DUEL.KAMAE_MAX - DUEL.KAMAE_MIN + 1));
 }
 
 // ─── Emplacement ────────────────────────────────────────────────────────────

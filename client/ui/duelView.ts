@@ -103,6 +103,9 @@ const WHY: Record<number, { kanji: string; text: string }> = {
   [DUEL_WHY.TIDE]: { kanji: '潮', text: 'the Tide rises' },
   [DUEL_WHY.FLOOD]: { kanji: '反則', text: 'too many inputs — forfeit' },
   [DUEL_WHY.BUSY]: { kanji: '先約', text: 'in another duel' },
+  [DUEL_WHY.ABSENT]: { kanji: '不在', text: 'absent — forfeit' },
+  [DUEL_WHY.LOT]: { kanji: '抽選', text: 'drawn by lot' },
+  [DUEL_WHY.SUSPECT]: { kanji: '反則', text: 'inhumanly fast — disqualified' },
 };
 
 /** Libellé d'un code DUEL_WHY : kanji et texte anglais (vides si le code est inconnu). */

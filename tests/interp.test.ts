@@ -247,6 +247,7 @@ function simulate(opts: { seed: number; lagMs: number; jitterMs: number; duratio
     away: [],
     duels: [],
     invites: [],
+    tournament: null,
   });
   const enemy = (id: number, x: number, vx = 0): Enemy => {
     const e = createEnemy(id, 'ashigaru', x, 500);
@@ -344,7 +345,7 @@ function simulate(opts: { seed: number; lagMs: number; jitterMs: number; duratio
   const base = createWorld(1, { mode: 'coop' });
   const snap = (t: number, stage: number, others: Player[], enemies: Enemy[]): Snapshot => ({
     t, ack: 0, stage, stageInfo: base.stage, wave: base.wave, shrine: 0, self: null,
-    others, enemies, projectiles: [], orbs: [], events: [], away: [], duels: [], invites: [],
+    others, enemies, projectiles: [], orbs: [], events: [], away: [], duels: [], invites: [], tournament: null,
   });
   const enemy = (id: number, x: number): Enemy => createEnemy(id, 'ashigaru', x, 500);
   const player = (id: number, x: number): Player => createPlayer(id, `p${id}`, x, 500);

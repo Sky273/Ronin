@@ -323,9 +323,55 @@ export type GameEvent =
   | { type: 'duelCancel'; from: number; to: number; why: number }
   | { type: 'duelStart'; id: number; a: number; b: number }
   | { type: 'duelRound'; id: number; round: number; winner: number; why: number; ra: number; rb: number; wa: number; wb: number }
-  | { type: 'duelEnd'; id: number; winner: number; wa: number; wb: number; why: number };
+  | { type: 'duelEnd'; id: number; winner: number; wa: number; wb: number; why: number }
+  // Dojo (tournoi) : événements de salle (sans position). `match` : index dans Tournament.matches.
+  | { type: 'dojoStart'; n: number }
+  | { type: 'dojoMatch'; match: number; a: number; b: number }
+  | { type: 'dojoResult'; match: number; winner: number; why: number; wa: number; wb: number }
+  | { type: 'dojoChampion'; pid: number; n: number }
+  | { type: 'dojoReset'; n: number };
 
-export type GameMode = 'solo' | 'coop';
+/** 'solo' : partie locale ; 'coop' : la route partagée en ligne ; 'dojo' : tournoi de duels en ligne. */
+export type GameMode = 'solo' | 'coop' | 'dojo';
+
+// ─── Dojo : tournoi à élimination directe (8 places, duels BO3) ─────────────
+
+/** Attente des participants, pause entre deux tours (tableau affiché), matchs du tour en cours, champion. */
+export type TournamentPhase = 'waiting' | 'pause' | 'running' | 'done';
+
+/** Un participant (son nom et sa couleur restent affichés au tableau après son départ). */
+export interface DojoEntrant {
+  pid: number;
+  name: string;
+  color: number;
+  bot: boolean; // bot du serveur (木人), complète les places au bout de l'attente
+  gone: boolean; // a quitté la salle pendant le tournoi (forfait de ses matchs)
+  ready: boolean; // attente : a appuyé sur G (tous prêts : départ anticipé)
+}
+
+/** Un match du tableau : quarts 0-3, demies 4-5, finale 6. */
+export interface DojoMatch {
+  round: number; // 0 quart, 1 demie, 2 finale
+  a: number; // pid (−1 tant que le tour précédent n'a pas désigné le joueur)
+  b: number;
+  state: 'pending' | 'live' | 'done';
+  winner: number; // pid du vainqueur, −1 avant la fin
+  why: number; // issue (code DUEL_WHY : WIN, FORFEIT, DISCONNECT, ABSENT, LOT, SUSPECT…), −1 avant la fin
+  wa: number; // manches gagnées par a
+  wb: number; // manches gagnées par b
+  duel: number; // id du duel en cours, −1 sinon
+}
+
+export interface Tournament {
+  n: number; // numéro du tournoi dans la salle (1, 2…)
+  phase: TournamentPhase;
+  t: number; // ticks dans la phase
+  startAt: number; // attente : tick de départ prévu (−1 : personne)
+  round: number; // tour en cours (−1 avant le tirage)
+  entrants: DojoEntrant[]; // attente : présents ; après le tirage : les 8 places, dans l'ordre du tableau
+  matches: DojoMatch[]; // 7 après le tirage, vide avant
+  champion: number; // pid du vainqueur du tournoi, −1 avant la finale
+}
 
 export interface World {
   tick: number;
@@ -345,7 +391,7 @@ export interface World {
   wave: WaveState;
   stage: StageState;
   difficulty: DifficultyId;
-  /** 'solo' : partie locale historique ; 'coop' : salle en ligne (règles multijoueur). */
+  /** 'solo' : partie locale historique ; 'coop' : salle en ligne (règles multijoueur) ; 'dojo' : tournoi. */
   mode: GameMode;
   /** Coop : index du sanctuaire le plus avancé activé par la salle (point de renaissance commun). */
   shrine: number;
@@ -377,4 +423,6 @@ export interface World {
   duels?: Duel[];
   /** Défis en attente et délais entre défis (coop). Absent en solo. */
   duelInvites?: DuelInvite[];
+  /** Dojo : le tournoi de la salle. Absent en solo et en coop. */
+  tournament?: Tournament;
 }

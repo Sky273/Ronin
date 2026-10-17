@@ -701,6 +701,27 @@ const now = (): number => clock;
   if (notes.length) console.log(`· NOTE décodage : ${notes.join(' ; ')}`);
 }
 
+// Dojo : l'accueil porte le mode de la salle ; le monde local prend le niveau et les règles du dojo, et le
+// tournoi des instantanés.
+{
+  const server = createWorld(SEED + 9, { mode: 'dojo' });
+  const a = addPlayer(server, 'a');
+  run(server, 30, () => 0);
+  const t = new FakeTransport();
+  const src = new RemoteSource(t, { now });
+  src.welcome({ ...hello(a.id, SEED + 9, server.level.stage, server.tick), mode: 'dojo' });
+  src.receive(wire(makeSnapshot(server, a.id, [], 0)));
+  src.advance(0, () => 0, () => undefined);
+  const w = src.world;
+  check('dojo : accueil mode dojo → monde dojo, niveau du dojo', w.mode === 'dojo' && w.level.biome === 'dojo' && w.level.w === server.level.w);
+  check('dojo : tournoi reçu dans le monde local', !!w.tournament && w.tournament.entrants.length === 1 && w.tournament.phase === 'waiting');
+  const coop = new RemoteSource(new FakeTransport(), { now });
+  coop.welcome(hello(1, 1, 0, 0));
+  check('accueil sans mode : coop (serveurs et tests existants)', coop.world.mode === 'coop');
+  src.dispose();
+  coop.dispose();
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

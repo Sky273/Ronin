@@ -271,6 +271,22 @@ export const DUEL_WHY = {
   TIDE: 16, // la Marée se lève : défis en attente annulés
   FLOOD: 17, // entrées envoyées trop vite pendant un duel : forfait
   BUSY: 18, // la cible du défi entre dans un autre duel : défi tombé
+  ABSENT: 19, // dojo : aucun bouton pendant le match (DOJO.ABSENT_TICKS) : forfait
+  LOT: 20, // dojo : départage ultime par tirage au sort (抽選), sommes des réactions égales
+  SUSPECT: 21, // dojo : réactions trop rapides, répétées (DOJO.SUSPECT_LIMIT) : disqualifié
+} as const;
+
+/** Dojo : tournoi de duels à élimination directe (ticks à 60 Hz). */
+export const DOJO = {
+  SIZE: 8, // places du tableau (quarts, demies, finale)
+  WAIT_TICKS: 60 * 60, // attente après la première arrivée, puis des bots complètent (60 s)
+  FULL_DELAY: 3 * 60, // salle pleine ou tous prêts (G) : départ dans ce délai (3 s)
+  ROUND_PAUSE: 5 * 60, // pause avant chaque tour : le tableau est affiché (5 s)
+  CHAMPION_TICKS: 10 * 60, // le champion est célébré, puis la salle revient en attente (10 s)
+  ABSENT_TICKS: 15 * 60, // aucun bouton pendant un match : forfait (15 s)
+  SUSPECT_LIMIT: 3, // réactions sous DUEL.SUSPECT_REACT dans un même tournoi : disqualifié
+  BOT_REACT_MIN: 12, // réaction la plus rapide d'un bot (200 ms, au-dessus de SUSPECT_REACT)
+  BOT_REACT_MAX: 40, // et la plus lente (667 ms)
 } as const;
 
 /** Bilan coop : délai avant que les appuis comptent comme un vote « prêt » (ticks). */

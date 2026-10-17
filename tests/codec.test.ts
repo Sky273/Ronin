@@ -422,6 +422,37 @@ function viewDiff<T extends object>(got: T, ref: T, keys: readonly (keyof T)[], 
   check('duels : événements transmis à l’identique (sans position : visibles par toute la salle)', JSON.stringify(back) === JSON.stringify(evs), JSON.stringify(back));
 }
 
+// ─── Dojo : tournoi transmis (v7) ───────────────────────────────────────────
+{
+  const w = createWorld(12, { mode: 'dojo' });
+  const me = addPlayer(w, 'Luc');
+  // Jusqu'au milieu des quarts : tableau tiré, bots, matchs en cours.
+  const evs: GameEvent[] = [];
+  for (let i = 0; i < 60 * 60 + 600; i++) {
+    stepWorld(w, new Map([[me.id, 0]]));
+    evs.push(...w.events);
+    w.events.length = 0;
+  }
+  const back = roundTrip(makeSnapshot(w, me.id, evs, 0));
+  check('dojo : tournoi transmis à l’identique (participants, tableau, phase)', JSON.stringify(back.tournament) === JSON.stringify(w.tournament), JSON.stringify(back.tournament).slice(0, 120));
+  const dojoEvs = evs.filter((e) => e.type.startsWith('dojo'));
+  const evBack = back.events.filter((e) => e.type.startsWith('dojo'));
+  check('dojo : événements du tournoi transmis à l’identique', dojoEvs.length > 0 && JSON.stringify(evBack) === JSON.stringify(dojoEvs), `${dojoEvs.length} événements`);
+  const bytes = pack(makeSnapshot(w, me.id, [], 0)).length;
+  check('dojo : instantané à 8 joueurs (tournoi compris) sous 1 Kio', w.players.length === 8 && bytes < 1024, `${bytes} o`);
+  const coop = roundTrip(makeSnapshot(createWorld(12, { mode: 'coop' }), -1, [], 0));
+  check('coop : pas de tournoi (null)', coop.tournament === null);
+  // Tournoi mal formé : ignoré (null), le reste de l'instantané reste lisible.
+  const wire = unpack(pack(makeSnapshot(w, me.id, [], 0))) as unknown[];
+  for (const bad of [[1, 2], 'x', [1, 99, 0, 0, 0, 0, [], []], [1, 0, 0, 0, 0, 0, [[1]], []]]) {
+    const copy = wire.slice();
+    copy[15] = bad;
+    const s = decodeSnapshot(copy as unknown as SnapshotWire);
+    if (s.tournament !== null || !s.self) failures++, console.log('✘ tournoi mal formé non ignoré', JSON.stringify(bad));
+  }
+  check('dojo : tournoi mal formé ignoré (null), instantané lisible', true);
+}
+
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

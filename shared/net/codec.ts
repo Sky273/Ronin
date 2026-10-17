@@ -14,6 +14,8 @@ import type {
   Duel,
   DuelInvite,
   DuelPhase,
+  DojoEntrant,
+  DojoMatch,
   DuelSide,
   Enemy,
   EnemyMove,
@@ -27,6 +29,8 @@ import type {
   Projectile,
   ProjectileKind,
   StageState,
+  Tournament,
+  TournamentPhase,
   WaveState,
 } from '../types';
 import type { UpgradeId, Upgrades } from '../upgrades';
@@ -365,6 +369,11 @@ export const EVENT_KEYS = {
   duelStart: ['id', 'a', 'b'],
   duelRound: ['id', 'round', 'winner', 'why', 'ra', 'rb', 'wa', 'wb'],
   duelEnd: ['id', 'winner', 'wa', 'wb', 'why'],
+  dojoStart: ['n'],
+  dojoMatch: ['match', 'a', 'b'],
+  dojoResult: ['match', 'winner', 'why', 'wa', 'wb'],
+  dojoChampion: ['pid', 'n'],
+  dojoReset: ['n'],
 } as const satisfies { [K in EventType]: readonly EventFields<K>[] };
 
 type MissingEventKeys = { [K in EventType]: Exclude<EventFields<K>, (typeof EVENT_KEYS)[K][number]> }[EventType];
@@ -508,8 +517,58 @@ function decodeInvite(a: unknown): DuelInvite | null {
 const listOf = <T>(x: unknown, dec: (a: unknown) => T | null): T[] =>
   Array.isArray(x) ? x.map(dec).filter((v): v is T => v !== null) : [];
 
-/** Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events, away, duels, invites]. */
-type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[], number[], unknown[], unknown[]];
+// ─── Tournoi (dojo) ─────────────────────────────────────────────────────────
+
+const TOURNAMENT_PHASES = enumTable<TournamentPhase>()(['waiting', 'pause', 'running', 'done']);
+const MATCH_STATES = enumTable<DojoMatch['state']>()(['pending', 'live', 'done']);
+const TOURNAMENT_KEYS = ['n', 'phase', 't', 'startAt', 'round', 'champion', 'entrants', 'matches'] as const satisfies readonly (keyof Tournament)[];
+export const TOURNAMENT_KEYS_COMPLETE: [Exclude<keyof Tournament, (typeof TOURNAMENT_KEYS)[number]>] extends [never] ? true : never = true;
+/** Participant : [pid, nom, couleur, bits] (bot 1, parti 2, prêt 4). */
+const ENTRANT_KEYS = ['pid', 'name', 'color', 'bot', 'gone', 'ready'] as const satisfies readonly (keyof DojoEntrant)[];
+export const ENTRANT_KEYS_COMPLETE: [Exclude<keyof DojoEntrant, (typeof ENTRANT_KEYS)[number]>] extends [never] ? true : never = true;
+const MATCH_KEYS = ['round', 'a', 'b', 'state', 'winner', 'why', 'wa', 'wb', 'duel'] as const satisfies readonly (keyof DojoMatch)[];
+export const MATCH_KEYS_COMPLETE: [Exclude<keyof DojoMatch, (typeof MATCH_KEYS)[number]>] extends [never] ? true : never = true;
+const EN_BOT = 1, EN_GONE = 2, EN_READY = 4;
+
+export function encodeTournament(t: Tournament): unknown[] {
+  return [
+    t.n, encEnum(TOURNAMENT_PHASES, t.phase), t.t, t.startAt, t.round, t.champion,
+    t.entrants.map((e) => [e.pid, e.name, e.color, (e.bot ? EN_BOT : 0) | (e.gone ? EN_GONE : 0) | (e.ready ? EN_READY : 0)]),
+    t.matches.map((m) => [m.round, m.a, m.b, encEnum(MATCH_STATES, m.state), m.winner, m.why, m.wa, m.wb, m.duel]),
+  ];
+}
+function decodeEntrant(a: unknown): DojoEntrant | null {
+  if (!Array.isArray(a) || a.length !== 4 || typeof a[1] !== 'string') return null;
+  const pid = num(a[0]), color = num(a[2]), bits = num(a[3]);
+  if ([pid, color, bits].some(Number.isNaN)) return null;
+  return { pid, name: a[1], color, bot: (bits & EN_BOT) !== 0, gone: (bits & EN_GONE) !== 0, ready: (bits & EN_READY) !== 0 };
+}
+function decodeMatch(a: unknown): DojoMatch | null {
+  if (!Array.isArray(a) || a.length !== MATCH_KEYS.length) return null;
+  const state = decEnum(MATCH_STATES, a[3]);
+  if (!(MATCH_STATES as readonly string[]).includes(state)) return null;
+  const n = [0, 1, 2, 4, 5, 6, 7, 8].map((i) => num(a[i]));
+  if (n.some(Number.isNaN)) return null;
+  return { round: n[0], a: n[1], b: n[2], state, winner: n[3], why: n[4], wa: n[5], wb: n[6], duel: n[7] };
+}
+/** Tournoi décodé, ou null s'il est absent ou mal formé (il est alors ignoré). */
+export function decodeTournament(a: unknown): Tournament | null {
+  if (!Array.isArray(a) || a.length !== TOURNAMENT_KEYS.length) return null;
+  const phase = decEnum(TOURNAMENT_PHASES, a[1]);
+  if (!(TOURNAMENT_PHASES as readonly string[]).includes(phase)) return null;
+  const n = [0, 2, 3, 4, 5].map((i) => num(a[i]));
+  if (n.some(Number.isNaN) || !Array.isArray(a[6]) || !Array.isArray(a[7])) return null;
+  const entrants = listOf(a[6], decodeEntrant);
+  const matches = listOf(a[7], decodeMatch);
+  if (entrants.length !== a[6].length || matches.length !== a[7].length) return null;
+  return { n: n[0], phase, t: n[1], startAt: n[2], round: n[3], entrants, matches, champion: n[4] };
+}
+
+/**
+ * Forme filaire : tuple [t, ack, stage, stageInfo, wave, shrine, self, others, enemies, projectiles, orbs, events, away,
+ * duels, invites, tournament].
+ */
+type Wire = [number, number, number, unknown[], unknown[], number, unknown[] | null, unknown[], unknown[], unknown[], unknown[], unknown[], number[], unknown[], unknown[], unknown[] | null];
 
 /** Encode avec des encodeurs de vues donnés (snapshot.ts les met en cache par tick). */
 export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire {
@@ -530,6 +589,7 @@ export function encodeSnapshotWith(s: Snapshot, enc: ViewEncoder): SnapshotWire 
     s.away,
     s.duels.map(encodeDuel),
     s.invites.map(encodeInvite),
+    s.tournament ? encodeTournament(s.tournament) : null,
   ];
   return wire as unknown as SnapshotWire;
 }
@@ -623,6 +683,7 @@ export function decodeSnapshot(wire: SnapshotWire): Snapshot {
     away: Array.isArray(w[12]) ? (w[12] as unknown[]).filter((id): id is number => Number.isFinite(id)) : [],
     duels: listOf(w[13], decodeDuel),
     invites: listOf(w[14], decodeInvite),
+    tournament: decodeTournament(w[15]),
   };
 }
 

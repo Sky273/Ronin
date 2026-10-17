@@ -9,7 +9,7 @@ import { DUEL, DUEL_QUEUE_LIMIT } from '../../shared/constants';
 import { CORRECTION_SNAP_PX, CORRECTION_TAU_MS } from '../../shared/net/protocol';
 import { Rng } from '../../shared/math';
 import { stepPlayer } from '../../shared/player';
-import type { Duel, DuelInvite, Enemy, GameEvent, Player, StageState, WaveState, World } from '../../shared/types';
+import type { Duel, DuelInvite, Enemy, GameEvent, GameMode, Player, StageState, WaveState, World } from '../../shared/types';
 
 /** Ce que la prédiction sait du monde, d'après le dernier instantané appliqué. */
 export interface PredictionContext {
@@ -23,6 +23,8 @@ export interface PredictionContext {
   duels?: Duel[];
   /** Défis en attente (coop), d'après l'instantané. Copiés à chaque pas. */
   duelInvites?: DuelInvite[];
+  /** Règles de la salle (absent : coop) : le monde jetable de la prédiction prend celles du serveur. */
+  mode?: GameMode;
 }
 
 /** Entrée envoyée, en attente d'accusé de réception. */
@@ -283,7 +285,7 @@ function simulate(p: Player, b: number, enemies: Enemy[], ctx: PredictionContext
     // Sans les statistiques par joueur : la prédiction ne doit pas modifier celles du serveur.
     stage: { ...ctx.stage, byPlayer: undefined },
     difficulty: 'normal',
-    mode: 'coop',
+    mode: ctx.mode ?? 'coop',
     shrine: ctx.shrine,
     over: false,
     overT: 0,

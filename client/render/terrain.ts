@@ -235,6 +235,7 @@ const TERRAIN_LOOK: Record<BiomeId, TerrainLook> = {
   village: { wash: C.inkWarm, stops: [0.26, 0.13, 0.035], grass: true, soot: true, snow: false, joints: false },
   snow: { wash: C.inkCold, stops: [0.2, 0.085, 0.02], grass: false, soot: false, snow: true, joints: false },
   castle: { wash: C.stone, stops: [0.27, 0.17, 0.07], grass: false, soot: false, snow: false, joints: true },
+  dojo: { wash: C.stone, stops: [0.27, 0.17, 0.07], grass: false, soot: false, snow: false, joints: true }, // provisoire (M5)
 };
 
 function lookOf(l: Level): TerrainLook {
@@ -498,6 +499,9 @@ function drawDeco(ctx: Ctx, d: Deco, r: Rand, biome: BiomeId): void {
     case 'sakura': return sakura(ctx, d.x, d.y, d.s, r);
     case 'house': return house(ctx, d.x, d.y, d.s, r, biome === 'village');
     case 'rampart': return rampart(ctx, d.x, d.y, d.s, r);
+    case 'scroll': // provisoire (M5) : rouleau et râtelier du dojo
+    case 'rack':
+      return;
   }
 }
 

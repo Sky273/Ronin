@@ -203,11 +203,11 @@ export interface HitInfo {
 export type HitResult = 'none' | 'blocked' | 'hit' | 'kill';
 
 /**
- * Auteur d'un événement de combat : `{ pid }` en coop, rien en solo (la clé reste absente,
+ * Auteur d'un événement de combat : `{ pid }` en ligne (coop, dojo), rien en solo (la clé reste absente,
  * pour que les événements solo soient identiques au bit près).
  */
 export function byPlayer(w: World, p: Player): { pid?: number } {
-  return w.mode === 'coop' ? { pid: p.id } : {};
+  return w.mode !== 'solo' ? { pid: p.id } : {};
 }
 
 /** Oni en garde, frappé de face et pas depuis le dessus ? */

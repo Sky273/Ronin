@@ -151,7 +151,7 @@ export class RemoteSource implements WorldSource {
     if (this.welcomed || this.disposed) return;
     this.welcomed = true;
     this.pid = msg.pid;
-    this.w = createWorld(msg.seed, { mode: 'coop' });
+    this.w = createWorld(msg.seed, { mode: msg.mode === 'dojo' ? 'dojo' : 'coop' });
     this.w.tick = msg.tick;
     this.predictor = new Predictor(msg.pid);
     this.gate = new EventGate(msg.pid);
@@ -226,7 +226,7 @@ export class RemoteSource implements WorldSource {
       // Le niveau, l'étape et la barrière suivent le serveur (les entités sont remplacées plus bas).
       if (applySnapshot(this.w, snap).stageChanged) this.stageDirty = true;
       // Duels et défis de l'instantané : le duelliste local est prédit (garde, départ de l'iai).
-      this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t, duels: snap.duels, duelInvites: snap.invites };
+      this.ctx = { level: this.w.level, stage: snap.stageInfo, wave: snap.wave, shrine: snap.shrine, serverTick: snap.t, duels: snap.duels, duelInvites: snap.invites, mode: this.w.mode };
       this.interp.push(snap, at);
       this.predictor.reconcile(snap.self, snap.ack, this.ctx, (v) => this.interp.enemiesAt(v));
       this.lastAck = snap.ack;

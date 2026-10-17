@@ -10,7 +10,9 @@ import { approach, clamp, lerp, overlaps, Rng } from './math';
 import { kekkaiSplits, type Level, T_SOLID, tileAt } from './level';
 import { fitsAt, moveBody, solidAt } from './physics';
 import { arenaEntrance, createPlayer, stepPlayer } from './player';
+import { buildDojo, dojoArrival } from './dojoLevel';
 import { buildStage } from './stagebuild';
+import { createTournament, stepDojo } from './tournament';
 import { newStageState, openStageStats, populateStage, stepCleared, stepStage } from './stage';
 import type { Body, Enemy, EnemyType, GameMode, Orb, Player, World } from './types';
 import { magnetRadius } from './upgrades';
@@ -24,7 +26,7 @@ export interface WorldOptions {
 }
 
 export function createWorld(seed = 7, opts: WorldOptions = {}): World {
-  const level = buildStage(0, seed);
+  const level = opts.mode === 'dojo' ? buildDojo() : buildStage(0, seed);
   const w: World = {
     tick: 0,
     seed,
@@ -52,6 +54,12 @@ export function createWorld(seed = 7, opts: WorldOptions = {}): World {
     w.duels = [];
     w.duelInvites = [];
   }
+  // Dojo : duels du tournoi (pas de défis : les matchs sont tirés au sort), ni ennemis ni Marée.
+  if (w.mode === 'dojo') {
+    w.duels = [];
+    w.tournament = createTournament();
+    return w;
+  }
   openStageStats(w); // coop seulement (aucun joueur encore : enregistrement vide)
   populateStage(w);
   return w;
@@ -74,6 +82,11 @@ export function addPlayer(w: World, name: string, opts: { color?: number } = {})
   p.lives = DIFFICULTIES[w.difficulty].lives;
   p.color = opts.color ?? 0;
   if (w.mode === 'coop') placeNewcomer(w, p);
+  if (w.mode === 'dojo') {
+    const at = dojoArrival(p.id);
+    p.x = p.spawnX = at.x;
+    p.y = p.spawnY = at.y;
+  }
   if (w.stage.byPlayer) w.stage.byPlayer[p.id] = emptyStageStats();
   w.players.push(p);
   return p;
@@ -110,6 +123,13 @@ export function removePlayer(w: World, id: number): void {
 
 /** Un pas de simulation (1/60 s). inputs : masque de boutons par id de joueur. */
 export function stepWorld(w: World, inputs: Map<number, number>): void {
+  // Dojo : tournoi de duels, sans la route (ni ennemis, ni Marée, ni étapes).
+  if (w.mode === 'dojo') {
+    stepDojo(w, inputs);
+    w.tick++;
+    recordHistory(w); // sans effet sans w.net
+    return;
+  }
   // Partie terminée : le monde est figé.
   if (w.over) {
     w.tick++;
