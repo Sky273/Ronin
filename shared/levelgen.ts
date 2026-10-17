@@ -71,7 +71,7 @@ export function planSegments(rng: Rng, stage: number): SegmentPiece[] {
   const pool = (Object.values(SEGMENTS) as SegmentDef[]).filter((d) => d.weight > 0);
 
   while (cursor < middleEnd) {
-    const remaining = middleEnd - cursor;
+    let remaining = middleEnd - cursor;
     // Tirage d'un segment admissible : pas deux fois le même d'affilée, plafonds, largeur.
     const choices: [SegmentDef, number][] = pool
       .filter((d) => d.id !== last && (counts[d.id] ?? 0) < (MAX_OF[d.id] ?? 99) && (d.tier < 2 || hard < MAX_HARD))
@@ -87,6 +87,7 @@ export function planSegments(rng: Rng, stage: number): SegmentPiece[] {
       if (last === 'flat') {
         const prev = pieces.pop() as SegmentPiece;
         cursor -= prev.w;
+        remaining = middleEnd - cursor; // le plat retiré libère sa place (sinon le BREAK le perdrait)
         piece = flatPiece(prev.w + fill);
       } else piece = flatPiece(fill);
     }

@@ -145,6 +145,9 @@ export const SPAWN = {
   MAX: 16,
   MIN_DELAY: 70,
   MAX_DELAY: 130,
+  // Renfort de la Marée (apparu hors de l'écran) : il marche vers le joueur au moins ce temps (ticks)
+  // avant de pouvoir le perdre de vue.
+  TIDE_CHASE: 240,
 } as const;
 
 export const HONOR = {

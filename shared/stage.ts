@@ -2,12 +2,12 @@ import { COOP, COOP_CLEARED_TICKS, COOP_READY_AFTER, TICK_RATE, TILE } from './c
 import { clearBonus, enemyHpScale, guardianHpScale } from './difficulty';
 import { interruptDuels } from './duel';
 import { spawnEnemy } from './enemy';
-import { addScore, emptyStageStats, gainHonor, stageStatsOf } from './interactions';
+import { addScore, emptyStageStats, gainHonor, releaseToken, stageStatsOf } from './interactions';
 import { BTN } from './input';
 import { arenaInside, T_KEKKAI, T_SOLID } from './level';
 import { handlePicks, resetAfterDeath, resetForStage } from './player';
 import { buildStage } from './stagebuild';
-import type { StageState, World } from './types';
+import type { Enemy, StageState, World } from './types';
 
 // Déroulé d'une étape : exploration → arène du gardien → porte ouverte → bilan,
 // puis retour à l'étape 1 en plus difficile (boucle du voyage).
@@ -47,6 +47,15 @@ export function setBarrier(w: World, on: boolean): void {
 }
 
 const inArena = (w: World, x: number) => arenaInside(w.level, x);
+
+/** Retire les ennemis désignés par `gone` en libérant leur jeton d'attaque (sinon perdu jusqu'à l'étape suivante). */
+function removeEnemies(w: World, gone: (e: Enemy) => boolean): void {
+  w.enemies = w.enemies.filter((e) => {
+    if (!gone(e)) return true;
+    releaseToken(w, e);
+    return false;
+  });
+}
 
 /** Joueur absent (coop en ligne : aucun bouton depuis un moment) ? Toujours faux en solo. */
 export function isAway(w: World, id: number): boolean {
@@ -138,9 +147,10 @@ function lockArena(w: World): void {
   st.state = 'arena';
   st.t = 0;
   setBarrier(w, true);
-  // Coop : on retire aussi les ennemis à cheval sur la barrière (corps qui dépasse la colonne).
+  // Ennemis de l'arène retirés, et ceux à cheval sur la barrière (corps qui dépasse la colonne),
+  // sinon encastrés dans le mur.
   const edge = a.col * TILE;
-  w.enemies = w.enemies.filter((e) => !inArena(w, e.x) && !(w.mode === 'coop' && e.x + e.w / 2 > edge));
+  removeEnemies(w, (e) => inArena(w, e.x) || e.x + e.w / 2 > edge);
   w.projectiles = [];
   w.wave.phase = 'calm';
   w.wave.t = 0;
@@ -162,7 +172,7 @@ function lockArena(w: World): void {
 /** Plus personne ne combat dans l'arène : elle se rouvre, le gardien attendra. */
 function resetArena(w: World): void {
   const st = w.stage;
-  w.enemies = w.enemies.filter((e) => !inArena(w, e.x) && e.id !== st.guardianId);
+  removeEnemies(w, (e) => inArena(w, e.x) || e.id === st.guardianId);
   w.projectiles = [];
   setBarrier(w, false);
   st.state = 'playing';

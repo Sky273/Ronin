@@ -422,8 +422,10 @@ function spawner(w: World): void {
   const attempts = coop ? COOP.SPAWN_ATTEMPTS : 6;
   for (let attempt = 0; attempt < attempts; attempt++) {
     const side = w.rng.next() < 0.5 ? -1 : 1;
-    // Jamais dans l'arène du gardien.
-    const x = clamp(p.x + side * w.rng.range(tide ? 500 : 560, 900), 3 * TILE, (w.level.arena.col - 3) * TILE);
+    // Jamais dans l'arène du gardien ni contre les bords du niveau : hors limites, la tentative est
+    // abandonnée (ramené sur la borne, le renfort apparaîtrait à l'écran, près du joueur).
+    const x = p.x + side * w.rng.range(tide ? 500 : 560, 900);
+    if (x < 3 * TILE || x > (w.level.arena.col - 3) * TILE) continue;
     // Coop : jamais sous les yeux d'un autre joueur vivant.
     if (coop && alive.some((q) => Math.abs(q.x - x) < COOP.SPAWN_SAFE)) continue;
     // Coop : aucun renfort près d'un duel.
@@ -432,7 +434,10 @@ function spawner(w: World): void {
     if (gy === null) continue;
     // Pas de renfort perché à plus de 4 tuiles au-dessus du joueur (ex. sommet d'un bloc de tunnel).
     if (gy < p.y - 4 * TILE) continue;
-    const e = spawnEnemy(w, pickType(w), x, gy, true, hpMult(w));
+    // Corps entièrement libre (findGround ne regarde que la colonne du centre) : sinon encastré dans un mur.
+    const type = pickType(w);
+    if (!fitsAt(w.level, x, gy, ENEMY[type].w, ENEMY[type].h)) continue;
+    const e = spawnEnemy(w, type, x, gy, true, hpMult(w));
     e.horde = true;
     if (tide) e.state = 'chase'; // la Marée vient droit sur vous
     return;

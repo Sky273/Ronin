@@ -41,12 +41,12 @@ export interface Level {
 }
 
 /**
- * Coop, arène fermée : `x1` et `x2` sont-ils de part et d'autre du kekkai ? Les sabres ne le
- * traversent pas (ni ceux des joueurs, ni ceux des ennemis), pas plus que les téléportations.
- * Toujours faux en solo.
+ * Arène fermée : `x1` et `x2` sont-ils de part et d'autre de la barrière (kekkai en coop, mur plein
+ * en solo) ? Les sabres ne la traversent pas (ni ceux des joueurs, ni ceux des ennemis), pas plus
+ * que les téléportations.
  */
-export function kekkaiSplits(w: { mode: string; stage: { state: string }; level: Level }, x1: number, x2: number): boolean {
-  return w.mode === 'coop' && w.stage.state === 'arena' && arenaInside(w.level, x1) !== arenaInside(w.level, x2);
+export function kekkaiSplits(w: { stage: { state: string }; level: Level }, x1: number, x2: number): boolean {
+  return w.stage.state === 'arena' && arenaInside(w.level, x1) !== arenaInside(w.level, x2);
 }
 
 /** `x` est-il dans l'arène du gardien (à droite de la barrière) ? */
