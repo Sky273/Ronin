@@ -17,7 +17,7 @@ export class Sfx {
     this.ctx = new Ctx();
     const comp = this.ctx.createDynamicsCompressor();
     this.master = this.ctx.createGain();
-    this.master.gain.value = this.volume;
+    this.master.gain.value = this.muted ? 0 : this.volume; // M a pu être pressé avant le déblocage de l'audio
     this.master.connect(comp);
     comp.connect(this.ctx.destination);
     const len = this.ctx.sampleRate;
@@ -71,7 +71,9 @@ export class Sfx {
     f.frequency.exponentialRampToValueAtTime(f1, t + dur);
     src.connect(f);
     f.connect(this.env(t, dur * 0.25, peak, dur * 0.75));
-    src.start(t, Math.random() * 0.5, dur + 0.05);
+    // Départ aléatoire dans le tampon, sans en dépasser la fin (sinon le son est coupé net, ex. roar()).
+    const len = dur + 0.05;
+    src.start(t, Math.random() * Math.max(0, Math.min(0.5, this.noise.duration - len)), len);
   }
 
   swing(heavy: boolean): void {
