@@ -202,6 +202,58 @@ const now = (): number => clock;
   src.dispose();
 }
 
+// 2 ter. Changement d'étape : aucune entité de l'ancienne étape affichée ni fournie à la prédiction,
+// aucun joueur montré à sa position de l'ancien niveau ; les entrées en vol (séquence > ack), que le
+// serveur consommera dans le nouveau niveau, sont gardées et rejouées (tick prédit juste).
+{
+  const server = createWorld(SEED + 6, { mode: 'coop' });
+  const a = addPlayer(server, 'a');
+  const b = addPlayer(server, 'b');
+  run(server, 30, () => 0);
+  b.x = a.x + 400; // loin du départ de l'étape suivante
+  spawnEnemy(server, 'ashigaru', a.x + 200, a.y, false);
+  const t = new FakeTransport();
+  const src = new RemoteSource(t, { now });
+  src.welcome(hello(a.id, SEED + 6, server.level.stage, server.tick));
+  /** Un instantané (accusé : 6 entrées en vol) puis trois images. */
+  const IN_FLIGHT = 6;
+  const step = (evs: GameEvent[] = []): number => {
+    const ack = Math.max(0, t.inputs.length - IN_FLIGHT);
+    src.receive(wire(makeSnapshot(server, a.id, evs, ack)));
+    for (let k = 0; k < 3; k++) {
+      clock += 1000 / 60;
+      src.advance(1 / 60, () => BTN.RIGHT, () => undefined);
+    }
+    return ack;
+  };
+  for (let i = 0; i < 20; i++) {
+    run(server, 3, () => 0);
+    step();
+  }
+  src.consumeStageChanged();
+  const oldShown = src.world.enemies.length;
+  nextStage(server);
+  const evs = [...server.events];
+  server.events.length = 0;
+  run(server, 3, () => 0);
+  const newIds = new Set(server.enemies.map((e) => e.id));
+  const sb = server.players.find((p) => p.id === b.id)!;
+  // Image où le nouveau niveau est appliqué.
+  const ack = Math.max(0, t.inputs.length - IN_FLIGHT);
+  src.receive(wire(makeSnapshot(server, a.id, evs, ack)));
+  clock += 1000 / 60;
+  src.advance(1 / 60, () => BTN.RIGHT, () => undefined);
+  const shownB = src.world.players.find((p) => p.id === b.id);
+  const v = Math.floor(src.interp.renderTick(clock));
+  check('changement d’étape : niveau reconstruit dans l’image', src.consumeStageChanged() && src.world.level.stage === server.level.stage);
+  check('… aucun ennemi de l’ancienne étape affiché', oldShown > 0 && src.world.enemies.every((e) => newIds.has(e.id)), `${oldShown} ennemi(s) affiché(s) avant ; après : ${src.world.enemies.map((e) => e.id).join(',')}`);
+  check('… ni fourni à la prédiction (tick de vue courant ou antérieur au changement)', [v, v - 6].every((x) => src.interp.enemiesAt(x).every((e) => newIds.has(e.id))));
+  check('… autre joueur à sa position de la nouvelle étape', !!shownB && Math.abs(shownB.x - sb.x) < 1, `affiché ${shownB?.x.toFixed(1)}, serveur ${sb.x.toFixed(1)}`);
+  const pred = src.predictor;
+  check('… entrées en vol gardées, tick prédit = tick serveur + entrées en attente', pred.pending.length === t.inputs.length - ack && pred.pending.length >= IN_FLIGHT && pred.tick === server.tick + pred.pending.length, `${pred.pending.length} en attente, ${t.inputs.length - ack} non acquittées`);
+  src.dispose();
+}
+
 // 3. Entrées : 60 Hz, séquences croissantes, boutons échantillonnés ; pings périodiques.
 {
   const t = new FakeTransport();

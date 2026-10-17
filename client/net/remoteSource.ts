@@ -32,6 +32,11 @@ export interface RemoteSourceOptions {
 }
 
 export class RemoteSource implements WorldSource {
+  /**
+   * Durée d'image utile (ms) : la scène ne borne `dt` qu'au-delà, pour que MAX_INPUTS_PER_FRAME entrées
+   * partent par image (60 entrées/s jusqu'à 15 images/s ; le serveur, lui, ne ralentit pas).
+   */
+  static readonly MAX_FRAME_MS = (1000 * MAX_INPUTS_PER_FRAME) / NET_TICK;
   readonly kind = 'online' as const;
   private w: World;
   private pid = -1;
@@ -52,7 +57,7 @@ export class RemoteSource implements WorldSource {
   private ctx: PredictionContext | null = null;
   /** Ennemis touchés par un coup prédit : id → tick de fin du clignotement. */
   private flashUntil = new Map<number, number>();
-  /** Dernier tick affiché : le monde d'affichage ne recule jamais (pending vidé, changement d'étape). */
+  /** Dernier tick affiché : le monde d'affichage ne recule jamais (pending vidé). */
   private shownTick = 0;
   private readonly now: () => number;
   /** Prédiction du joueur local (créée à l'accueil, quand son id est connu). */
