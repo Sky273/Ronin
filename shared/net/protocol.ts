@@ -24,7 +24,7 @@ export const MAX_NAME = 12;
 export const BUTTON_MASK = 0x1fff;
 
 /** Version du protocole : client et serveur doivent être identiques (vérifiée à l'accueil). */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 /** Fermeture d'un joueur renvoyé pour absence prolongée (hors des codes réservés par Colyseus, 4000–4099). */
 export const AWAY_CLOSE_CODE = 4100;
 /** Recul d'affichage des entités distantes (ticks) : ~100 ms, ajusté de 5 à 12 selon la gigue. */

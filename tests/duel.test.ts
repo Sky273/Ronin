@@ -2,8 +2,9 @@
 // Lancer : npm run test:duel
 import { DUEL, DUEL_WHY, PLAYER, TILE } from '../shared/constants';
 import {
-  duelOf, type DuelRules, type ExchangeSide, findDuelSpot, isFoul, judgeExchange, kamaeLength, startDuel, stepDuelist, strikeStart,
+  duelOf, type DuelRules, type ExchangeSide, findDuelSpot, forfeit, isFoul, judgeExchange, kamaeLength, startDuel, stepDuelist, strikeStart,
 } from '../shared/duel';
+import { pairCooling } from '../shared/duelInvite';
 import { findGround, spawnEnemy, targetPlayer } from '../shared/enemy';
 import { BTN } from '../shared/input';
 import { damagePlayer, killEnemy } from '../shared/interactions';
@@ -11,7 +12,7 @@ import { createLagComp, setLag } from '../shared/lagcomp';
 import { arenaInside, T_EMPTY, T_SOLID, type Level } from '../shared/level';
 import { fitsAt } from '../shared/physics';
 import type { DifficultyId } from '../shared/difficulty';
-import type { Duel, GameEvent, Player, World } from '../shared/types';
+import type { Duel, EnemyState, EnemyType, GameEvent, Player, World } from '../shared/types';
 import { addPlayer, createWorld, nextStage, removePlayer, stepWorld, warpToArena } from '../shared/world';
 
 export {};
@@ -1164,6 +1165,121 @@ function duelInvariant(w: World): boolean {
   tick(w);
   const ev2 = run(w, DUEL.FORFEIT_HOLD, press([b]));
   check('… relâché puis tenu FORFEIT_HOLD ticks : abandon de b', ends(ev2)[0]?.why === W.FORFEIT && ends(ev2)[0]?.winner === a.id);
+}
+
+// ─── 12. Issue acquise, défis tombés, ennemis engagés, joueurs hors combat ──
+{
+  // 12a. Série décidée par la manche en cours de dénouement (a mène 2–0) : ni l'abandon du vainqueur,
+  // ni sa déconnexion, ni un forfait FLOOD, ni le passage d'étape ne la renversent ou ne l'effacent.
+  const decisive = (act: (w: World, a: Player) => void, hold = false) => {
+    const { w, ps } = coopWorld(2);
+    const [a, b] = ps;
+    const d = duel(w, a, b);
+    const play = aWins(a);
+    for (let i = 0; i < 20000 && w.duels!.includes(d) && !(d.phase === 'resolve' && d.played === 2); i++) tick(w, play);
+    const ready = d.phase === 'resolve' && (d.a.pid === a.id ? d.a : d.b).wins === 2;
+    act(w, a);
+    const ev = w.events.slice();
+    w.events.length = 0;
+    ev.push(...runDuel(w, d, (ww, p) => (hold && p === a ? BTN.DUEL : play(ww, p))));
+    const e = ends(ev);
+    const ok = ready && e.length === 1 && e[0].winner === a.id && e[0].why === W.WIN && (d.a.pid === a.id ? e[0].wa : e[0].wb) === 2;
+    return { ok, info: `prêt=${ready} ${JSON.stringify(e)}` };
+  };
+  const held = decisive(() => {}, true);
+  check('série acquise : DUEL tenu par le vainqueur pendant le dénouement → WIN, pas FORFEIT', held.ok, held.info);
+  const left = decisive((w, a) => removePlayer(w, a.id));
+  check('série acquise : le vainqueur se déconnecte pendant le dénouement → WIN, pas DISCONNECT', left.ok, left.info);
+  const flood = decisive((w, a) => forfeit(w, a.id, W.FLOOD));
+  check('série acquise : forfait FLOOD pendant le dénouement → WIN', flood.ok, flood.info);
+  const moved = decisive((w) => nextStage(w));
+  check('série acquise : passage d\'étape pendant le dénouement → WIN, pas INTERRUPT', moved.ok, moved.info);
+}
+{
+  // Témoin : série encore ouverte (1–0, dénouement de la première manche) : l'abandon tient.
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const d = duel(w, a, b);
+  const play = aWins(a);
+  for (let i = 0; i < 20000 && !(d.phase === 'resolve' && d.played === 1); i++) tick(w, play);
+  forfeit(w, a.id, W.FORFEIT);
+  const e = ends(w.events)[0];
+  w.events.length = 0;
+  check('série encore ouverte (1–0) : l\'abandon du meneur pendant le dénouement reste un abandon', e?.why === W.FORFEIT && e.winner === b.id, JSON.stringify(e));
+}
+{
+  // Nul acquis : une manche au plus, personne ne frappe (TIMEOUT) ; la déconnexion n'offre pas la victoire.
+  const { w, ps } = coopWorld(2);
+  const [a, b] = ps;
+  const d = duel(w, a, b, { firstTo: 2, maxRounds: 1, draw: true });
+  for (let i = 0; i < 20000 && d.phase !== 'resolve'; i++) tick(w);
+  const timeout = d.last === W.TIMEOUT && d.played === 1;
+  removePlayer(w, b.id);
+  const e = ends(w.events)[0];
+  w.events.length = 0;
+  check('nul acquis au dénouement : la déconnexion d\'un duelliste donne DRAW, sans vainqueur', timeout && e?.why === W.DRAW && e.winner === -1, JSON.stringify(e));
+}
+{
+  // 12b. Ennemi en plein échange (récupération, coup encaissé, étourdi, ninja caché) près du défieur :
+  // pas de défi, et un défi lancé au calme ne peut pas être accepté (témoin : patrouille).
+  const near = (type: EnemyType, state: EnemyState, accept: boolean): boolean => {
+    const { w, ps, cx } = coopWorld(2);
+    const [a, b] = ps;
+    put(w, a, cx - 60);
+    put(w, b, cx + 60);
+    a.facing = 1;
+    b.facing = -1;
+    if (accept) {
+      tick(w, press([a]));
+      tick(w);
+    }
+    const e = spawnEnemy(w, type, a.x - 50, a.y, false);
+    e.state = state;
+    e.freeze = 9999;
+    const ev = tick(w, press([accept ? b : a]), false);
+    return accept ? ev.some((x) => x.type === 'duelStart') : invites(ev).length > 0;
+  };
+  for (const [type, state] of [['ashigaru', 'recover'], ['ashigaru', 'hitstun'], ['ashigaru', 'stunned'], ['oni', 'recover'], ['ninja', 'hidden']] as [EnemyType, EnemyState][]) {
+    check(`ennemi engagé (${type} en ${state}) à 50 px : pas de défi`, !near(type, state, false));
+  }
+  check('ennemi étourdi près du défieur au moment d\'accepter : pas de duel', !near('ashigaru', 'stunned', true));
+  check('… témoin : ennemi en patrouille au même endroit, duel accepté', near('ashigaru', 'patrol', true));
+}
+{
+  // 12c. startDuel (dojo, raccourci de développement) refuse un joueur mort, à 0 PV ou sorti, sans rien changer.
+  const refused = (hurt: (w: World, b: Player) => void): boolean => {
+    const { w, ps } = coopWorld(2);
+    const [a, b] = ps;
+    hurt(w, b);
+    const before = JSON.stringify([a.state, b.state, b.hp, b.x, b.y]);
+    const d = startDuel(w, a, b, COOP_RULES);
+    return !d && !w.duels?.length && !w.events.some((x) => x.type === 'duelStart') && JSON.stringify([a.state, b.state, b.hp, b.x, b.y]) === before;
+  };
+  check('startDuel : joueur mort refusé (il n\'est pas relevé)', refused((w, b) => {
+    b.iframes = 0;
+    damagePlayer(w, b, 1e6, b.x + 10);
+  }));
+  check('startDuel : joueur à 0 PV refusé', refused((_w, b) => { b.hp = 0; }));
+  check('startDuel : joueur sorti de la partie refusé', refused((_w, b) => { b.out = true; }));
+  check('startDuel : … témoin, deux joueurs valides : duel engagé', !refused(() => {}));
+}
+{
+  // 12d. a → b et c → a en attente ; b accepte : le défi de c tombe (BUSY : c n'a rien retiré), sans
+  // délai de paire, et le duel a–b s'engage.
+  const { w, ps, cx } = coopWorld(3);
+  const [a, b, c] = ps;
+  put(w, a, cx);
+  put(w, b, cx + 100);
+  put(w, c, cx - 100);
+  a.facing = 1;
+  c.facing = 1;
+  tick(w, press([a]));
+  tick(w);
+  tick(w, press([c]));
+  tick(w);
+  const cn = cancels(tick(w, press([b])));
+  check('défi tombé parce que sa cible entre en duel : motif BUSY, pas CANCEL', cn.length === 1 && cn[0].from === c.id && cn[0].to === a.id && cn[0].why === W.BUSY, JSON.stringify(cn));
+  check('BUSY : duel a–b engagé, aucun délai de paire entre c et a', !!duelOf(w, a.id) && duelOf(w, a.id) === duelOf(w, b.id) && !pairCooling(w, c.id, a.id));
 }
 
 if (failures) {

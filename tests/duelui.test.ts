@@ -1,10 +1,15 @@
 // Tests du modèle de vue des duels (invitation, phases, signal, résultats).
 // Lancer : npm run test:duelui
+import type Phaser from 'phaser';
 import { DUEL, DUEL_WHY } from '../shared/constants';
-import type { Duel, DuelPhase, World } from '../shared/types';
+import { findDuelSpot } from '../shared/duel';
+import { stepInvites } from '../shared/duelInvite';
+import { BTN } from '../shared/input';
+import type { Duel, DuelPhase, GameEvent, World } from '../shared/types';
 import { addPlayer, createWorld } from '../shared/world';
+import { DuelOverlay } from '../client/ui/duel';
 import {
-  cancelText, createDuelMemo, duelView, endToast, KAMAE_HELP, reactText, seriesText, whyLabel, winMarks,
+  boutView, cancelText, createDuelMemo, duelView, endToast, inviteText, KAMAE_HELP, reactText, seriesText, whyLabel, winMarks,
 } from '../client/ui/duelView';
 
 export {};
@@ -31,6 +36,81 @@ function makeDuel(a: number, b: number, phase: DuelPhase, over: Partial<Duel> = 
     stage: 0, last: -1, winner: -1, firstTo: 2, maxRounds: 5, draw: true, ...over,
   };
 }
+
+/** Texte Phaser factice : texte, position, échelle et visibilité tenus comme dans Phaser. */
+class FakeText {
+  x: number;
+  y: number;
+  text: string;
+  style: { color: string; fontSize: string };
+  visible = true;
+  alpha = 1;
+  scale = 1;
+  constructor(x: number, y: number, text: string, style: { color?: string; fontSize?: string }) {
+    this.x = x;
+    this.y = y;
+    this.text = text;
+    this.style = { color: style.color ?? '', fontSize: style.fontSize ?? '' };
+  }
+  get width(): number {
+    return this.text.length * 10;
+  }
+  setText(s: string): this {
+    this.text = s;
+    return this;
+  }
+  setOrigin(): this {
+    return this;
+  }
+  setDepth(): this {
+    return this;
+  }
+  setVisible(v: boolean): this {
+    this.visible = v;
+    return this;
+  }
+  setPosition(x: number, y: number): this {
+    this.x = x;
+    this.y = y;
+    return this;
+  }
+  setScale(k: number): this {
+    this.scale = k;
+    return this;
+  }
+  setAlpha(a: number): this {
+    this.alpha = a;
+    return this;
+  }
+  setColor(c: string): this {
+    this.style.color = c;
+    return this;
+  }
+  setFontSize(f: string): this {
+    this.style.fontSize = f;
+    return this;
+  }
+  destroy(): void {}
+}
+
+/** DuelOverlay sur une scène Phaser factice : textes enregistrés, graphiques sans effet. */
+function overlay(): { ov: DuelOverlay; texts: FakeText[] } {
+  const texts: FakeText[] = [];
+  const g: unknown = new Proxy({}, { get: () => () => g });
+  const scene = {
+    scale: { width: 1280, height: 720 },
+    add: {
+      text: (x: number, y: number, s: string, style: { color?: string; fontSize?: string }) => {
+        const t = new FakeText(x, y, s, style);
+        texts.push(t);
+        return t;
+      },
+      graphics: () => g,
+    },
+  };
+  return { ov: new DuelOverlay(scene as unknown as Phaser.Scene, ((o: unknown) => o) as never), texts };
+}
+const cam = { worldView: { x: -1e5, y: -1e5, right: 1e5, bottom: 1e5 } } as unknown as Phaser.Cameras.Scene2D.Camera;
 
 // ─── Utilitaires ──────────────────────────────────────────────────────────
 check('whyLabel : 一本', whyLabel(DUEL_WHY.IPPON).kanji === '一本');
@@ -217,6 +297,108 @@ check('winMarks : 0 sur 2 → ・・', winMarks(0, 2) === '・・');
   w.players = w.players.filter((p) => p.id !== aiko);
   const v2 = duelView(w, kenji);
   check('duelliste parti : marque au sol, absent', v2.mine?.b.present === false && v2.mine.b.x === 500 + DUEL.GAP / 2);
+}
+
+// ─── Forfait FLOOD ────────────────────────────────────────────────────────
+{
+  const { w, kenji, aiko, sora } = setup();
+  const name = (pid: number) => (pid === kenji ? 'Kenji' : pid === aiko ? 'Aiko' : 'ronin');
+  const lose = seriesText(kenji, aiko, kenji, 0, 1, DUEL_WHY.FLOOD, aiko, name);
+  check('FLOOD : le fautif voit 反則 « too many inputs — forfeit »', lose.title === '反則' && lose.sub === 'too many inputs — forfeit' && !lose.red, JSON.stringify(lose));
+  const win = seriesText(kenji, aiko, kenji, 0, 1, DUEL_WHY.FLOOD, kenji, name);
+  check('FLOOD : l\'autre voit une victoire par forfait (pas « victory 0–1 »)', win.title === '勝' && win.sub === 'Aiko disqualified · victory by forfeit' && win.red, JSON.stringify(win));
+  const ev = { type: 'duelEnd', id: 7, winner: kenji, wa: 0, wb: 1, why: DUEL_WHY.FLOOD } as const;
+  check('FLOOD : toast de salle', endToast(ev, kenji, aiko, name) === 'Kenji wins by forfeit — Aiko disqualified · 反則', endToast(ev, kenji, aiko, name));
+  // Fin de série vue avec et sans l'événement duelEnd en mémoire (spectateur arrivé après).
+  const d = makeDuel(kenji, aiko, 'end', { winner: kenji, last: DUEL_WHY.FLOOD });
+  d.b.wins = 1;
+  w.duels = [d];
+  const memo = createDuelMemo();
+  memo.ends.set(d.id, { ...ev });
+  for (const m of [undefined, memo]) {
+    const sp = boutView(w, d, sora, m);
+    const me = boutView(w, d, aiko, m);
+    check(`FLOOD, fin ${m ? 'avec' : 'sans'} duelEnd en mémoire : motif FLOOD, forfait annoncé`, sp.outcome === DUEL_WHY.FLOOD && sp.title === '反則'
+      && sp.sub === endToast(ev, kenji, aiko, name) && me.title === '反則' && me.outcome === DUEL_WHY.FLOOD, `${sp.outcome} ${sp.title} « ${sp.sub} » / ${me.title}`);
+  }
+  // Toast des spectateurs par la surcouche.
+  const { ov, texts } = overlay();
+  ov.update(duelView(w, sora, ov.memo), w, cam, 1000);
+  ov.onEvent({ type: 'duelStart', id: d.id, a: kenji, b: aiko }, sora);
+  ov.onEvent({ ...ev }, sora);
+  check('FLOOD : toast des spectateurs', texts.some((t) => t.visible && t.text === 'Kenji wins by forfeit — Aiko disqualified · 反則'), texts.filter((t) => t.visible).map((t) => t.text).join(' | '));
+}
+
+// ─── Défi tombé parce que la cible entre en duel (BUSY) ──────────────────
+{
+  const { w, kenji, aiko, sora } = setup();
+  const name = (pid: number) => (pid === kenji ? 'Kenji' : pid === aiko ? 'Aiko' : pid === sora ? 'Sora' : 'ronin');
+  const ev = { type: 'duelCancel', from: sora, to: aiko, why: DUEL_WHY.BUSY } as const;
+  check('BUSY : le défieur apprend que sa cible est en duel (pas « cancelled »)', cancelText(ev, sora, name) === 'Duel off — Aiko is in another duel', cancelText(ev, sora, name));
+  check('BUSY : rien pour la cible, qui entre dans son duel (pas « Sora withdrew »)', cancelText(ev, aiko, name) === '', cancelText(ev, aiko, name));
+  const { ov, texts } = overlay();
+  ov.update(duelView(w, aiko), w, cam, 1000);
+  ov.onEvent({ ...ev }, aiko);
+  check('BUSY : aucun toast pour la cible', !texts.some((t) => t.visible), texts.filter((t) => t.visible).map((t) => t.text).join(' | '));
+  ov.onEvent({ ...ev }, sora);
+  check('BUSY : toast pour le défieur', texts.some((t) => t.visible && t.text === 'Duel off — Aiko is in another duel'));
+}
+
+// ─── Bandeau d'invitation : défi reçu et défi envoyé ensemble ─────────────
+{
+  const { w, kenji, aiko, sora } = setup();
+  const iv = (pid: number, nm: string) => ({ pid, name: nm, seconds: 5, frac: 0.5 });
+  check('bandeau : défi reçu seul → G to accept', inviteText(iv(sora, 'Sora'), null) === '決闘  Sora challenges you — G to accept');
+  check('bandeau : défi envoyé seul → G to cancel', inviteText(null, iv(kenji, 'Kenji')) === 'Challenge sent to Kenji… G to cancel');
+  check('bandeau : les deux → G annule d\'abord le défi envoyé', inviteText(iv(sora, 'Sora'), iv(kenji, 'Kenji')).includes('G: cancel your challenge to Kenji'));
+  check('bandeau : défis croisés (même joueur) → acceptation', inviteText(iv(kenji, 'Kenji'), iv(kenji, 'Kenji')) === '決闘  Kenji challenges you — G to accept');
+  check('bandeau : aucune invitation → vide', inviteText(null, null) === '');
+
+  // Bout en bout : le bandeau de la surcouche annonce ce que fait l'appui sur G (stepInvites).
+  w.enemies = [];
+  const spot = findDuelSpot(w.level, w.level.spawn.x + 300, w.level.spawn.y, DUEL.GAP)!;
+  for (const p of w.players) {
+    p.x = spot.x;
+    p.y = spot.y;
+  }
+  w.duelInvites = [{ from: aiko, to: kenji, until: w.tick + 500, cd: false }, { from: sora, to: aiko, until: w.tick + 550, cd: false }];
+  const { ov, texts } = overlay();
+  const banner = texts.find((t) => t.y === 128)!;
+  const show = () => {
+    ov.update(duelView(w, aiko, ov.memo), w, cam, 1000);
+    return banner.visible ? banner.text : '';
+  };
+  const pressG = (): GameEvent[] => {
+    for (const p of w.players) p.prevButtons = 0;
+    stepInvites(w, new Map([[aiko, BTN.DUEL]]));
+    const ev = w.events.slice();
+    w.events.length = 0;
+    return ev;
+  };
+  const b1 = show();
+  check('bandeau d\'Aiko : défi de Sora reçu, défi à Kenji envoyé → G annule d\'abord', b1.includes('Sora challenges you') && b1.includes('G: cancel your challenge to Kenji') && !b1.includes('G to accept'), b1);
+  const ev1 = pressG();
+  const c1 = ev1.find((x) => x.type === 'duelCancel');
+  check('… et G annule bien le défi envoyé à Kenji, sans duel', !!c1 && c1.type === 'duelCancel' && c1.from === aiko && c1.to === kenji && !ev1.some((x) => x.type === 'duelStart'), JSON.stringify(ev1));
+  const b2 = show();
+  check('bandeau d\'Aiko, défi annulé : Sora challenges you — G to accept', b2 === '決闘  Sora challenges you — G to accept', b2);
+  const ev2 = pressG();
+  check('… et G accepte alors le défi de Sora', ev2.some((x) => x.type === 'duelStart' && [x.a, x.b].includes(sora) && [x.a, x.b].includes(aiko)), JSON.stringify(ev2));
+}
+
+// ─── 斬 des spectateurs ───────────────────────────────────────────────────
+{
+  const { w, kenji, aiko, sora } = setup();
+  const d = makeDuel(kenji, aiko, 'kamae', { sigTick: w.tick + 1 });
+  w.duels = [d];
+  const { ov, texts } = overlay();
+  const above = () => texts.filter((t) => t.visible && t.x === d.x && t.y === d.y - 150);
+  ov.update(duelView(w, sora), w, cam, 1000);
+  check('spectateur : rien au-dessus du lieu avant le signal', above().length === 0);
+  w.tick = d.sigTick;
+  ov.update(duelView(w, sora), w, cam, 1016);
+  const z = above();
+  check('spectateur : 斬 affiché au-dessus du lieu au signal (texte non vide)', z.length === 1 && z[0].text === '斬', JSON.stringify(z.map((t) => t.text)));
 }
 
 if (failures) {

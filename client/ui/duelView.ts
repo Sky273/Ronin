@@ -102,6 +102,7 @@ const WHY: Record<number, { kanji: string; text: string }> = {
   [DUEL_WHY.WIN]: { kanji: '勝', text: 'victory' },
   [DUEL_WHY.TIDE]: { kanji: '潮', text: 'the Tide rises' },
   [DUEL_WHY.FLOOD]: { kanji: '反則', text: 'too many inputs — forfeit' },
+  [DUEL_WHY.BUSY]: { kanji: '先約', text: 'in another duel' },
 };
 
 /** Libellé d'un code DUEL_WHY : kanji et texte anglais (vides si le code est inconnu). */
@@ -133,8 +134,8 @@ export function winMarks(wins: number, firstTo: number): string {
 
 /**
  * Fin de série : titre et ligne d'explication. `wa`/`wb` : manches gagnées par `a` et `b`.
- * Vu par un duelliste (meId = a ou b) : 勝 / 負 / 引き分け / 降参 / 不戦勝 / 中断 ;
- * vu par un spectateur : 勝 avec « Kenji defeated Aiko 2–1 ».
+ * Vu par un duelliste (meId = a ou b) : 勝 / 負 / 引き分け / 降参 / 不戦勝 / 反則 / 中断 ;
+ * vu par un spectateur : 勝 avec « Kenji defeated Aiko 2–1 » (ou le kanji du forfait).
  */
 export function seriesText(
   a: number, b: number, winner: number, wa: number, wb: number, why: number, meId: number, nameOf: NameOf,
@@ -144,7 +145,8 @@ export function seriesText(
   if (why === DUEL_WHY.INTERRUPT || why === DUEL_WHY.HIT) {
     return { title: '中断', sub: `duel interrupted · ${whyLabel(why).text}`, red: false };
   }
-  if (!mine) return { title: draw ? '引き分け' : WHY[why === DUEL_WHY.FORFEIT || why === DUEL_WHY.DISCONNECT ? why : DUEL_WHY.WIN].kanji, sub: endToast({ type: 'duelEnd', id: 0, winner, wa, wb, why }, a, b, nameOf), red: false };
+  const byForfeit = why === DUEL_WHY.FORFEIT || why === DUEL_WHY.DISCONNECT || why === DUEL_WHY.FLOOD;
+  if (!mine) return { title: draw ? '引き分け' : WHY[byForfeit ? why : DUEL_WHY.WIN].kanji, sub: endToast({ type: 'duelEnd', id: 0, winner, wa, wb, why }, a, b, nameOf), red: false };
   const myW = meId === a ? wa : wb;
   const opW = meId === a ? wb : wa;
   const opp = nameOf(meId === a ? b : a);
@@ -155,6 +157,9 @@ export function seriesText(
   }
   if (why === DUEL_WHY.DISCONNECT) {
     return won ? { title: '不戦勝', sub: `${opp} left · victory by default`, red: true } : { title: '負', sub: 'you left the duel', red: false };
+  }
+  if (why === DUEL_WHY.FLOOD) {
+    return won ? { title: '勝', sub: `${opp} disqualified · victory by forfeit`, red: true } : { title: '反則', sub: whyLabel(why).text, red: false };
   }
   return won ? { title: '勝', sub: `victory ${myW}–${opW}`, red: true } : { title: '負', sub: `defeat ${myW}–${opW}`, red: false };
 }
@@ -171,10 +176,14 @@ export function endToast(ev: DuelEndEvent, a: number, b: number, nameOf: NameOf)
   if (ev.why === DUEL_WHY.DRAW || (ev.winner !== a && ev.winner !== b)) return `${nameOf(a)} and ${nameOf(b)} drew ${ev.wa}–${ev.wb}`;
   if (ev.why === DUEL_WHY.FORFEIT) return `${L} yielded to ${W} · 降参`;
   if (ev.why === DUEL_WHY.DISCONNECT) return `${W} wins by default — ${L} left · 不戦勝`;
+  if (ev.why === DUEL_WHY.FLOOD) return `${W} wins by forfeit — ${L} disqualified · 反則`;
   return `${W} defeated ${L} ${ww}–${lw}`;
 }
 
-/** Motif lisible d'un duel ou d'une invitation annulés, vu par le joueur local (`from` ou `to`). */
+/**
+ * Motif lisible d'un duel ou d'une invitation annulés, vu par le joueur local (`from` ou `to`).
+ * Chaîne vide : rien à annoncer (BUSY vu par la cible, qui entre justement dans son duel).
+ */
 export function cancelText(ev: Extract<GameEvent, { type: 'duelCancel' }>, meId: number, nameOf: NameOf): string {
   const sent = ev.from === meId;
   const other = nameOf(sent ? ev.to : ev.from);
@@ -183,6 +192,8 @@ export function cancelText(ev: Extract<GameEvent, { type: 'duelCancel' }>, meId:
       return sent ? `Challenge to ${other} expired` : `${other}'s challenge expired`;
     case DUEL_WHY.CANCEL:
       return sent ? 'Challenge cancelled' : `${other} withdrew the challenge`;
+    case DUEL_WHY.BUSY:
+      return sent ? `Duel off — ${other} is in another duel` : '';
     case DUEL_WHY.DISTANCE:
       return `Duel off — out of range`;
     case DUEL_WHY.TERRAIN:
@@ -300,7 +311,7 @@ export function boutView(w: World, d: Duel, meId: number, memo?: DuelMemo): Duel
     case 'end': {
       const end = memo?.ends.get(d.id);
       const winner = end ? end.winner : d.winner;
-      const terminal = d.last === DUEL_WHY.FORFEIT || d.last === DUEL_WHY.DISCONNECT || d.last === DUEL_WHY.INTERRUPT || d.last === DUEL_WHY.HIT || d.last === DUEL_WHY.DRAW || d.last === DUEL_WHY.WIN;
+      const terminal = d.last === DUEL_WHY.FORFEIT || d.last === DUEL_WHY.DISCONNECT || d.last === DUEL_WHY.FLOOD || d.last === DUEL_WHY.INTERRUPT || d.last === DUEL_WHY.HIT || d.last === DUEL_WHY.DRAW || d.last === DUEL_WHY.WIN;
       const why = end ? end.why : terminal ? d.last : winner >= 0 ? DUEL_WHY.WIN : DUEL_WHY.DRAW;
       const s = seriesText(d.a.pid, d.b.pid, winner, end ? end.wa : d.a.wins, end ? end.wb : d.b.wins, why, meId, nameOf);
       v.outcome = why;
@@ -313,6 +324,19 @@ export function boutView(w: World, d: Duel, meId: number, memo?: DuelMemo): Duel
     }
   }
   return v;
+}
+
+/**
+ * Bandeau d'invitation du joueur local (vide sans invitation), fidèle à l'effet de G (stepInvites) :
+ * un défi envoyé est annulé avant qu'un défi reçu puisse être accepté (sauf défis croisés : acceptation).
+ */
+export function inviteText(incoming: InviteView | null, outgoing: InviteView | null): string {
+  if (incoming && outgoing && outgoing.pid !== incoming.pid) {
+    return `決闘  ${incoming.name} challenges you — G: cancel your challenge to ${outgoing.name} first`;
+  }
+  if (incoming) return `決闘  ${incoming.name} challenges you — G to accept`;
+  if (outgoing) return `Challenge sent to ${outgoing.name}… G to cancel`;
+  return '';
 }
 
 function inviteView(w: World, pid: number, until: number, nameOf: NameOf): InviteView {
