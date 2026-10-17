@@ -243,6 +243,12 @@ export const DUEL_ROUND_LAST = DUEL.ROUND_MAX + DUEL.SLASH_EXTRA + DUEL.STRIKE_T
  * entrées consommées après le dénouement au plus tard de la manche sont retirées (garde la plus longue, puis la manche).
  */
 export const DUEL_QUEUE_LIMIT = Math.max(DUEL.QUEUE_MAX, DUEL.KAMAE_MAX + DUEL_ROUND_LAST + 2);
+/**
+ * Plafond dur de cette file, appuis DUEL compris (ils ne sont jamais retirés) : hors d'atteinte d'un client honnête
+ * (le framework coupe une rafale de plus de 480 messages par seconde, le battement de cœur un silence de 6 à 9 s).
+ * Au-delà (G alterné pour échapper au retrait), forfait FLOOD.
+ */
+export const DUEL_QUEUE_HARD = 2 * DUEL_QUEUE_LIMIT;
 
 /** Issues d'une manche, d'une série ou d'une invitation (événements `why`). */
 export const DUEL_WHY = {

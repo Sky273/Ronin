@@ -41,6 +41,14 @@ setTimeout(() => {
   console.log('✘ délai global dépassé (120 s)');
   process.exit(1);
 }, 120_000).unref();
+// Garde-fou : les écouteurs uncaughtException des sections (c), (d), (e)… avaleraient une erreur
+// de premier niveau, et la suite sortirait en code 0 sans bilan. Sans bilan atteint : échec.
+let reachedEnd = false;
+process.on('exit', (code) => {
+  if (reachedEnd || code !== 0) return;
+  console.log('✘ suite interrompue avant son bilan');
+  process.exitCode = 1;
+});
 
 // ─── (a) CoopSession seule ──────────────────────────────────────────────────
 
@@ -1447,6 +1455,7 @@ function rawRequest(port: number, text: string): Promise<string> {
   process.off('unhandledRejection', onCrash);
 }
 
+reachedEnd = true;
 if (failures) {
   console.log(`\n${failures} échec(s)`);
   (globalThis as unknown as { process: { exit(code: number): void } }).process.exit(1);

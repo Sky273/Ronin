@@ -55,7 +55,7 @@ export class CoopRoom extends Room {
 
     this.onMessage(MSG.input, (client: Client, msg: unknown) => {
       // Duelliste : entrée jamais ignorée (sa file stricte suppose qu'aucune ne manque), mais comptée ; la session
-      // borne déjà cette file (cadence cumulée FLOOD, QUEUE_MAX).
+      // borne déjà cette file (cadence cumulée FLOOD, retrait au-delà de QUEUE_MAX, plafond dur DUEL_QUEUE_HARD).
       const dueling = isDueling(this.session.world, this.pids.get(client.sessionId) ?? -1);
       if (!this.allow(client, dueling)) return;
       if (!msg || typeof msg !== 'object') return;

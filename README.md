@@ -2,12 +2,13 @@
 
 **A side-scrolling samurai `.io` game, painted in Japanese ink.**
 
-You are a lone ronin with a katana, cutting through hordes along the Tōkaidō road. Every stroke on screen is drawn live with a procedural brush, in the style of *sumi-e* (墨絵) ink sketches on rice paper, with a single vermilion accent. Characters, landscapes, effects, sounds and music are all generated in code: the game ships **no image or audio assets**.
+You are a lone ronin with a katana, cutting through hordes along the Tōkaidō road — alone, or online with up to eleven companions. Every stroke on screen is drawn live with a procedural brush, in the style of *sumi-e* (墨絵) ink sketches on rice paper, with a single vermilion accent. Characters, landscapes, effects, sounds and music are all generated in code: the game ships **no image or audio assets**.
 
-> Status: playable prototype (solo). Online multiplayer is the next milestone: the simulation is already deterministic and shared, ready to run on an authoritative server.
+> Status: solo campaign complete; **online co-op** (“the shared road”, up to 12 players) with **iaidō duels** between players. Next milestone: a 1v1 tournament dojo.
 
 ## Features
 
+### Solo
 - **Katana combat**:
   - a three-hit combo, rising cut, aerial slash and plunge attack;
   - parry, dash with invincibility frames;
@@ -21,19 +22,36 @@ You are a lone ronin with a katana, cutting through hordes along the Tōkaidō r
   - shield-bearing **oni**: strike from behind, break their guard, or parry;
   - **ninja**: jump their low shuriken, and expect them to teleport behind you.
 - **The Tide (潮)**: lulls and ever-harder waves alternate.
-- **The guardian**: at the end of the stage, a barrier seals the arena and **Akaoni (赤鬼)**, a demon general, attacks.
+- **The guardian**: at the end of each stage, a barrier seals the arena and **Akaoni (赤鬼)**, a demon general, attacks.
   - His sweep: crouch.
   - His leap: jump the shockwave.
   - His charge: dash through it.
   - Defeat him to break the seals of the torii gate.
+- **A different road every stage**: a bamboo forest first, then generated stages built from hand-made segments across four biomes (bamboo, burning village, snowy pass, castle), always checked to be playable.
 - **Progression**:
   - slain foes drop honor (誉) orbs, and every level offers 1 upgrade among 3, without pausing;
   - ranks go from Ronin to Shogun;
   - when you die, half your honor stays where you fell.
-- **Journey loops (周)**: after the stage results, the journey starts over, harder, keeping your upgrades.
+- **Journey loops (周)**: after the stage results, the journey goes on, harder, keeping your upgrades.
 - **Five difficulty levels**, from Very Easy to Very Hard: 10 / 8 / 5 / 3 / 1 lives, tougher and faster foes, a denser horde, and a score multiplier of ×0.5 to ×2.5.
 - **Hall of Honor (誉)**: when your last life is gone, inscribe your name among the local top 10 for your difficulty. The score only grows: kills (with a combo bonus), repelled Tides and stage results, multiplied by difficulty and loop.
-- **Ink rendering**: brush strokes that boil like hand-drawn animation, ink stains that build up on the ground, foes cut in half, hit-stop, slow motion.
+
+### Online co-op — “the shared road” (縁)
+- **Up to 12 ronin per room**, one ink color each, walking the same stages together against the hordes. Join from the title screen (**Online**), with just a name — no account.
+- **No lives, no game over**: fallen players are reborn at the furthest shrine anyone has reached (社, shared by the whole room).
+- **The guardian's kekkai (結界) is one-way**: anyone can step into the arena at any time, nobody can leave until Akaoni falls. His strength scales with the number of active players.
+- **Stage results for the whole room**: everyone gets their own grade and bonus; the room votes to move on (a majority is enough, or the road resumes by itself after 8 s).
+- **Teammates off screen** are shown at the screen edge, with their name and distance.
+- **Away players** (no key pressed for 30 s) don't count for votes or the guardian's strength, and are dismissed after 3 minutes.
+
+### Iaidō duels (決闘) — PvP by consent only
+- Press **G** next to another ronin to challenge them; they press **G** to accept. An ink circle is drawn and both samurai face off.
+- **構え** — stand still and charge your iai. **斬** — the signal: release first. Strike too early and it's a foul (反則); parry a fast strike (弾); strike at the same instant and the round is replayed (相打ち). Best of three; hold **G** to forfeit.
+- **Fair at any latency**: the 斬 signal is scheduled by the server in advance and appears at the same game tick for both duelists, and reactions are judged on the server tick each input is consumed — no rewind, nothing to exploit with a forged lag. Over 0–150 ms per direction, the faster player wins 100 % of the time in tests.
+- Duelists are untouchable while the rest of the room plays on and watches. There is nothing to win but glory.
+
+### Presentation
+- **Ink rendering**: brush strokes that boil like hand-drawn animation, ink stains that build up on the ground, foes cut in half, hit-stop, slow motion (solo).
 - **Adaptive music**, generated in the *In* (Miyako-bushi) scale:
   - koto and shamisen synthesized with Karplus-Strong;
   - a **shinobue** (bamboo transverse flute) lead: phrases built as motif, variation, contrast and cadence, with grace notes, trills, slides and falls;
@@ -46,32 +64,34 @@ Requires **Node.js 22+** (the game server uses Colyseus 0.18).
 
 ```bash
 npm install
-npm run dev      # http://localhost:5180
+npm run dev          # the game: http://localhost:5180
+npm run dev:server   # the online server: ws://localhost:2567 (only needed for "Online")
 ```
 
 Other scripts:
 
 ```bash
-npm test         # headless tests: simulation, scores, co-op rules, network, server
-npm run build    # type-check and production build (dist/)
-npm run preview  # serve the production build
+npm test               # all headless test suites (simulation, co-op, netcode, server, duels…)
+npm run build          # type-check and production build of the game (dist/)
+npm run preview        # serve the production build
+npm run build:server   # bundle the server (dist-server/)
+npm run start:server   # run the bundled server
+npm run typecheck:server
+npm run bots -- 12     # fill a room with 12 bots and print traffic statistics
 ```
 
-## Online co-op (work in progress)
+### Configuration
 
-**The shared road**: up to twelve ronin, one ink color each, walk the same stages together against the hordes. No lives, no game over: fallen players are reborn at the furthest shrine anyone has reached, and the whole room moves to the next stage together.
+| Variable | Where | Meaning |
+|---|---|---|
+| `VITE_SERVER_URL` | client (see `.env.example`) | game server address (default `ws://localhost:2567`) |
+| `PORT` | server | listening port (default 2567) |
+| `MAX_ROOMS` | server | maximum rooms per process (default 50) |
+| `LAG_MS`, `JITTER_MS` | server | simulated latency per direction, for testing |
+| `STATS_EVERY_MS` | server | interval of the performance log (0 to disable) |
+| `SERVER_URL` | `npm run bots` | server the bots join (default `ws://localhost:2567`) |
 
-```bash
-npm run dev:server   # authoritative game server on ws://localhost:2567
-npm run dev          # then choose "Online" on the title screen
-```
-
-- `VITE_SERVER_URL` (client, see `.env.example`) points the game at another server.
-- `PORT` sets the server port. `LAG_MS` and `JITTER_MS` simulate network latency (per direction) for testing.
-- `npm run bots -- 12` fills a room with 12 bots and prints traffic statistics.
-- `npm run build:server` and `npm run start:server` build and run the production server.
-
-Your own samurai is predicted locally and reconciled with the server, so it reacts on the very frame you press a key; other players and enemies are interpolated about 100 ms behind. The server judges your strikes and parries against what you saw on screen (lag compensation, up to 500 ms), and snapshots are compact (well under 1 KB with 12 players). In a room, press **G** near another ronin to challenge them to an **iaidō duel** (they press G to accept): a best-of-three face-off where the 斬 signal appears at the same game tick for both players whatever their latency, and the first clean strike wins (parry, fouls and simultaneous strikes included). A 1v1 tournament dojo comes next.
+Client and server must run the same protocol version (checked on join): update both together.
 
 ## Controls
 
@@ -85,31 +105,49 @@ Your own samurai is predicted locally and reconciled with the server, so it reac
 | Parry | K | right click / LB · RB |
 | Iai (hold, then release) | L | middle click / Y |
 | Choose an upgrade | 1 · 2 · 3 | — |
-| Challenge / accept a duel (online) · hold to forfeit | G | R3 |
+| Online: challenge / accept a duel · hold to forfeit | G | R3 |
+| Online: leave the room | Esc | hold Select |
+| Online: ready at the stage results | Space / J | A / X |
 | Help · sound · music · hitboxes | H · M · N · F1 | — |
 
-Development shortcuts (dev server only): **F2** next Tide phase, **F3** warp to the guardian's arena, **F4** +100 honor.
+Game keys are read by physical position (`event.code`), so QWERTY and AZERTY both work without any setting; the H, M and N shortcuts follow the letter printed on the key.
 
-Keys are read by physical position (`event.code`), so QWERTY and AZERTY both work without any setting.
+Development shortcuts (dev server, solo only): **F2** next Tide phase, **F3** warp to the guardian's arena, **F4** +100 honor, **F7** next stage, **F8** add a delayed “echo” player, **F9** start a local duel against an echo.
 
 ## Architecture
 
 ```
-shared/   deterministic 60 Hz simulation: no DOM, no rendering
-          physics (AABB), player state machine, combat, enemy AI,
-          honor and upgrades, Tide, stages and loops, difficulty
-client/   Phaser 3 rendering, fully procedural
-          render/  brush engine, IK skeletons and key poses, painted backdrops
-          fx/      ink particles, halved corpses, afterimages
-          audio/   synthesized sound effects and adaptive music
-          ui/      HUD, banners, results screen
-server/   Colyseus game server: rooms run the same shared/ simulation
-tests/    headless tests (bundled with esbuild, run with Node)
+shared/        deterministic 60 Hz simulation (no DOM, no Math.random): the same code runs
+               in solo, on the server and in the client's prediction
+               physics, player, combat, enemies, interactions, stages and arena (kekkai),
+               level generation and checks, difficulty, co-op rules, duels and challenges,
+               lag compensation (lagcomp)
+  net/         protocol, compact snapshot codec, snapshot building / applying
+client/        Phaser 3 rendering, fully procedural
+  scenes/      the game scene: screens, solo and online play
+  world/       world sources: local simulation (solo) or online
+  net/         connection (Colyseus SDK, loaded on demand), prediction and reconciliation,
+               interpolation and server clock, event gating
+  render/      brush engine, IK skeletons and key poses, painted backdrops and terrain
+  fx/          ink particles, halved corpses, afterimages, per-player effect policy
+  audio/       synthesized sound effects and adaptive music
+  ui/          HUD, banners, results and room roster, online menu, duels, teammate markers,
+               title, difficulty, name entry, Hall of Honor
+  scores/      local high scores
+server/        Colyseus game server: a CoopSession per room runs the shared simulation
+               (fixed-step, input queues, away players), rooms, lag simulator, bots
+tests/         headless tests (esbuild or tsx + Node), including a virtual network bench
 ```
 
-The client only sends **inputs** (a button bitmask) to the simulation and renders the events it emits. Online, the same `shared/` code runs on the server; clients send their inputs at 60 Hz and receive snapshots at 20 Hz, filtered around each player.
+**Netcode.** The client only sends **inputs** (a button bitmask, 60 Hz) and renders what the simulation emits. Online, the server is authoritative:
+- your own samurai is **predicted** locally and **reconciled** with the server, so it reacts on the very frame you press a key;
+- other players and enemies are **interpolated** about 100 ms behind, on an estimated server clock;
+- the server judges your strikes and parries against what you saw on screen (**lag compensation**, up to 500 ms);
+- snapshots are compact tuples (well under 1 KB with 12 players), sent at 20 Hz and filtered around each player.
 
-**Stack**: TypeScript (strict), Phaser 3, Vite, Web Audio API, Colyseus (online).
+**Tests.** `npm test` runs every suite: solo simulation smoke test, player body and honor orbs, enemies and arena, high scores, game over, melody, level generation and stage chaining, snapshots and codec, co-op rules (with reference fingerprints guaranteeing the solo simulation never changes by accident), remote source, server (real Colyseus server with SDK clients, malformed requests, rate limits), effect policy, interface (HUD, banners, keyboard layouts), terrain ink uploads, prediction, interpolation, server clock, lag compensation, a virtual network bench (latency × jitter matrix, outages, server stalls), room roster, duels and duel fairness.
+
+**Stack**: TypeScript (strict), Phaser 3, Vite, Web Audio API, Colyseus 0.18, msgpack.
 
 ## License
 

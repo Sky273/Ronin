@@ -14,7 +14,7 @@ import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
 import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
-import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_ROUND_LAST, DUEL_WHY } from '../shared/constants';
+import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_QUEUE_HARD, DUEL_ROUND_LAST, DUEL_WHY } from '../shared/constants';
 import { duelOf, forfeit, isDueling, kamaeLength } from '../shared/duel';
 import { BTN } from '../shared/input';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
@@ -141,15 +141,19 @@ export class CoopSession {
       }
       slot.floodCount++;
       const allowed = ((now - slot.floodSince) / 1000) * NET_TICK * DUEL.FLOOD_RATE + DUEL.FLOOD_SLACK;
-      if (slot.floodCount > allowed) {
+      let flood = slot.floodCount > allowed;
+      if (!flood && slot.queue.length > DUEL.QUEUE_MAX) {
+        // File longue à cadence honnête (coupure ou gel de plus de 5 s, gels rapprochés) : ce n'est pas un client
+        // accéléré, la file est seulement ramenée à sa borne. Les appuis DUEL n'en sont jamais retirés : une file qui
+        // reste au-delà du plafond dur (G alterné pour y échapper) n'est pas celle d'un client honnête.
+        this.boundDuelQueue(slot);
+        flood = slot.queue.length > DUEL_QUEUE_HARD;
+      }
+      if (flood) {
         forfeit(this.world, pid, DUEL_WHY.FLOOD);
         slot.queue = [input];
         slot.floodSince = now;
         slot.floodCount = 0;
-      } else if (slot.queue.length > DUEL.QUEUE_MAX) {
-        // File longue à cadence honnête (coupure ou gel de plus de 5 s, gels rapprochés) : ce n'est pas un client
-        // accéléré, la file est seulement ramenée à sa borne.
-        this.boundDuelQueue(slot);
       }
       return true;
     }

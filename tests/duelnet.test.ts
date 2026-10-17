@@ -6,7 +6,7 @@
 import { BTN } from '../shared/input';
 import { Rng } from '../shared/math';
 import { COOP_DUEL_RULES, duelOf, kamaeLength, signalShown, startDuel } from '../shared/duel';
-import { DUEL, DUEL_QUEUE_LIMIT, DUEL_WHY } from '../shared/constants';
+import { DUEL, DUEL_QUEUE_HARD, DUEL_QUEUE_LIMIT, DUEL_WHY } from '../shared/constants';
 import type { GameEvent } from '../shared/types';
 import { type BenchClient, NetBench, percentile } from './net/harness';
 
@@ -545,14 +545,15 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
   // moins 230 ticks (à son tick `at`) : la file stricte dépasse DUEL.QUEUE_MAX à cadence honnête. Pas de forfait FLOOD :
   // la file est ramenée à sa borne sans avancer les entrées de la garde en cours (A, le plus rapide, gagne la manche à sa
   // réaction), puis la série se joue jusqu'au bout, sans faute ni recalage de la prédiction.
-  const longStall = (kind: 'coupure' | 'gel' | 'gels', ms: number, at: number) => {
+  // `react` : réactions de A et B ; kind 'aucun' : même scène (même graine) sans coupure ni gel, pour référence.
+  const longStall = (kind: 'coupure' | 'gel' | 'gels' | 'aucun', ms: number, at: number, react: [number, number] = [20, 30]) => {
     const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 120 + ms / 100 + at);
     const [A, B] = cs;
     let id = w.nextId;
     while (kamaeLength(id, 0) < 230) id++;
     w.nextId = id;
     const d = startDuel(w, pa, pb, { ...COOP_DUEL_RULES, firstTo: 3 })!;
-    const script = releaseAt(bench, cs, new Map([[A.pid, 20], [B.pid, 30]]));
+    const script = releaseAt(bench, cs, new Map([[A.pid, react[0]], [B.pid, react[1]]]));
     // Files à la réception : pleine (déjà QUEUE_MAX entrées) combien de fois, et la plus longue après l'entrée.
     let full = 0;
     let peak = 0;
@@ -566,7 +567,7 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     for (let k = 0; k < 2000 && !(d.phase === 'kamae' && d.t >= at); k++) bench.run(1000 / 60, script, calm);
     const snaps0 = cs.map((c) => c.src.predictor.snaps);
     if (kind === 'coupure') bench.cut(B, ms);
-    else bench.freezeServer(ms, script, calm);
+    else if (kind !== 'aucun') bench.freezeServer(ms, script, calm);
     if (kind === 'gels') {
       bench.run(500, script, calm);
       bench.freezeServer(ms, script, calm);
@@ -575,19 +576,47 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
     const rounds = server.filter((e): e is Extract<DuelEv, { type: 'duelRound' }> => e.type === 'duelRound');
     const ends = server.filter((e): e is Extract<DuelEv, { type: 'duelEnd' }> => e.type === 'duelEnd');
     const ra = (e: Extract<DuelEv, { type: 'duelRound' }>) => (d.a.pid === A.pid ? e.ra : e.rb);
+    const rb = (e: Extract<DuelEv, { type: 'duelRound' }>) => (d.a.pid === A.pid ? e.rb : e.ra);
     const first = rounds[0];
     const fouls = rounds.filter((e) => e.why === DUEL_WHY.FOUL || e.why === DUEL_WHY.DOUBLE_FOUL).length;
     const resets = cs.map((c, i) => c.src.predictor.snaps - snaps0[i]);
+    const sig = (e: Extract<DuelEv, { type: 'duelRound' }> | undefined) => (e ? `${e.winner === A.pid ? 'A' : e.winner === B.pid ? 'B' : '-'}:${e.why}(${ra(e)}/${rb(e)})` : 'aucune');
+    // Sans la manche en cours : file pleine au moins une fois et bornée, aucune faute ni recalage, série jouée jusqu'au bout.
     const ok = full > 0 && peak <= DUEL_QUEUE_LIMIT && fouls === 0 && resets.every((r) => r === 0) &&
-      !!first && first.why === DUEL_WHY.IPPON && first.winner === A.pid && ra(first) === 20 &&
       rounds.length >= 3 && ends.length === 1 && ends[0].why === DUEL_WHY.WIN && !w.duels!.includes(d);
-    const info = `file pleine ${full} fois, au plus ${peak} ; ${rounds.map((e) => `${e.winner === A.pid ? 'A' : e.winner === B.pid ? 'B' : '-'}:${e.why}(${ra(e)})`).join(' ')} ; recalages ${resets.join('/')} ; fin ${ends.map((e) => e.why).join(',')}`;
-    return { ok, info };
+    const info = `file pleine ${full} fois, au plus ${peak} ; ${rounds.map((e) => sig(e)).join(' ')} ; recalages ${resets.join('/')} ; fin ${ends.map((e) => e.why).join(',')}`;
+    return { ok, info, first: sig(first), firstIppon: !!first && first.why === DUEL_WHY.IPPON && first.winner === A.pid && ra(first) === react[0] };
   };
   for (const [kind, ms, at] of [['coupure', 5500, 10], ['gel', 5000, 10], ['gels', 3000, 10], ['gel', 8000, 10], ['gel', 8000, 100]] as ['coupure' | 'gel' | 'gels', number, number][]) {
     const r = longStall(kind, ms, at);
     const what = kind === 'coupure' ? `coupure montante de ${ms / 1000} s` : kind === 'gel' ? `gel du serveur de ${ms / 1000} s` : `gels du serveur de ${ms / 1000} s + ${ms / 1000} s à 500 ms d'écart`;
-    check(`${what} pendant une garde (≥ 230 ticks, à son tick ${at}), clients honnêtes : pas de forfait FLOOD, file bornée, manche en cours jugée à son tick, série jouée jusqu'au bout`, r.ok, r.info);
+    check(`${what} pendant une garde (≥ 230 ticks, à son tick ${at}), clients honnêtes : pas de forfait FLOOD, file bornée, manche en cours jugée à son tick, série jouée jusqu'au bout`, r.ok && r.firstIppon, r.info);
+  }
+  // Borne de protection pendant la garde (sigTick + DUEL_ROUND_LAST) : réactions tardives, jusqu'à la fin de la fenêtre de
+  // la manche. Les entrées encore jugeables ne sont ni retirées ni avancées : la manche en cours se juge exactement comme
+  // le même duel joué sans gel (vainqueur, issue, réactions de A et de B). Une protection réduite (ex. sigTick + 30)
+  // fabrique ici des 相打ち ou des réactions plus rapides.
+  for (const [ms, at, react] of [[8000, 100, [236, 246]], [8000, 100, [239, 247]], [9000, 150, [230, 238]], [8000, 100, [60, 70]], [8000, 10, [100, 120]]] as [number, number, [number, number]][]) {
+    const ref = longStall('aucun', ms, at, react);
+    const r = longStall('gel', ms, at, react);
+    check(`gel du serveur de ${ms / 1000} s pendant la garde (tick ${at}), réactions ${react.join('/')} : manche en cours jugée comme sans gel, file bornée, série jouée`, r.ok && r.first === ref.first, `avec gel ${r.first}, sans gel ${ref.first} ; ${r.info}`);
+  }
+  // File où DUEL alterne (les appuis DUEL ne sont jamais retirés) : au-delà du plafond dur DUEL_QUEUE_HARD, forfait FLOOD,
+  // même à cadence cumulée honnête (crédit d'un long silence avant le duel). La file reste bornée.
+  {
+    const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 77);
+    const [, B] = cs;
+    const d = startDuel(w, pa, pb, COOP_DUEL_RULES)!;
+    const slotB = (bench.session as unknown as { slots: Map<number, { lastRecv: number; lastSeq: number }> }).slots.get(B.pid)!;
+    const t0 = slotB.lastRecv + 30_000; // 30 s de crédit de cadence (≈ 2250 entrées)
+    let peak = 0;
+    for (let i = 1; i <= DUEL_QUEUE_HARD + 50; i++) {
+      bench.session.pushInput(B.pid, { s: slotB.lastSeq + 1, b: i % 2 ? BTN.DUEL : 0 }, t0);
+      peak = Math.max(peak, bench.session.queueLength(B.pid));
+    }
+    bench.run(200, () => 0, calm);
+    const fl = server.filter((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
+    check('G alterné pour échapper au retrait : file plafonnée à DUEL_QUEUE_HARD, forfait FLOOD', peak <= DUEL_QUEUE_HARD + 1 && fl.length === 1 && d.phase === 'end', `file au plus ${peak} (plafond ${DUEL_QUEUE_HARD}) ; ${JSON.stringify(fl)}`);
   }
   // Client accéléré (cadence soutenue de 1,5 × ou 2 × 60 Hz) : toujours en forfait FLOOD, et perdant, file longue comprise
   // (après une coupure montante de 5,5 s : la longueur de la file n'est pas un critère, la cadence l'est).
