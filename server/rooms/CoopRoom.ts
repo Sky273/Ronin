@@ -3,13 +3,16 @@
 import { CloseCode, getMessageBytes, matchMaker, Protocol, Room, type Client, type RoomException, type RoomMethodName } from '@colyseus/core';
 import { AWAY_CLOSE_CODE, MSG, NET_TICK, PLAYER_COLORS, SNAP_EVERY, type InputMsg, type PingMsg } from '../../shared/net/protocol';
 import { DUEL, DUEL_WHY } from '../../shared/constants';
+import { isDueling } from '../../shared/duel';
 import { LagLine, lagFromEnv } from '../lag';
 import { CoopSession } from '../session';
 import { Samples } from '../stats';
 
-/** Au-delà de ce nombre de messages par seconde… */
+/** Débit permis (messages par seconde réelle) : le seau de chaque client en est crédité en continu… */
 export const RATE_LIMIT_PER_S = 120;
-/** … pendant ce nombre de secondes consécutives, le client est expulsé. */
+/** … et en garde au plus ce nombre de secondes d'avance : une rafale de rattrapage (coupure, gel) passe. */
+export const RATE_LIMIT_BURST_S = 3;
+/** Seau vide : messages ignorés ; un excès cumulé de ce nombre de secondes de débit permis → expulsion. */
 export const RATE_LIMIT_SECONDS = 2;
 /** Intervalle des statistiques dans les logs (ms) ; 0 pour les désactiver. */
 const STATS_EVERY_MS = Number(process.env.STATS_EVERY_MS ?? 10_000);
@@ -17,9 +20,8 @@ const STATS_EVERY_MS = Number(process.env.STATS_EVERY_MS ?? 10_000);
 export const MAX_ROOMS = Math.max(1, Number(process.env.MAX_ROOMS) || 50);
 
 interface RateState {
-  start: number; // début de la fenêtre d'une seconde
-  count: number; // messages dans la fenêtre
-  strikes: number; // fenêtres consécutives au-dessus de la limite
+  tokens: number; // messages encore permis (négatif : excès cumulé au-delà de la réserve)
+  at: number; // heure du dernier crédit (ms)
 }
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
@@ -52,7 +54,10 @@ export class CoopRoom extends Room {
     this.session = new CoopSession(seed);
 
     this.onMessage(MSG.input, (client: Client, msg: unknown) => {
-      if (!this.allow(client)) return;
+      // Duelliste : entrée jamais ignorée (sa file stricte suppose qu'aucune ne manque), mais comptée ; la session
+      // borne déjà cette file (cadence cumulée FLOOD, QUEUE_MAX).
+      const dueling = isDueling(this.session.world, this.pids.get(client.sessionId) ?? -1);
+      if (!this.allow(client, dueling)) return;
       if (!msg || typeof msg !== 'object') return;
       const { s, b, v } = msg as Partial<InputMsg>;
       if (!isInt(s) || !isInt(b) || s < 0) return;
@@ -90,7 +95,7 @@ export class CoopRoom extends Room {
   onJoin(client: Client, options?: { name?: unknown }): void {
     const { pid, color } = this.session.join(options?.name);
     this.pids.set(client.sessionId, pid);
-    this.rates.set(client.sessionId, { start: performance.now(), count: 0, strikes: 0 });
+    this.rates.set(client.sessionId, { tokens: RATE_LIMIT_PER_S * RATE_LIMIT_BURST_S, at: performance.now() });
     this.deliver(client, MSG.welcome, this.session.welcomeFor(pid));
     const p = this.session.world.players.find((q) => q.id === pid);
     console.log(`[coop ${this.roomId}] + ${p?.name ?? '?'} (pid ${pid}, couleur ${color}) — ${this.session.playerCount} joueur(s)`);
@@ -132,24 +137,26 @@ export class CoopRoom extends Room {
     return this.session;
   }
 
-  /** Limite de débit : plus de RATE_LIMIT_PER_S messages/s pendant RATE_LIMIT_SECONDS s → expulsion. */
-  private allow(client: Client): boolean {
+  /**
+   * Limite de débit, jugée en cumul : seau crédité de RATE_LIMIT_PER_S messages par seconde réelle, réserve de
+   * RATE_LIMIT_BURST_S s. Après une coupure, la rafale de rattrapage ne fait que rendre le temps écoulé : elle passe
+   * entière (une fenêtre d'une seconde la jetait, et décalait la file stricte d'un duelliste). Seau vide : message
+   * ignoré (sauf `keep`), l'excès s'accumule ; RATE_LIMIT_SECONDS s de débit permis en excès → expulsion.
+   */
+  private allow(client: Client, keep = false): boolean {
     const r = this.rates.get(client.sessionId);
     if (!r) return false;
     const now = performance.now();
-    if (now - r.start >= 1000) {
-      r.strikes = now - r.start < 2000 && r.count > RATE_LIMIT_PER_S ? r.strikes + 1 : 0;
-      r.start = now;
-      r.count = 0;
-    }
-    if (++r.count <= RATE_LIMIT_PER_S) return true;
-    // Fenêtre courante au-dessus de la limite : expulsion si c'est la RATE_LIMIT_SECONDS-ième d'affilée.
-    if (r.strikes + 1 >= RATE_LIMIT_SECONDS) {
+    r.tokens = Math.min(RATE_LIMIT_PER_S * RATE_LIMIT_BURST_S, r.tokens + ((now - r.at) * RATE_LIMIT_PER_S) / 1000);
+    r.at = now;
+    if (--r.tokens >= 0) return true;
+    if (r.tokens <= -RATE_LIMIT_PER_S * RATE_LIMIT_SECONDS) {
       console.warn(`[coop ${this.roomId}] client ${client.sessionId} expulsé (trop de messages)`);
       this.rates.delete(client.sessionId);
       client.leave(CloseCode.WITH_ERROR, 'trop de messages');
+      return false;
     }
-    return false; // messages excédentaires ignorés
+    return keep; // messages excédentaires ignorés
   }
 
   /** Envoi d'un message (avec latence simulée éventuelle) ; renvoie la taille encodée (0 si rien n'est envoyé). */

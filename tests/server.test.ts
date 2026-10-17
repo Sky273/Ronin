@@ -1,17 +1,19 @@
 // Tests du serveur (session pure, puis serveur réel en local avec des clients SDK).
 // Lancer : npm run test:server
 import { request, type ClientRequest } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { Client, type Room } from '@colyseus/sdk';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
 import { AWAY_CLOSE_CODE, BUTTON_MASK, MAX_REWIND_TICKS, MSG, PLAYER_COLORS, sanitizePlayerName, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
-import type { Player } from '../shared/types';
+import type { GameEvent, Player } from '../shared/types';
 import { CloseCode, matchMaker } from '@colyseus/core';
 import { MAX_HTTP_BODY, MAX_PAYLOAD, startServer } from '../server/app';
-import { MAX_ROOMS, type CoopRoom } from '../server/rooms/CoopRoom';
+import { MAX_ROOMS, RATE_LIMIT_BURST_S, RATE_LIMIT_PER_S, type CoopRoom } from '../server/rooms/CoopRoom';
 import { LagLine } from '../server/lag';
 import { IDLE_RELEASE_TICKS, MAX_INPUT_QUEUE, MAX_STEPS_PER_UPDATE, CoopSession } from '../server/session';
-import { COOP_AWAY_TICKS, COOP_CLEARED_TICKS, COOP_KICK_TICKS, COOP_READY_AFTER } from '../shared/constants';
+import { COOP_AWAY_TICKS, COOP_CLEARED_TICKS, COOP_KICK_TICKS, COOP_READY_AFTER, DUEL, DUEL_WHY } from '../shared/constants';
+import { COOP_DUEL_RULES, forfeit, kamaeLength, startDuel } from '../shared/duel';
 import { pack as packWire, unpack as unpackRaw } from 'msgpackr';
 /** Passe un instantané par msgpack (comme sur le fil). */
 const unpackWire = (w: SnapshotWire): SnapshotWire => unpackRaw(packWire(w)) as SnapshotWire;
@@ -410,14 +412,14 @@ const last = <T>(a: T[]): T | undefined => a[a.length - 1];
     }, 2000);
     check('le départ d’un client le retire chez l’autre', gone && last(b.snaps)!.players.length === 1);
 
-    // Débit excessif (> 120 messages/s pendant 2 s) : expulsion.
+    // Débit excessif soutenu (au-delà de 120 messages/s, réserve épuisée) : expulsion.
     const c = await connect(url, 'Flood');
     await waitFor(() => !!c.welcome, 2000);
     let fs = 0;
     const flood = setInterval(() => {
       for (let i = 0; i < 4; i++) c.room.send(MSG.input, { s: fs++, b: 0 });
     }, 10);
-    const kicked = await waitFor(() => c.left, 5000);
+    const kicked = await waitFor(() => c.left, 8000);
     clearInterval(flood);
     check('client trop bavard expulsé', kicked, `${fs} messages envoyés`);
     check('les autres clients restent connectés', !b.left);
@@ -679,6 +681,27 @@ function rawPost(port: number, headers: Record<string, string | number>, send: (
   });
 }
 
+/** Requête HTTP brute (octets tels quels sur TCP) : première ligne de la réponse, « coupée » ou « délai ». */
+function rawRequest(port: number, text: string): Promise<string> {
+  return new Promise((resolve) => {
+    const s = netConnect(port, '127.0.0.1');
+    let out = '';
+    const done = (r: string) => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(r);
+    };
+    const timer = setTimeout(() => done(`délai ${out.split('\r\n')[0]}`), 3000);
+    s.on('data', (d: Buffer) => {
+      out += d.toString('latin1');
+      if (out.includes('\r\n')) done(out.split('\r\n')[0]);
+    });
+    s.on('error', (e: NodeJS.ErrnoException) => done(`coupée ${e.code ?? e.message}`));
+    s.on('close', () => done(out.split('\r\n')[0] || 'coupée'));
+    s.write(text);
+  });
+}
+
 {
   const crashes: string[] = [];
   const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
@@ -744,6 +767,25 @@ function rawPost(port: number, headers: Record<string, string | number>, send: (
       req.end('"Chunk"}');
     });
     check('petit corps chunked : lu par le garde puis transmis, place réservée', small.status === 'HTTP 200' && small.body.includes('sessionId'), `${small.status} ${small.body.slice(0, 80)}`);
+
+    // En-têtes que le framework ne saurait pas reconstruire en URL (promesse rejetée sans gestionnaire :
+    // le processus entier s'arrêtait) : 400 et connexion fermée, sans passer par le framework.
+    const badHeads: [string, string, string[]][] = [
+      ['Host invalide (espace)', 'GET /health', ['Host: a b']],
+      ['Host au port hors limites', 'GET /health', ['Host: x:99999']],
+      ['Host IPv6 non fermé', 'GET /health', ['Host: [::1']],
+      ['Host avec identifiants', 'GET /health', ['Host: user:pw@localhost']],
+      ['X-Forwarded-Proto invalide', 'GET /health', ['Host: localhost', 'X-Forwarded-Proto: a b']],
+      ['X-Forwarded-Proto en double', 'GET /health', ['Host: localhost', 'X-Forwarded-Proto: http', 'X-Forwarded-Proto: https']],
+      ['méthode TRACE', 'TRACE /health', ['Host: localhost']],
+      ['matchmaking, Host invalide', 'POST /matchmake/joinOrCreate/coop', ['Host: x:99999', 'Content-Type: application/json', 'Content-Length: 2']],
+      ['matchmaking chunked, Host invalide', 'POST /matchmake/joinOrCreate/coop', ['Host: a b', 'Content-Type: application/json', 'Transfer-Encoding: chunked']],
+    ];
+    const heads = await Promise.all(badHeads.map(([, line, hs]) => rawRequest(srv.port, `${line} HTTP/1.1\r\n${hs.join('\r\n')}\r\n\r\n${line.startsWith('POST') ? (hs.some((x) => x.startsWith('Transfer')) ? '2\r\n{}\r\n0\r\n\r\n' : '{}') : ''}`)));
+    check('en-têtes non reconstructibles (Host, X-Forwarded-Proto, identifiants, TRACE) : 400 sans passer par le framework', heads.every((s) => s === 'HTTP/1.1 400 Bad Request'), badHeads.map(([n], i) => `${n} → ${heads[i]}`).join(' ; '));
+    const okHead = await rawRequest(srv.port, 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n');
+    const healthAfter = await fetch(`http://localhost:${srv.port}/health`).then((r) => r.status).catch((e: unknown) => String(e));
+    check('après les en-têtes refusés : serveur vivant (requête brute valide et /health en 200, aucune promesse rejetée)', okHead === 'HTTP/1.1 200 OK' && healthAfter === 200 && crashes.length === 0, `${okHead} / ${healthAfter} / ${crashes.slice(0, 1).join('')}`);
     const late = await connect(url, 'still');
     opened.push(late);
     check('après les corps refusés : un joueur rejoint toujours une salle', await waitFor(() => !!late.welcome, 2000) && late.room.roomId === lastRoom.roomId);
@@ -757,6 +799,150 @@ function rawPost(port: number, headers: Record<string, string | number>, send: (
   await srv.stop();
   console.error = consoleError;
   check('plafond / corps HTTP : aucune exception non rattrapée côté serveur', crashes.length === 0, crashes.slice(0, 2).join(' | '));
+  process.off('uncaughtException', onCrash);
+  process.off('unhandledRejection', onCrash);
+}
+
+// ─── (e) Duel en vraie salle : rafale de rattrapage d'un duelliste, limite de débit ─
+// Clients SDK pilotés à 60 Hz en temps réel (rattrapage sur l'horloge, comme RemoteSource). Chaque duelliste tient
+// l'iai pendant la garde et le relâche quand son tick prédit (tick de l'instantané + entrées non acquittées, comme
+// Predictor) atteint sigTick + r : r = 40 pour A, 20 pour B (le plus rapide). Coupure : les messages de B sont retenus,
+// puis envoyés d'un coup, dans l'ordre (TCP).
+{
+  const crashes: string[] = [];
+  const onCrash = (e: unknown) => crashes.push(String((e as Error)?.stack ?? e).slice(0, 300));
+  process.on('uncaughtException', onCrash);
+  process.on('unhandledRejection', onCrash);
+  const srv = await startServer({ port: 0 });
+  const url = `ws://localhost:${srv.port}`;
+  const timers: ReturnType<typeof setInterval>[] = [];
+  try {
+    const a = await connect(url, 'Ayame');
+    const b = await connect(url, 'Benkei');
+    await waitFor(() => !!a.welcome && !!b.welcome, 3000);
+    const room = matchMaker.getLocalRoomById(a.room.roomId) as unknown as CoopRoom;
+    const s = room.coop;
+    const w = s.world;
+    const calm = (): void => {
+      w.enemies = [];
+      w.projectiles = [];
+      w.spawnTimer = 1e6;
+      w.wave.phase = 'calm';
+      w.wave.t = 0;
+      for (const p of w.players) p.iframes = 1e6;
+    };
+    calm();
+    timers.push(setInterval(calm, 20));
+    // Séquences reçues par la session (après la limite de débit de la salle) et issues des manches.
+    const got = new Map<number, number[]>();
+    const push = s.pushInput.bind(s);
+    s.pushInput = (pid, msg, atMs) => {
+      if (!got.has(pid)) got.set(pid, []);
+      got.get(pid)!.push(msg.s);
+      return push(pid, msg, atMs);
+    };
+    const rounds: Extract<GameEvent, { type: 'duelRound' }>[] = [];
+    const flush = s.flushEvents.bind(s);
+    s.flushEvents = () => {
+      for (const ev of s.pendingEvents) if (ev.type === 'duelRound') rounds.push(ev);
+      flush();
+    };
+    interface Pilot { c: TestClient; pid: number; seq: number; r: number; cut: { s: number; b: number }[] | null }
+    const pilots: Pilot[] = [a, b].map((c, i) => ({ c, pid: c.welcome!.pid, seq: 0, r: i === 0 ? 40 : 20, cut: null }));
+    const [pA, pB] = pilots;
+    const t0 = performance.now();
+    timers.push(setInterval(() => {
+      const due = Math.floor((performance.now() - t0) / STEP_MS);
+      for (const p of pilots) {
+        while (p.seq < due) {
+          const snap = last(p.c.snaps);
+          const predicted = snap ? snap.t + p.seq - Math.max(snap.ack, 0) : 0;
+          const d = snap?.duels.find((x) => x.a.pid === p.pid || x.b.pid === p.pid);
+          const iai = !!d && d.sigTick >= 0 && (d.phase === 'kamae' || d.phase === 'open') && predicted < d.sigTick + p.r;
+          const msg = { s: ++p.seq, b: iai ? BTN.IAI : 0 };
+          if (p.cut) p.cut.push(msg);
+          else p.c.room.send(MSG.input, msg);
+        }
+      }
+    }, 4));
+    const cut = async (ms: number) => {
+      pB.cut = [];
+      await sleep(ms);
+      const held = pB.cut;
+      pB.cut = null;
+      for (const m of held) b.room.send(MSG.input, m);
+    };
+    /** Duel A–B dont la garde de la manche `played` dure au moins `minKamae` ticks (id choisi en conséquence). */
+    const duelWith = (played: number, minKamae: number, maxFirst: number = DUEL.KAMAE_MAX) => {
+      let id = w.nextId;
+      while (kamaeLength(id, played) < minKamae || kamaeLength(id, 0) > maxFirst) id++;
+      w.nextId = id;
+      const pa = w.players.find((p) => p.id === pA.pid)!;
+      const pb = w.players.find((p) => p.id === pB.pid)!;
+      pb.x = pa.x + 120;
+      pb.y = pa.y;
+      return startDuel(w, pa, pb, COOP_DUEL_RULES);
+    };
+    // Trous dans les séquences reçues de B (envoyées dans l'ordre, sans saut) : entrées jetées en route.
+    const missing = () => {
+      const r = got.get(pB.pid) ?? [];
+      return Math.max(0, ...r) - new Set(r).size;
+    };
+    await sleep(500);
+    // 1. Coupure de 1,5 s pendant la mise en place : la rafale arrive pendant la garde, consommée une par tick.
+    const d1 = duelWith(0, 200);
+    check('salle : duel engagé', !!d1, `${w.players.length} joueurs`);
+    if (d1) {
+      await waitFor(() => d1.phase === 'enter' && d1.t >= 10, 3000);
+      await cut(1500);
+      await waitFor(() => rounds.length >= 1, 8000);
+      await sleep(200);
+      const rd = rounds[0];
+      const rb = rd && (d1.a.pid === pB.pid ? rd.ra : rd.rb);
+      check('salle, coupure de 1,5 s du lien montant d\'un duelliste : aucune entrée jetée par la limite de débit', missing() === 0, `${missing()} entrées manquantes sur ${pB.seq}`);
+      check('salle, coupure de 1,5 s : pas de faux départ, B (le plus rapide) gagne à sa réaction', rd?.why === DUEL_WHY.IPPON && rd.winner === pB.pid && rb >= 20 && rb <= 21, JSON.stringify(rd));
+      forfeit(w, pA.pid, DUEL_WHY.INTERRUPT);
+      await waitFor(() => !w.duels?.length, 5000);
+    }
+    // 2. Coupure de 3 s pendant le dénouement de la manche 1 : la rafale arrive pendant la garde de la manche 2.
+    const d2 = duelWith(1, 210, 120);
+    if (d2) {
+      await waitFor(() => rounds.length >= 2, 8000);
+      await waitFor(() => d2.phase === 'resolve' && d2.t >= 10, 3000);
+      await cut(3000);
+      await waitFor(() => rounds.length >= 3, 8000);
+      await sleep(200);
+      const rd = rounds[2];
+      const rb = rd && (d2.a.pid === pB.pid ? rd.ra : rd.rb);
+      check('salle, coupure de 3 s du lien montant d\'un duelliste : aucune entrée jetée par la limite de débit', missing() === 0, `${missing()} entrées manquantes sur ${pB.seq}`);
+      check('salle, coupure de 3 s : pas de faux départ à la manche suivante, B gagne à sa réaction', rd?.why === DUEL_WHY.IPPON && rd.winner === pB.pid && rb >= 20 && rb <= 21, JSON.stringify(rd));
+    }
+    check('salle : les duellistes restent connectés', !a.left && !b.left);
+    // 3. Client qui envoie durablement 5 × trop vite (300 entrées/s) : limité puis expulsé.
+    const f = await connect(url, 'Flood');
+    await waitFor(() => !!f.welcome, 2000);
+    const fPid = f.welcome!.pid;
+    let fs = 0;
+    const f0 = performance.now();
+    const ft = setInterval(() => {
+      const due = Math.floor(((performance.now() - f0) / STEP_MS) * 5);
+      while (fs < due && !f.left) f.room.send(MSG.input, { s: ++fs, b: 0 });
+    }, 4);
+    const kicked = await waitFor(() => f.left, 8000);
+    clearInterval(ft);
+    const secs = (performance.now() - f0) / 1000;
+    const accepted = got.get(fPid)?.length ?? 0;
+    check('salle : client à 5 × 60 Hz expulsé', kicked, `${fs} entrées envoyées en ${secs.toFixed(1)} s`);
+    check('salle : client à 5 × 60 Hz limité avant l\'expulsion (au plus la réserve + RATE_LIMIT_PER_S par seconde)', accepted <= RATE_LIMIT_PER_S * (secs + RATE_LIMIT_BURST_S) + 30 && accepted < fs, `${accepted} acceptées sur ${fs}`);
+    check('salle : les autres restent connectés', !a.left && !b.left);
+    await a.room.leave();
+    await b.room.leave();
+  } catch (err) {
+    check('scénario de duel en salle sans exception', false, String((err as Error)?.stack ?? err).slice(0, 400));
+  }
+  for (const t of timers) clearInterval(t);
+  await srv.stop();
+  check('duel en salle : aucune exception non rattrapée', crashes.length === 0, crashes.slice(0, 2).join(' | '));
   process.off('uncaughtException', onCrash);
   process.off('unhandledRejection', onCrash);
 }
