@@ -197,7 +197,7 @@ on doit lire :
 … statiques : N fichiers …
 ```
 
-puis, toutes les 60 s, une ligne de mesures. Le certificat Let's Encrypt est obtenu à la première visite
+puis, pour chaque salle ouverte, une ligne de mesures toutes les 60 s (aucune tant que personne ne joue : ce n'est pas une panne). Le certificat Let's Encrypt est obtenu à la première visite
 (ou dans la minute) : la toute première requête HTTPS peut afficher un avertissement le temps qu'il arrive.
 
 ---
@@ -298,7 +298,8 @@ Dans le navigateur :
 | Le navigateur signale un certificat **« TRAEFIK DEFAULT CERT »** | Let's Encrypt n'a pas pu délivrer le certificat : DNS pas encore propagé ou vers une autre IP, proxy Cloudflare actif (mettre « DNS only »), enregistrement AAAA parasite, port 80 fermé, ou `http://` au lieu de `https://` dans **Domains**. Corrigez, puis **Redeploy** (ou redémarrez le proxy). Voir les journaux du proxy (lignes `acme`). |
 | Page blanche **« 404 page not found »** (texte brut de Traefik) | Traefik ne connaît aucun conteneur pour ce domaine : nom différent dans **Domains**, déploiement échoué, ou conteneur jugé **unhealthy** (Traefik écarte les conteneurs en mauvaise santé). Regardez **Deployments** et **Logs**, puis l'état du healthcheck. |
 | **502 Bad Gateway** | Traefik joint le conteneur mais rien ne répond sur le port : **Ports Exposes** différent de `2567`, `PORT` modifié dans les variables, ou serveur planté au démarrage (voir **Logs**). |
-| Le WebSocket est refusé (**403**, ou fermé tout de suite) | `ALLOWED_ORIGINS` ne correspond pas à l'adresse de la page : vérifiez `https://`, l'orthographe exacte du domaine, pas de `/` final ni d'espace. Après correction : **Restart** (ou **Redeploy**). |
+| Le menu en ligne affiche **« The server refused to seat you: origin not allowed »** (ou le WebSocket est refusé en 403) | `ALLOWED_ORIGINS` ne correspond pas à l'adresse de la page : vérifiez `https://`, l'orthographe exacte du domaine, pas de `/` final ni d'espace (au démarrage, une origine sans `https://` est signalée par « attention : origine … »). Après correction : **Restart** (ou **Redeploy**). |
+| Journal **« [serveur] refus en 60 s : débit N, origine N, connexions N, méthode N »** | Refus des gardes, regroupés (sans adresse IP) : débit = trop de parties lancées par une même adresse, connexions = plus de `MAX_CONN_PER_IP` connexions simultanées (une adresse partagée, comme un réseau mobile ou une école, peut l'atteindre : augmentez-la), origine = page d'une autre adresse, méthode = appel de matchmaking non prévu. |
 | Erreur de **contenu mixte** (`ws://` bloqué depuis une page `https://`) | Une adresse de serveur a été figée dans le client : supprimez `VITE_SERVER_URL` des variables de Coolify, puis **Redeploy** (un rebuild est nécessaire). |
 | Message **« too many requests »** | Limite de matchmaking par IP atteinte (`MATCHMAKE_PER_MIN` / `MATCHMAKE_BURST`), ou trop de connexions simultanées (`MAX_CONN_PER_IP`). Normal en cas d'abus ; pour un lieu où beaucoup de joueurs partagent une IP, montez ces valeurs. Vérifiez aussi que `TRUST_PROXY` vaut bien 1. |
 | Message **« server full »** | Plafond de salles `MAX_ROOMS` atteint (ou salle pleine). Attendre, ou monter `MAX_ROOMS` si les ressources le permettent. |

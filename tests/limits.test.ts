@@ -4,6 +4,7 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingHttpHeaders } from 'node:http';
 import { clientIp, ConnCounter, isSecure, MAX_KEYS, originAllowed, RateBuckets, RefusalLog } from '../server/limits';
+import { keyOf } from '../server/limits';
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -40,7 +41,7 @@ function req(peer: string | undefined, headers: IncomingHttpHeaders = {}, encryp
   check('100.64/10 de confiance', clientIp(req('100.100.0.1', xff), 1) === '2.2.2.2');
   check('100.128.0.1 hors 100.64/10', clientIp(req('100.128.0.1', xff), 1) === '100.128.0.1');
   check('172.32.0.1 hors RFC 1918', clientIp(req('172.32.0.1', xff), 1) === '172.32.0.1');
-  check('IPv6 public non de confiance', clientIp(req('2001:db8::1', xff), 1) === '2001:db8::1');
+  check('IPv6 public non de confiance', clientIp(req('2001:db8::1', xff), 1) === '2001:db8:0:0::/64'); // clé de limite : son /64
   check('pair inconnu : chaîne vide', clientIp(req(undefined, xff), 1) === '');
 }
 
@@ -166,6 +167,10 @@ function req(peer: string | undefined, headers: IncomingHttpHeaders = {}, encryp
   log.tick();
   check('pas de ligne sans refus', lines.length === 3);
 }
+
+// IPv6 regroupé par /64 (clé de limite).
+check('keyOf : IPv4 inchangée', keyOf('203.0.113.9') === '203.0.113.9');
+check('keyOf : IPv6 réduite à son /64, formes équivalentes identiques', keyOf('2001:db8:1:2::a') === '2001:db8:1:2::/64' && keyOf('2001:0db8:0001:0002:ffff:0:0:1') === '2001:db8:1:2::/64' && keyOf('2001:db8::1') === '2001:db8:0:0::/64', keyOf('2001:db8::1'));
 
 if (failures) {
   console.log(`\n${failures} échec(s)`);

@@ -99,8 +99,19 @@ npm run bots -- 8 --room dojo   # the same in a dojo (bots ready up and duel)
 | `LAG_MS`, `JITTER_MS` | server | simulated latency per direction, for testing |
 | `STATS_EVERY_MS` | server | interval of the performance log (0 to disable) |
 | `SERVER_URL` | `npm run bots` | server the bots join (default `ws://localhost:2567`) |
+| `STATIC_DIR` | server | built client to serve (production: `/app/dist`); unset in development |
+| `TRUST_PROXY` | server | number of trusted reverse proxies in front (Coolify/Traefik: `1`) |
+| `ALLOWED_ORIGINS` | server | comma-separated page origins allowed to connect (e.g. `https://ronin.example.com`) |
+| `MATCHMAKE_PER_MIN`, `MATCHMAKE_BURST` | server | games joined per minute per IP, and burst (0: unlimited) |
+| `MAX_CONN_PER_IP` | server | simultaneous connections per IP (0: unlimited) |
 
 Client and server must run the same protocol version (checked on join): update both together.
+
+In production the client connects to its own origin (`wss://` on an https page); `VITE_SERVER_URL` is only needed when the game and the server are served from different addresses.
+
+### Deployment
+
+The repository ships a `Dockerfile`: a single container serves both the game and the WebSocket server on port 2567, with a `/health` check. It is deployed with **Coolify** behind its reverse proxy (HTTPS, automatic redeploy on push): see the step-by-step guide (in French) in [docs/DEPLOY.md](docs/DEPLOY.md). To try the production build locally: `npm run build`, `npm run build:server`, then `STATIC_DIR=dist npm run start:server` (PowerShell: `$env:STATIC_DIR='dist'; npm run start:server`) and open http://localhost:2567. `npm run preview` serves the client alone: set `VITE_SERVER_URL=ws://localhost:2567` at build time to play online with it.
 
 ## Controls
 

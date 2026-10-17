@@ -30,7 +30,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
 USER node
 EXPOSE 2567
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --start-interval=2s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:${PORT}/health || exit 1
 # node en PID 1 (forme exec) : il reçoit directement le SIGTERM de Docker et ferme les salles proprement.
 CMD ["node", "dist-server/index.mjs"]

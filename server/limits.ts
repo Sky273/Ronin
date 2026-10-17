@@ -66,13 +66,27 @@ function peerOf(req: ReqLike, trustProxy: number): { peer: string; trusted: bool
  */
 export function clientIp(req: ReqLike, trustProxy: number): string {
   const { peer, trusted } = peerOf(req, trustProxy);
-  if (!trusted) return peer;
+  if (!trusted) return keyOf(peer);
   const xff = headerValue(req.headers['x-forwarded-for']);
-  if (xff === undefined || xff.trim() === '') return peer;
+  if (xff === undefined || xff.trim() === '') return keyOf(peer);
   const parts = xff.split(',').map((s) => s.trim());
   const idx = parts.length - trustProxy;
   const pick = idx >= 0 ? parts[idx] : parts.find((s) => s !== '');
-  return pick ? normalizeIp(pick) : peer;
+  return keyOf(pick ? normalizeIp(pick) : peer);
+}
+
+/**
+ * Clé de limite d'une adresse : IPv4 telle quelle ; IPv6 réduite à son /64 (un abonné en reçoit au moins un et
+ * change d'adresse à volonté dedans : sans regroupement, chaque adresse aurait sa propre rafale).
+ */
+export function keyOf(ip: string): string {
+  if (!ip.includes(':')) return ip;
+  const [head, tail] = ip.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail !== undefined && tail ? tail.split(':') : [];
+  const groups = tail !== undefined ? [...left, ...new Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right] : left;
+  if (groups.length < 4) return ip;
+  return `${groups.slice(0, 4).map((g) => g.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
 /** Connexion chiffrée : socket TLS, ou X-Forwarded-Proto « https » posé par un proxy de confiance. */
