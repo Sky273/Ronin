@@ -14,7 +14,7 @@ import type { SnapshotWire } from '../shared/net/codec';
 import { makeSnapshot } from '../shared/net/snapshot';
 import { createLagComp, forgetPlayer, setLag } from '../shared/lagcomp';
 import type { GameEvent, World } from '../shared/types';
-import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_WHY } from '../shared/constants';
+import { COOP_AWAY_TICKS, COOP_KICK_TICKS, DUEL, DUEL_ROUND_LAST, DUEL_WHY } from '../shared/constants';
 import { duelOf, forfeit, isDueling, kamaeLength } from '../shared/duel';
 import { BTN } from '../shared/input';
 import { addPlayer, createWorld, removePlayer, stepWorld } from '../shared/world';
@@ -141,11 +141,15 @@ export class CoopSession {
       }
       slot.floodCount++;
       const allowed = ((now - slot.floodSince) / 1000) * NET_TICK * DUEL.FLOOD_RATE + DUEL.FLOOD_SLACK;
-      if (slot.floodCount > allowed || slot.queue.length > DUEL.QUEUE_MAX) {
+      if (slot.floodCount > allowed) {
         forfeit(this.world, pid, DUEL_WHY.FLOOD);
         slot.queue = [input];
         slot.floodSince = now;
         slot.floodCount = 0;
+      } else if (slot.queue.length > DUEL.QUEUE_MAX) {
+        // File longue à cadence honnête (coupure ou gel de plus de 5 s, gels rapprochés) : ce n'est pas un client
+        // accéléré, la file est seulement ramenée à sa borne.
+        this.boundDuelQueue(slot);
       }
       return true;
     }
@@ -204,6 +208,7 @@ export class CoopSession {
   private step(): void {
     const w = this.world;
     this.inputs.clear();
+    let starved: number[] | null = null;
     for (const slot of this.slots.values()) {
       // Arriéré de duelliste seulement : quelques entrées en file absorbent les à-coups des pas du serveur (les retirer
       // affamerait le client au pas double suivant, ses entrées consommées un tick après son tick prédit).
@@ -219,13 +224,16 @@ export class CoopSession {
         // son retard pour que des frappes différées soient jugées en bloc contre un état plus tardif.
         slot.lag = Math.max(raw, slot.lag - 1);
         this.lagStats.add(slot.lag);
-      } else if (++slot.starved > IDLE_RELEASE_TICKS) {
-        // Client muet (onglet en arrière-plan, coupure) : on relâche ses boutons plutôt que de les tenir indéfiniment.
-        // En duel, seul DUEL est relâché : tenu pendant toute la coupure, il ferait d'un appui bref un abandon
-        // (FORFEIT_HOLD). Relâcher l'iai y serait une frappe (ou une faute) que le joueur n'a pas faite, et ATTACK
-        // ou PARRY relâchés feraient d'un appui encore tenu un nouvel appui à la reprise. Un départ y donne déjà
-        // un forfait (DISCONNECT) ; un onglet muet garde son dernier masque sans frapper (TIMEOUT).
-        slot.held = isDueling(w, slot.pid) ? slot.held & ~BTN.DUEL : 0;
+      } else {
+        // Famine (coupure, gel du client) : le dernier masque reçu est répété, mais l'abandon tenu (FORFEIT_HOLD) ne
+        // compte que les entrées reçues : son compteur est en pause (w.starved), sinon les entrées retardées, comptées
+        // à leur arrivée, s'ajouteraient aux pas répétés et feraient d'un appui bref un abandon.
+        (starved ??= []).push(slot.pid);
+        // Client muet (onglet en arrière-plan, coupure) : au-delà d'IDLE_RELEASE_TICKS, ses boutons sont relâchés plutôt
+        // que tenus indéfiniment. Pas en duel : relâcher l'iai y serait une frappe (ou une faute) que le joueur n'a pas
+        // faite ; ATTACK, PARRY ou DUEL relâchés feraient d'un appui encore tenu un nouvel appui à la reprise. Un départ
+        // y donne déjà un forfait (DISCONNECT) ; un onglet muet garde son dernier masque sans frapper (TIMEOUT).
+        if (++slot.starved > IDLE_RELEASE_TICKS && !isDueling(w, slot.pid)) slot.held = 0;
       }
       this.inputs.set(slot.pid, slot.held);
       if (w.net) setLag(w.net, slot.pid, slot.lag);
@@ -234,6 +242,7 @@ export class CoopSession {
     const away: number[] = [];
     for (const slot of this.slots.values()) if (w.tick - slot.lastActive > COOP_AWAY_TICKS) away.push(slot.pid);
     if (away.length || (w.away && w.away.length)) w.away = away;
+    if (starved || (w.starved && w.starved.length)) w.starved = starved ?? NO_ONE;
     stepWorld(w, this.inputs);
     if (w.events.length) {
       for (const ev of w.events) this.events.push(ev);
@@ -264,12 +273,39 @@ export class CoopSession {
       idle = DUEL.END_TICKS - d.t + DUEL.ENTER_TICKS;
       guard = DUEL.KAMAE_MAX;
     } else return;
+    this.dropOldest(slot, Math.max(w.tick + idle - Math.max(slot.caughtUp, w.tick), slot.queue.length - guard), 0);
+  }
+
+  /**
+   * File stricte d'un duelliste au-delà de DUEL.QUEUE_MAX à cadence honnête (rafale après une coupure ou un gel de plus
+   * de 5 s, gels rapprochés) : ramenée à sa borne en retirant les plus anciennes entrées, comme trimDuelBacklog. La borne
+   * dépasse la plus longue garde : quand le 斬 suivant sera connu, le tick prédit l'aura déjà passé (vu en retard, jamais
+   * affiché en avance). Chaque entrée retirée avance d'un tick toutes les suivantes : pendant la garde, seules celles
+   * consommées après le dénouement au plus tard de la manche peuvent l'être, sinon un relâchement prévu à sigTick + r
+   * serait jugé plus tôt (réaction faussée, faute fabriquée). La file y reste sous DUEL_QUEUE_LIMIT.
+   */
+  private boundDuelQueue(slot: PlayerSlot): void {
+    const w = this.world;
+    const d = duelOf(w, slot.pid);
+    if (!d) return;
+    // Entrée de rang i consommée au tick w.tick + i (au plus tôt) ; celles de la garde en cours restent à leur tick.
+    const from = d.phase === 'kamae' || d.phase === 'open' ? d.sigTick + DUEL_ROUND_LAST + 1 - w.tick : 0;
+    this.dropOldest(slot, slot.queue.length - DUEL.QUEUE_MAX, from);
+  }
+
+  /**
+   * Retire au plus `budget` entrées de la file d'un duelliste, les plus anciennes d'abord, à partir du rang `from`. Les
+   * entrées avec DUEL restent, chacune précédée d'une entrée sans DUEL (deux appuis ne se soudent pas), ainsi que la
+   * dernière. L'accusé sautera les entrées retirées quand la suivante sera consommée (tick w.tick + from au plus tôt) :
+   * le tick prédit du client recule alors d'autant, et son tick affiché (monotone) attend qu'il le rattrape (caughtUp).
+   */
+  private dropOldest(slot: PlayerSlot, budget: number, from: number): void {
+    const w = this.world;
     const q = slot.queue;
-    let budget = Math.max(w.tick + idle - Math.max(slot.caughtUp, w.tick), q.length - guard);
-    if (budget <= 0) return;
+    if (budget <= 0 || from >= q.length - 1) return;
     const kept: InputMsg[] = [];
     for (let i = 0; i < q.length; i++) {
-      if (budget > 0 && i < q.length - 1 && !((q[i].b | q[i + 1].b) & BTN.DUEL)) {
+      if (budget > 0 && i >= from && i < q.length - 1 && !((q[i].b | q[i + 1].b) & BTN.DUEL)) {
         budget--;
         if (q[i].b !== 0) slot.lastActive = w.tick;
         continue;
@@ -277,7 +313,7 @@ export class CoopSession {
       kept.push(q[i]);
     }
     if (kept.length === q.length) return;
-    slot.caughtUp = Math.max(slot.caughtUp, w.tick) + q.length - kept.length;
+    slot.caughtUp = Math.max(slot.caughtUp, w.tick + from) + q.length - kept.length;
     slot.queue = kept;
   }
 

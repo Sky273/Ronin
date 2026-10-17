@@ -32,12 +32,24 @@ export class VirtualLink {
   private queue: { at: number; data: Uint8Array; deliver: (msg: unknown) => void }[] = [];
   private last = 0;
   private rng: Rng;
+  /** Fin de la coupure en cours (ms) : rien n'est livré avant. */
+  private until = -Infinity;
   /** Octets transmis (après msgpack). */
   bytes = 0;
   messages = 0;
+  /** Messages retenus par une coupure (ils seraient arrivés avant sa fin). */
+  delayed = 0;
 
   constructor(private clock: VirtualClock, private opts: LinkOptions) {
     this.rng = new Rng(opts.seed);
+  }
+
+  /**
+   * Coupure (TCP) : rien ne passe pendant `ms`, ni les messages déjà en route ni ceux envoyés entre-temps ; à la fin,
+   * tout ce qui aurait dû arriver arrive d'un coup, dans l'ordre.
+   */
+  cut(ms: number): void {
+    this.until = Math.max(this.until, this.clock.t + ms);
   }
 
   send(msg: unknown, deliver: (msg: unknown) => void): number {
@@ -50,10 +62,12 @@ export class VirtualLink {
     return data.byteLength;
   }
 
-  /** Livre les messages arrivés à l'heure courante. */
+  /** Livre les messages arrivés à l'heure courante (aucun pendant une coupure). */
   flush(): void {
+    if (this.clock.t < this.until) return;
     while (this.queue.length && this.queue[0].at <= this.clock.t) {
       const m = this.queue.shift()!;
+      if (m.at < this.until) this.delayed++;
       m.deliver(unpack(m.data));
     }
   }
@@ -246,6 +260,15 @@ export class NetBench {
       s.update = orig;
       return orig.call(this.session, elapsedMs + owed);
     };
+  }
+
+  /**
+   * Coupure du lien d'un client pendant `ms` (VirtualLink.cut) : montant (ses entrées), descendant (instantanés, échos)
+   * ou les deux. Les clients et le serveur continuent de tourner.
+   */
+  cut(c: BenchClient, ms: number, dir: 'up' | 'down' | 'both' = 'up'): void {
+    if (dir !== 'down') c.transport.up.cut(ms);
+    if (dir !== 'up') c.transport.down.cut(ms);
   }
 
   /** Joueur du serveur (état de référence). */

@@ -904,18 +904,35 @@ function rawRequest(port: number, text: string): Promise<string> {
       forfeit(w, pA.pid, DUEL_WHY.INTERRUPT);
       await waitFor(() => !w.duels?.length, 5000);
     }
-    // 2. Coupure de 3 s pendant le dénouement de la manche 1 : la rafale arrive pendant la garde de la manche 2.
-    const d2 = duelWith(1, 210, 120);
+    // 2. Coupure de 2 s dès le début du dénouement de la manche 1 : la rafale (120 entrées) arrive pendant la mise en place
+    // de la manche 2, dont la garde (90 à 95 ticks) est plus courte que cet arriéré. Il doit être vidé tant que les entrées
+    // sont sans effet (trimDuelBacklog) : sinon, le tick prédit de B a déjà dépassé sigTick + 20 quand le 斬 est connu,
+    // B ne charge jamais l'iai et A gagne la manche.
+    let id2 = w.nextId;
+    while (kamaeLength(id2, 1) > 95 || kamaeLength(id2, 0) > 120) id2++;
+    w.nextId = id2;
+    const d2 = duelWith(1, DUEL.KAMAE_MIN, 120);
     if (d2) {
+      // File de B au premier pas de la garde de la manche 2.
+      const guard2 = kamaeLength(d2.id, 1);
+      let q2 = -1;
+      const sess = s as unknown as { step(): void };
+      const step = sess.step.bind(s);
+      sess.step = () => {
+        if (q2 < 0 && d2.played === 1 && d2.phase === 'kamae') q2 = s.queueLength(pB.pid);
+        step();
+      };
       await waitFor(() => rounds.length >= 2, 8000);
-      await waitFor(() => d2.phase === 'resolve' && d2.t >= 10, 3000);
-      await cut(3000);
+      await waitFor(() => d2.phase === 'resolve', 3000);
+      await cut(2000);
       await waitFor(() => rounds.length >= 3, 8000);
       await sleep(200);
+      sess.step = step;
       const rd = rounds[2];
       const rb = rd && (d2.a.pid === pB.pid ? rd.ra : rd.rb);
-      check('salle, coupure de 3 s du lien montant d\'un duelliste : aucune entrée jetée par la limite de débit', missing() === 0, `${missing()} entrées manquantes sur ${pB.seq}`);
-      check('salle, coupure de 3 s : pas de faux départ à la manche suivante, B gagne à sa réaction', rd?.why === DUEL_WHY.IPPON && rd.winner === pB.pid && rb >= 20 && rb <= 21, JSON.stringify(rd));
+      check('salle, coupure de 2 s du lien montant d\'un duelliste : aucune entrée jetée par la limite de débit', missing() === 0, `${missing()} entrées manquantes sur ${pB.seq}`);
+      check('salle, coupure de 2 s pendant le dénouement : arriéré vidé avant la garde suivante, plus courte que lui', q2 >= 0 && q2 <= guard2, `file de B ${q2} au début d'une garde de ${guard2} ticks`);
+      check('salle, coupure de 2 s : la manche suivante n\'est pas faussée, B gagne à sa réaction', rd?.why === DUEL_WHY.IPPON && rd.winner === pB.pid && rb >= 20 && rb <= 21, JSON.stringify(rd));
     }
     check('salle : les duellistes restent connectés', !a.left && !b.left);
     // 3. Client qui envoie durablement 5 × trop vite (300 entrées/s) : limité puis expulsé.

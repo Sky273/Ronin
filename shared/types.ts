@@ -363,6 +363,11 @@ export interface World {
    */
   away?: number[];
   /**
+   * Coop en ligne : ids des joueurs sans entrée reçue à ce pas (famine : coupure, gel du client), posés par la session
+   * (elle répète leur dernier masque). Leur appui d'abandon (DUEL) n'y est pas compté. Absent en solo.
+   */
+  starved?: readonly number[];
+  /**
    * Coop, pendant l'arène : joueurs présents à la fermeture (seuls eux peuvent encore renforcer le
    * gardien en revenant d'absence ; un arrivant ne change rien) et nombre d'actifs retenu (ne fait que monter).
    */
