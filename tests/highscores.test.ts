@@ -120,6 +120,15 @@ const noThrow = (fn: () => unknown): boolean => {
   const astral = sanitizeName('𠀀'.repeat(20)); // idéogrammes hors BMP (2 unités UTF-16 chacun)
   check('troncature en points de code', Array.from(astral).length === MAX_NAME, String(Array.from(astral).length));
   check('pas d\'espace final après troncature', sanitizeName('abcdefghijk lmn') === 'abcdefghijk', sanitizeName('abcdefghijk lmn'));
+  // Remplissages hangul (lettres au sens Unicode, mais Default_Ignorable : rien ne s'affiche).
+  const cps = (s: string) => [...s].map((c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
+  for (const s of ['ㅤㅤㅤ', 'ᅟᅠ', 'ﾠ', '  ㅤ ​ ', '⁠﻿͏']) {
+    check(`nom invisible (${cps(s)}) → Ronin`, sanitizeName(s) === DEFAULT_NAME, cps(sanitizeName(s)));
+  }
+  check('remplissages invisibles autour d\'un nom retirés', sanitizeName('ㅤKenjiㅤ') === 'Kenji' && sanitizeName('Kenᅟji') === 'Kenji', cps(sanitizeName('ㅤKenjiㅤ')));
+  const ps = memStorage();
+  savePrefs({ difficulty: 'normal', name: 'ㅤㅤ' }, ps);
+  check('prefs : nom invisible enregistré puis relu → vide (DEFAULT_NAME à l\'affichage)', loadPrefs(ps).name === '', JSON.stringify(loadPrefs(ps).name));
 }
 
 // ─── sanitizeTable ──────────────────────────────────────────────────────────

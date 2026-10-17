@@ -44,8 +44,8 @@ export class CoopRoom extends Room {
   private lastTickAt = 0;
 
   onCreate(): void {
-    // La salle en cours de création est déjà comptée.
-    if (matchMaker.stats.local.roomCount > MAX_ROOMS) throw new Error('server full');
+    // La salle en cours de création n'est pas encore comptée (roomCount n'augmente qu'après onCreate).
+    if (matchMaker.stats.local.roomCount >= MAX_ROOMS) throw new Error('server full');
     // Graine aléatoire : Math.random est permis côté serveur (jamais dans shared/).
     // Les options de création viennent du client : elles sont volontairement ignorées.
     const seed = Math.floor(Math.random() * 0x7fffffff);
@@ -113,11 +113,16 @@ export class CoopRoom extends Room {
    */
   onUncaughtException(error: RoomException, methodName: RoomMethodName): void {
     console.error(`[coop ${this.roomId}] exception dans ${methodName} : salle fermée`, error);
+    // Pendant onCreate, le framework jette lui-même la salle et renvoie l'erreur au client (« server full ») ;
+    // disconnect y lèverait une autre exception, qui remplacerait ce message.
+    if (methodName === 'onCreate') return;
     this.disconnect(CloseCode.WITH_ERROR).catch(() => undefined);
   }
 
   onDispose(): void {
     this.lag.clear();
+    // Création refusée (salle jamais ouverte) : pas de session, rien à résumer.
+    if (!this.session) return;
     this.report();
     console.log(`[coop ${this.roomId}] salle fermée`);
   }
@@ -147,8 +152,10 @@ export class CoopRoom extends Room {
     return false; // messages excédentaires ignorés
   }
 
-  /** Envoi d'un message (avec latence simulée éventuelle) ; renvoie la taille encodée. */
+  /** Envoi d'un message (avec latence simulée éventuelle) ; renvoie la taille encodée (0 si rien n'est envoyé). */
   private deliver(client: Client, type: string, message: unknown): number {
+    // Client parti (écho d'un ping retardé, exécuté après onLeave) : rien à envoyer, son canal n'est pas recréé.
+    if (!this.pids.has(client.sessionId)) return 0;
     // Encodage identique à client.send(), mais une seule fois et mesurable.
     const bytes = getMessageBytes.raw(Protocol.ROOM_DATA, type, message);
     this.lag.run(`out:${client.sessionId}`, () => {

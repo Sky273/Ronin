@@ -390,20 +390,26 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
 {
   // 5d. Faux forfaits : un client honnête (60 Hz) victime d'une coupure réseau ou d'un à-coup du serveur
   // pendant un duel ne doit pas perdre par FLOOD (sa file se remplit d'un coup, à son insu).
-  const stall = (ms: number, kind: 'réseau' | 'serveur', times = 1): { flood: number; ended: string } => {
+  const stall = (ms: number, kind: 'réseau' | 'coupure' | 'serveur', times = 1): { flood: number; live: boolean; ended: string } => {
     const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 30 + ms + times);
     const [, B] = cs;
     const d = startDuel(w, pa, pb, COOP_DUEL_RULES)!;
     bench.run(1000, () => 0, calm);
+    const up = B.transport.up as unknown as { opts: { lagMs: number } };
     if (kind === 'réseau') {
-      // Retard ponctuel du lien montant de B (TCP : tout arrive d'un coup ensuite, dans l'ordre).
-      const up = B.transport.up as unknown as { opts: { lagMs: number } };
+      // Retard du lien montant de B pendant `ms` : un trou de `ms`, puis la rafale de ce qui a été retenu
+      // (TCP : tout arrive d'un coup ensuite, dans l'ordre), environ 2 × ms après le début.
       for (let k = 0; k < times; k++) {
         if (k) bench.run(2000, () => 0, calm);
         up.opts.lagMs = 50 + ms;
         bench.run(ms, () => 0, calm);
         up.opts.lagMs = 50;
       }
+    } else if (kind === 'coupure') {
+      // Lien montant de B figé pendant `ms` : tout ce qui est envoyé pendant la coupure arrive d'un coup, à la fin.
+      up.opts.lagMs = 50 + ms;
+      bench.run(1000 / 60, () => 0, calm);
+      up.opts.lagMs = 50;
     } else {
       // Le serveur ne tourne plus pendant `ms` (pause, machine chargée) ; le temps perdu n'est pas rattrapé.
       const s = bench.session as unknown as { update(ms: number): number };
@@ -412,19 +418,78 @@ const duelEvs = (c: BenchClient) => c.events.filter(isDuelEv);
       bench.run(ms, () => 0, calm);
       s.update = orig;
     }
-    bench.run(1500, () => 0, calm);
+    // Observation jusqu'à plus de 3 s après l'arrivée de la rafale (le duel est toujours en cours).
+    bench.run(ms + 3100, () => 0, calm);
     const fl = server.filter((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
-    return { flood: fl.length, ended: `${d.phase} ${JSON.stringify(fl)}` };
+    return { flood: fl.length, live: w.duels!.includes(d), ended: `${d.phase} ${JSON.stringify(fl)}` };
   };
   for (const kind of ['réseau', 'serveur'] as const) {
-    for (const ms of [250, 400, 700, 1000]) {
+    for (const ms of kind === 'réseau' ? [250, 400, 700, 1000, 2000] : [250, 400, 700, 1000]) {
       const r = stall(ms, kind);
-      check(`à-coup ${kind} de ${ms} ms pendant un duel (clients honnêtes à 60 Hz) : pas de forfait FLOOD`, r.flood === 0, r.ended);
+      check(`à-coup ${kind} de ${ms} ms pendant un duel (clients honnêtes à 60 Hz) : pas de forfait FLOOD`, r.flood === 0 && r.live, r.ended);
     }
+  }
+  // Coupures TCP de 1 à 3 s : la rafale de rattrapage ne fait que combler le trou, jamais de forfait FLOOD.
+  for (const ms of [1000, 1500, 2000, 3000]) {
+    const r = stall(ms, 'coupure');
+    check(`coupure TCP de ${ms} ms pendant un duel (clients honnêtes à 60 Hz), observée 3 s après la rafale : pas de forfait FLOOD`, r.flood === 0 && r.live, r.ended);
   }
   // Deux coupures de 300 ms à 2 s d'intervalle : chacune seule passe, mais la file ne se vide jamais.
   const twice = stall(300, 'réseau', 2);
-  check('deux coupures réseau de 300 ms pendant un duel : pas de forfait FLOOD', twice.flood === 0, twice.ended);
+  check('deux coupures réseau de 300 ms pendant un duel : pas de forfait FLOOD', twice.flood === 0 && twice.live, twice.ended);
+  // Client accéléré (cadence soutenue de 1,5 × ou 2 × 60 Hz) : toujours en forfait FLOOD, et perdant.
+  for (const hz of [90, 120]) {
+    const { bench, cs, w, calm, pa, pb, server } = netScene([50, 50], 60 + hz);
+    const [, B] = cs;
+    startDuel(w, pa, pb, COOP_DUEL_RULES);
+    bench.run(1000, () => 0, calm);
+    B.sendHz = hz;
+    bench.run(8000, () => 0, calm);
+    const fl = server.filter((e) => e.type === 'duelEnd' && e.why === DUEL_WHY.FLOOD);
+    check(`client accéléré à ${hz} Hz pendant un duel : forfait FLOOD, l'adversaire gagne`, fl.length === 1 && fl[0].type === 'duelEnd' && fl[0].winner >= 0 && fl[0].winner !== B.pid, JSON.stringify(fl));
+  }
+}
+{
+  // 5e. Coupure du lien montant d'un duelliste qui tient l'iai (TCP : tout arrive d'un coup ensuite). Le serveur garde
+  // son dernier masque : aucun relâchement fabriqué, donc ni faute pendant la garde, ni frappe à un instant non choisi.
+  const holdThroughCut = (ms: number, when: 'garde' | 'signal') => {
+    const { bench, cs, w, calm, pa, pb, server } = netScene([40, 40], 70 + ms);
+    const [A, B] = cs;
+    const d = startDuel(w, pa, pb, COOP_DUEL_RULES)!;
+    // Réactions voulues (tick prédit − sigTick) : A 20 / B 30 si la coupure tombe pendant la garde, B 90 / A 120 sinon.
+    const want = when === 'garde' ? new Map([[A.pid, 20], [B.pid, 30]]) : new Map([[A.pid, 120], [B.pid, 90]]);
+    let release = -1; // séquence de l'entrée par laquelle B relâche l'iai
+    let consumed = -1; // tick serveur où elle est consommée
+    const script = (i: number): number => {
+      const c = cs[i];
+      const cd = c.src.world.duels?.find((x) => x.a.pid === c.pid || x.b.pid === c.pid);
+      if (!cd || cd.sigTick < 0 || (cd.phase !== 'kamae' && cd.phase !== 'open')) return 0;
+      if (bench.predictedTick(c) < cd.sigTick + want.get(c.pid)!) return BTN.IAI;
+      if (c === B && release < 0) release = B.src.inputSeq + 1; // entrée en cours de construction
+      return 0;
+    };
+    bench.onServerStep((t) => {
+      if (release >= 0 && consumed < 0 && bench.session.ackFor(B.pid) >= release) consumed = t;
+    });
+    const start = () => (when === 'garde' ? d.phase === 'kamae' && d.t >= 20 : d.sigTick >= 0 && w.tick >= d.sigTick + 5 && (d.phase === 'kamae' || d.phase === 'open'));
+    for (let k = 0; k < 2000 && !start(); k++) bench.run(1000 / 60, script, calm);
+    const sig = d.sigTick;
+    const up = B.transport.up as unknown as { opts: { lagMs: number } };
+    up.opts.lagMs = 40 + ms;
+    bench.run(1000 / 60, script, calm);
+    up.opts.lagMs = 40;
+    for (let k = 0; k < 100 && !server.some((e) => e.type === 'duelRound'); k++) bench.run(100, script, calm);
+    const rd = server.find((e) => e.type === 'duelRound');
+    return { rd: rd?.type === 'duelRound' ? rd : undefined, sig, consumed, A, B };
+  };
+  for (const ms of [550, 700, 1000]) {
+    const { rd, A } = holdThroughCut(ms, 'garde');
+    check(`coupure de ${ms} ms pendant la garde, iai tenu : pas de faux départ, A (le plus rapide) gagne à sa réaction`, !!rd && rd.why === DUEL_WHY.IPPON && rd.winner === A.pid && rd.ra === 20, JSON.stringify(rd));
+  }
+  for (const ms of [700, 1000]) {
+    const { rd, sig, consumed, B } = holdThroughCut(ms, 'signal');
+    check(`coupure de ${ms} ms après le signal, iai tenu : B frappe quand son relâchement est consommé, pas avant`, !!rd && rd.winner === B.pid && consumed >= 0 && sig + rd.rb === consumed, `${JSON.stringify(rd)} ; relâchement consommé à sig + ${consumed - sig}`);
+  }
 }
 
 if (failures) {

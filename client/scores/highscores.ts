@@ -32,6 +32,7 @@ const isDifficulty = (v: unknown): v is DifficultyId =>
 function cleanName(s: string): string {
   const kept = s
     .normalize('NFC')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '') // invisibles, dont les « lettres » de remplissage hangul (U+3164…)
     .replace(/\s/gu, ' ') // tabulations, retours… deviennent des espaces
     .replace(/[^\p{L}\p{N} ._-]/gu, '') // contrôles, emoji, symboles retirés
     .replace(/ {2,}/g, ' ')

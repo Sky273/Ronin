@@ -225,9 +225,8 @@ export const DUEL = {
   NO_SPAWN_RANGE: 600, // aucun renfort à moins de cette distance d'un duel
   SPOT_SCAN_TILES: 6, // recherche d'un sol plat autour du point médian
   SUSPECT_REACT: 10, // réaction < 167 ms (à peine au-dessus du seuil de faute) : journalisée par le serveur
-  FLOOD_WINDOW_MS: 2000, // duelliste : cadence d'entrées jugée sur cette fenêtre (temps réel serveur)
-  FLOOD_RATE: 1.25, // au-delà de 60 Hz × FLOOD_RATE (+ marge) sur la fenêtre : client accéléré, forfait
-  FLOOD_SLACK: 30, // marge d'entrées tolérée sur la fenêtre (rattrapage après une coupure)
+  FLOOD_RATE: 1.25, // duelliste : entrées cumulées au-delà de 60 Hz × FLOOD_RATE (+ marge) : client accéléré, forfait
+  FLOOD_SLACK: 30, // marge d'entrées tolérée sur ce cumul (temps réel serveur depuis le début du duel)
   QUEUE_MAX: 300, // file stricte d'un duelliste : borne mémoire (5 s), au-delà forfait
 } as const;
 
