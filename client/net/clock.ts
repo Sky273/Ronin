@@ -27,6 +27,12 @@ const SNAP_TICKS = 30;
  */
 const SHIFT_SAMPLES = 4;
 const SHIFT_SPAN_MS = 100;
+/**
+ * Durée (ms) pendant laquelle un recul supposé reste dû : un pic de latence de quelques secondes est
+ * repris d'un coup à son retour. Au-delà, le recul est tenu pour acquis (gel du serveur : pas perdus),
+ * et une baisse de latence ultérieure est rattrapée en douceur, pas par un saut.
+ */
+const OWED_MS = 10000;
 /** Vitesse d'évolution du délai d'interpolation (ticks par seconde) : vite à la hausse, lentement à la baisse. */
 const DELAY_UP_PER_S = 1;
 const DELAY_DOWN_PER_S = 0.25;
@@ -79,7 +85,7 @@ export class ServerClock {
         for (const s of this.samples) if (s.offset > max) max = s.offset;
         this.est = this.tick;
         this.owed = (recvAt < this.owedUntil ? this.owed : 0) + before - max;
-        this.owedUntil = recvAt + WINDOW_MS;
+        this.owedUntil = recvAt + OWED_MS;
       }
     }
     this.target = max;
@@ -135,7 +141,9 @@ export class ServerClock {
     const free = this.est + dtMs * TICKS_PER_MS;
     const err = want - free;
     if (Math.abs(err) > SNAP_TICKS) {
-      this.est = Math.max(this.est, want);
+      // En arrière, l'estimation revient sur la cible sans passer sous le tick déjà rendu : recul de
+      // chronologie que la fenêtre n'a pas vu (trou de mesures plus long qu'elle, gel du serveur).
+      this.est = Math.max(err > 0 ? this.est : this.tick, want);
     } else {
       const skew = err < -SLOW_FROM ? Math.max(-1, -MAX_SKEW + (err + SLOW_FROM) * SLOW_GAIN) : clamp(err * SKEW_GAIN, -MAX_SKEW, MAX_SKEW);
       // Sur un long intervalle, ne pas dépasser la cible à cause de la correction.
