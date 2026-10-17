@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { createEndpoint, createRouter, defineRoom, defineServer, matchMaker, type Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
 import { ROOMS } from '../shared/net/protocol';
+import type { GuardOptions } from './config';
 import { CoopRoom } from './rooms/CoopRoom';
 import { DojoRoom } from './rooms/DojoRoom';
 
@@ -19,6 +20,12 @@ export interface StartOptions {
   handleSignals?: boolean;
   /** Bannière Colyseus au démarrage. */
   greet?: boolean;
+  /** Dossier du client construit (dist/) servi par le serveur (production) ; absent : aucun fichier statique. */
+  staticDir?: string;
+  /** Durcissement pour Internet (limites par IP, origines) ; absent : aucun contrôle. */
+  guard?: GuardOptions;
+  /** Méthodes de matchmaking permises (production : joinOrCreate) ; absent : toutes. */
+  matchmakeMethods?: string[];
 }
 
 export interface RunningServer {
