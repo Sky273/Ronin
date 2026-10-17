@@ -3,6 +3,7 @@
 import { Client, MatchMakeError, ServerError, type Room } from '@colyseus/sdk';
 import type { SnapshotWire } from '../../shared/net/codec';
 import { AWAY_CLOSE_CODE, MSG, PROTOCOL_VERSION, ROOMS, type InputMsg, type RoomName, type WelcomeMsg } from '../../shared/net/protocol';
+import { resolveServerUrl } from './serverUrl';
 import type { Transport } from './transport';
 
 /** Nom de la salle coopérative côté serveur. */
@@ -17,17 +18,21 @@ const MAX_PENDING_SNAPS = 8;
 
 export const UNREACHABLE = 'Server unreachable — is it running?';
 
-/** Adresse du serveur : variable d'environnement Vite, sinon serveur local de développement. */
+/** Adresse du serveur : variable d'environnement Vite, sinon serveur local en dev, sinon même origine que la page. */
 export function defaultServerUrl(): string {
-  const env = import.meta.env.VITE_SERVER_URL as string | undefined;
-  return env && env.trim() ? env.trim() : 'ws://localhost:2567';
+  return resolveServerUrl(
+    import.meta.env.VITE_SERVER_URL as string | undefined,
+    typeof location !== 'undefined' ? location : null,
+    import.meta.env.DEV,
+  );
 }
 
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 /** Message lisible pour une fermeture de salle (codes de fermeture Colyseus / WebSocket). */
 function closeReason(code: number, reason?: string): string {
-  if (code === 4001) return 'The server is shutting down.';
+  // 4001 : arrêt propre du serveur (SIGTERM), en pratique un redéploiement.
+  if (code === 4001) return 'The server is restarting for an update — rejoin in a few seconds.';
   if (code === AWAY_CLOSE_CODE) return 'You were away too long — the road went on without you.';
   if (code === 4002) return reason ? `Disconnected: ${reason}` : 'Disconnected after a server error.';
   if (code === 1000 || code === 4000) return reason || 'The room was closed.';
