@@ -1,5 +1,6 @@
 // Tests de l'horloge serveur estimée face aux décrochages : gel du serveur (pas perdus, chronologie
-// reculée), hausse de latence, coupure du lien descendant (rafale TCP), pic de latence passager.
+// reculée), hausse de latence, coupure du lien descendant (rafale TCP, ou arriéré livré progressivement),
+// pic de latence passager.
 // Vérifie : le rendu ne dépasse jamais les instantanés reçus, se recale en moins d'une seconde après un
 // recul de la chronologie (sans jamais reculer), et le tick de vue envoyé au serveur est celui de l'état
 // réellement affiché (compensation de latence juste).
@@ -120,11 +121,45 @@ for (const G of [2000, 3000, 5000]) {
   check(`trou de mesures de ${G} ms (fenêtre vidée) : horloge à ±1 tick de la nouvelle chronologie en moins de 1 s`, lastOff - T1 < 1000, `écart > 1 tick jusqu’à ${(lastOff - T1).toFixed(0)} ms après la reprise`);
   check(`… sans jamais reculer ni dépasser le plafond`, mono && over <= 1e-9, `dépassement max ${over.toFixed(2)} tick`);
 }
+for (const G of [2500, 5000]) {
+  // 1e. Coupure du lien descendant de G ms, chronologie intacte : l'arriéré arrive ensuite 2 messages par
+  // image. Le premier, seul dans la fenêtre vidée, fait tomber la cible : le recul appliqué reste dû et
+  // est repris d'un coup à mesure que l'arriéré la remonte, pas à +5 %.
+  const T0 = 3000;
+  const c = new ServerClock();
+  const sent: number[] = [];
+  for (let at = 0; at <= T0 + G + 3000; at += 50) sent.push(at);
+  let k = 0;
+  let newest = -Infinity;
+  let prev = -Infinity;
+  let mono = true;
+  let over = -Infinity;
+  const T1 = T0 + G + 50; // fin de la coupure
+  let lastOff = T1;
+  for (let t = 50; t <= T1 + 3000; t += FRAME_MS) {
+    // Reçus 50 ms après l'envoi ; rien pendant la coupure ; ensuite 2 au plus par image (ordre TCP).
+    let n = 0;
+    while (k < sent.length && sent[k] + 50 <= t && (t < T0 + 50 || (t >= T1 && n < 2))) {
+      c.observe(sent[k] * TICKS_PER_MS, t);
+      newest = sent[k] * TICKS_PER_MS;
+      k++;
+      n++;
+    }
+    const cap = newest + MAX_EXTRAP + c.delayTicks();
+    const v = c.tickAt(t, cap);
+    if (v < prev) mono = false;
+    prev = v;
+    over = Math.max(over, v - cap);
+    if (t >= T1 && Math.abs(v - (t - 50) * TICKS_PER_MS) > 1) lastOff = t;
+  }
+  check(`coupure de ${G} ms, arriéré livré 2 par image : horloge à ±1 tick de la chronologie en moins de 1,5 s`, lastOff - T1 < 1500, `écart > 1 tick jusqu’à ${(lastOff - T1).toFixed(0)} ms après la fin de la coupure`);
+  check(`… sans jamais reculer ni dépasser le plafond`, mono && over <= 1e-9, `dépassement max ${over.toFixed(2)} tick`);
+}
 
 // ---------------------------------------------------------------------------
 // 2. Banc réseau : B regarde A (50 ms + gigue 10 ms) pendant un décrochage.
 // ---------------------------------------------------------------------------
-type Kind = 'gel du serveur' | 'latence en hausse' | 'coupure' | 'pic de latence';
+type Kind = 'gel du serveur' | 'latence en hausse' | 'coupure' | 'coupure, 2 par image' | 'coupure, démarrage lent' | 'pic de latence';
 interface Outcome {
   /** Images de B en sous-alimentation après la fin de l'événement, et délai de la dernière (ms). */
   under: number;
@@ -176,7 +211,7 @@ function decrochage(kind: Kind, ms: number, upMs = ms, seed = 3): Outcome {
   };
   bench.run(5000, input, track);
   const behind0 = behind.slice(-120).reduce((a, b) => a + b, 0) / 120;
-  const down = B.transport.down as unknown as { opts: { lagMs: number }; flush(): void };
+  const down = B.transport.down as unknown as { opts: { lagMs: number }; queue: { at: number }[]; flush(): void };
   if (kind === 'gel du serveur') bench.freezeServer(ms, input, track);
   else if (kind === 'latence en hausse') down.opts.lagMs = 50 + ms;
   else if (kind === 'pic de latence') {
@@ -184,11 +219,32 @@ function decrochage(kind: Kind, ms: number, upMs = ms, seed = 3): Outcome {
     bench.run(ms, input, track);
     down.opts.lagMs = 50;
   } else {
-    // Lien descendant bloqué (TCP) : rien n'arrive, puis tout d'un coup.
+    // Lien descendant bloqué (TCP) : rien n'arrive, puis l'arriéré d'un coup, ou progressivement :
+    // 2 messages par image, ou démarrage lent (1, 2, 4, 8… messages par aller-retour de 100 ms).
     const flush = down.flush;
     down.flush = () => undefined;
     bench.run(ms, input, track);
-    down.flush = flush;
+    if (kind === 'coupure') down.flush = flush;
+    else {
+      const t0 = bench.clock.t;
+      let given = 0;
+      down.flush = () => {
+        const now = bench.clock.t;
+        const quota = kind === 'coupure, 2 par image' ? 2 : 2 ** (Math.floor((now - t0) / 100) + 1) - 1 - given;
+        let due = 0;
+        while (due < down.queue.length && down.queue[due].at <= now) due++;
+        if (due <= quota) {
+          // Arriéré écoulé : le lien reprend son cours normal.
+          down.flush = flush;
+          flush.call(down);
+          return;
+        }
+        const rest = down.queue.splice(quota);
+        flush.call(down);
+        down.queue.push(...rest);
+        given += quota;
+      };
+    }
   }
   const u0 = B.src.interp.underruns;
   const f0 = bench.metrics.frames;
@@ -232,6 +288,15 @@ for (const ms of [150, 250]) {
 for (const ms of [250, 500, 1000]) {
   const o = decrochage('coupure', ms);
   check(`coupure du lien descendant ${ms} ms (rafale) : horloge revenue sur la chronologie (< 1 tick d’écart dès 1,5 s)`, o.behindDrift < 1 && o.viewOver <= 0 && o.backwards === 0, fmt(o));
+}
+// Coupures plus longues que la fenêtre de mesures : le premier message de l'arriéré arrive seul dans une
+// fenêtre vidée, la cible tombe et l'horloge recule d'un coup vers elle ; livré progressivement, l'arriéré
+// remonte la cible en escalier : le recul est repris d'un coup, pas à +5 % (dernière marche sous 30 ticks).
+for (const kind of ['coupure', 'coupure, 2 par image', 'coupure, démarrage lent'] as const) {
+  for (const ms of [2000, 2500, 3000, 5000]) {
+    const o = decrochage(kind, ms);
+    check(`${kind} : lien descendant coupé ${ms} ms, horloge revenue à ±1 tick de la chronologie en moins de 1,5 s`, o.settleMs < 1500 && o.viewOver <= 0 && o.backwards === 0, fmt(o));
+  }
 }
 // Pics courts, et plus longs que la fenêtre de mesures (2 s) : le recul supposé reste dû, repris d'un coup au retour.
 for (const [ms, up] of [[250, 250], [500, 500], [2500, 200], [3000, 200]]) {

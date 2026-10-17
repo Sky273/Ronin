@@ -197,6 +197,12 @@ section('18', () => {
     shortcutChar('m', 'Semicolon') === 'm' && shortcutChar(',', 'KeyM') === '' && shortcutChar('Enter', 'Enter') === ''
       && shortcutChar('é', 'Digit2') === '' && shortcutChar('ж', 'Semicolon') === '' && shortcutChar('Ь', 'KeyM') === 'm',
   );
+  // Signe combinant seul (thaï ้ et ื, lao ້ et ື) : position physique ; hors des lettres, ou touche morte : rien.
+  check(
+    '18 : shortcutChar, signe combinant seul (thaï, lao)',
+    shortcutChar('้', 'KeyH') === 'h' && shortcutChar('ื', 'KeyN') === 'n' && shortcutChar('້', 'KeyH') === 'h'
+      && shortcutChar('ື', 'KeyN') === 'n' && shortcutChar('़', 'BracketRight') === '' && shortcutChar('Dead', 'KeyH') === '',
+  );
   // Les trois rangées de lettres, tapées dans chaque disposition : H, M et N doivent rester joignables
   // (repli par position quand leur lettre tombe sur une touche de jeu), jamais par une touche de jeu.
   const rows = ['KeyQ KeyW KeyE KeyR KeyT KeyY KeyU KeyI KeyO KeyP BracketLeft BracketRight', 'KeyA KeyS KeyD KeyF KeyG KeyH KeyJ KeyK KeyL Semicolon Quote', 'KeyZ KeyX KeyC KeyV KeyB KeyN KeyM Comma Period Slash'].flatMap((r) => r.split(' '));
@@ -206,6 +212,8 @@ section('18', () => {
     ['AZERTY', 'azertyuiop^$qsdfghjklmùwxcvbn,;:!', 'KeyH Semicolon KeyN'], // « , » en KeyM : rien (défaut 18)
     ['Dvorak', "',.pyfgcrl/=aoeuidhtns-;qjkxbmwvz", 'KeyH KeyM KeyN'], // h et n sur J et L (attaque, iai)
     ['Colemak', "qwfpgjluy;[]arstdhneio'zxcvbkm,./", 'KeyH KeyM KeyN'], // n sur J (attaque)
+    // Kedmanee : H et N produisent des signes combinants seuls (ton ้, voyelle ื), J le ton ่ (attaque).
+    ['thaï', 'ๆไำพะัีรนยบลฟหกดเ้่าสวงผปแอิืทมใฝ', 'KeyH KeyM KeyN'],
   ];
   for (const [name, keys, want] of layouts) {
     const lc = new Controls(new FakeTarget() as never);

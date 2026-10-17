@@ -38,13 +38,14 @@ type TextFn = (key: string, code: string) => void;
 
 /**
  * Lettre (a–z) d'un raccourci mnémonique : celle que produit la touche selon la disposition
- * (M est sur « ; » en AZERTY) ; pour une lettre d'une autre écriture (cyrillique, grec…),
- * celle de la position physique, comme avant. '' sinon (« , », chiffres, touches spéciales).
+ * (M est sur « ; » en AZERTY) ; pour une lettre d'une autre écriture (cyrillique, grec…) ou un
+ * signe combinant seul (tons et voyelles thaïs, laos : H et N en Kedmanee), celle de la position
+ * physique, comme avant. '' sinon (« , », chiffres, touches spéciales).
  */
 export function shortcutChar(key: string, code: string): string {
   const k = key.length === 1 ? key.toLowerCase() : '';
   if (k >= 'a' && k <= 'z') return k;
-  if (/^\p{L}$/u.test(key) && /^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+  if (/^[\p{L}\p{M}]$/u.test(key) && /^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
   return '';
 }
 
