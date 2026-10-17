@@ -3,7 +3,11 @@
 import type Phaser from 'phaser';
 import { buildLevel, type Level } from '../shared/level';
 import { Rng } from '../shared/math';
+import { DUEL, TILE } from '../shared/constants';
+import { buildDojo, DOJO_FINAL_X, DOJO_TATAMIS } from '../shared/dojoLevel';
 import { Terrain } from '../client/render/terrain';
+import { Backdrop } from '../client/render/backdrop';
+import { C, rgba } from '../client/render/palette';
 
 export {}; // module isolé (déclarations locales au fichier)
 let failures = 0;
@@ -31,14 +35,25 @@ class FakeCtx {
   scale(x: number, y: number): void { this.m[0] *= x; this.m[1] *= y; }
   moveTo(x: number, y: number): void { this.pts.push({ x: this.m[0] * x + this.m[2], y: this.m[1] * y + this.m[3] }); }
   lineTo(x: number, y: number): void { this.moveTo(x, y); }
-  beginPath(): void {}
+  /** Remplissages : style courant et sommets du tracé (depuis beginPath). */
+  fills: { style: unknown; pts: P[] }[] = [];
+  private start = 0;
+  beginPath(): void { this.start = this.pts.length; }
   closePath(): void {}
-  fill(): void {}
+  fill(): void { this.fills.push({ style: this.fillStyle, pts: this.pts.slice(this.start) }); }
   clearRect(): void {}
   fillRect(): void {}
   createLinearGradient(): { addColorStop(): void } { return { addColorStop() {} }; }
   createRadialGradient(): { addColorStop(): void } { return { addColorStop() {} }; }
   drawImage(...args: unknown[]): void { this.draws.push({ args, op: this.globalCompositeOperation }); }
+  // Pour les couches du fond (papier : fibres au trait, grain par getImageData).
+  strokeStyle: unknown = '';
+  lineWidth = 1;
+  lineCap = '';
+  quadraticCurveTo(_cx: number, _cy: number, x: number, y: number): void { this.moveTo(x, y); }
+  stroke(): void {}
+  getImageData(_x: number, _y: number, w: number, h: number): { data: Uint8ClampedArray } { return { data: new Uint8ClampedArray(w * h * 4) }; }
+  putImageData(): void {}
 }
 
 /** Enveloppe de texture GL telle que Phaser la crée pour une CanvasTexture. */
@@ -140,7 +155,10 @@ function rig(opts: { webgl?: boolean; flipY?: boolean; level?: Level } = {}): Ri
       base = total();
       gl.subs.length = 0;
       gl.mips = 0;
-      for (const t of texs) t.context.pts.length = 0;
+      for (const t of texs) {
+        t.context.pts.length = 0;
+        t.context.fills.length = 0;
+      }
     },
   };
   r.reset();
@@ -319,6 +337,179 @@ const INK = 0x15120e;
   R.reset();
   R.terrain.flush();
   check('repaint : la tache d’avant n’est plus en attente', R.gl.subs.length === 0 && R.fulls() === 0);
+}
+
+// ─── 8. Dojo : une seule tranche, plancher, tatamis, rouleau et râtelier ──
+type Fill = { style: unknown; pts: P[] };
+const finite = (pts: P[]) => pts.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+const inBox = (pts: P[], x0: number, y0: number, x1: number, y1: number) => pts.filter((p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1).length;
+{
+  const dojo = buildDojo();
+  const floor = 18 * TILE;
+  // Les sommets de la peinture initiale sont relevés avant la remise à zéro du banc : on repeint.
+  const R = rig({ level: dojo });
+  R.terrain.repaint();
+  const t0 = R.texs[0];
+  const pts = t0.context.pts.slice();
+  check('dojo : 1792 px de large, une seule tranche (< 2048)', R.texs.length === 1 && t0.w === dojo.pxW && t0.w === 1792 && t0.h === dojo.pxH, `${R.texs.length} tranche(s), ${t0.w} × ${t0.h}`);
+  check('dojo : repaint peint la tranche et la renvoie une seule fois', pts.length > 1000 && R.fulls() === 1, `${pts.length} sommets, ${R.fulls()} refresh`);
+  check('dojo : aucun sommet NaN ou infini', finite(pts));
+  // Peinture déterministe : un second repaint trace exactement les mêmes sommets.
+  R.reset();
+  R.terrain.repaint();
+  const again = t0.context.pts;
+  check('dojo : repaint déterministe (mêmes sommets)', again.length === pts.length && again.every((p, i) => p.x === pts[i].x && p.y === pts[i].y), `${again.length} contre ${pts.length}`);
+  // Remplissages d'un style donné dont le centre tombe dans la boîte.
+  const fills = t0.context.fills.slice();
+  const center = (f: Fill) => ({ x: f.pts.reduce((s, p) => s + p.x, 0) / f.pts.length, y: f.pts.reduce((s, p) => s + p.y, 0) / f.pts.length });
+  const styled = (fs: Fill[], style: string, x0: number, y0: number, x1: number, y1: number) =>
+    fs.filter((f) => f.style === style && f.pts.length > 0 && inBox([center(f)], x0, y0, x1, y1) === 1).length;
+  // Tatamis des quarts (natte paille) et marques d'encre des duellistes à ± DUEL.GAP / 2, sous le trait de sol.
+  const half = DUEL.GAP / 2;
+  const igusa = rgba(0xa59c5e, 0.3);
+  check('dojo : quatre tatamis, un par quart', styled(fills, igusa, 0, floor, dojo.pxW, floor + 40) === 4, `${styled(fills, igusa, 0, floor, dojo.pxW, floor + 40)}`);
+  for (const [i, cx] of DOJO_TATAMIS.entries()) {
+    check(`dojo : tatami ${i} centré sur sa place (x = ${cx}), sur le plancher`, styled(fills, igusa, cx - 3, floor + 10, cx + 3, floor + 26) === 1);
+    for (const sx of [-1, 1]) {
+      const n = styled(fills, rgba(C.ink, 0.82), cx + sx * half - 8, floor + 8, cx + sx * half + 8, floor + 28);
+      check(`dojo : marque ${sx < 0 ? 'gauche' : 'droite'} du tatami ${i} (x = ${cx + sx * half})`, n >= 2, `${n}`);
+    }
+  }
+  // Finale : ensō vermillon au centre de la salle, marques vermillon à ± DUEL.GAP / 2.
+  check('dojo : ensō vermillon au centre de la finale', styled(fills, rgba(C.red, 0.78), DOJO_FINAL_X - 12, floor + 10, DOJO_FINAL_X + 12, floor + 26) === 1);
+  for (const sx of [-1, 1]) {
+    const n = styled(fills, rgba(C.red, 0.85), DOJO_FINAL_X + sx * half - 8, floor + 8, DOJO_FINAL_X + sx * half + 8, floor + 28);
+    check(`dojo : marque vermillon ${sx < 0 ? 'gauche' : 'droite'} de la finale`, n >= 2, `${n}`);
+  }
+  // Lames du plancher : des sommets jusqu'en profondeur, sur toute la largeur de la salle.
+  check('dojo : lames du plancher peintes en profondeur', inBox(pts, 80, floor + 90, dojo.pxW - 80, floor + 170) > 200);
+  check('dojo : ni herbe ni mousse sur le plancher (aucun trait au-dessus du sol hors décors)', (() => {
+    const bare = rig({ level: { ...dojo, decos: [] } });
+    bare.terrain.repaint();
+    return inBox(bare.texs[0].context.pts, 2 * TILE + 4, floor - 40, 54 * TILE - 4, floor - 6) === 0;
+  })());
+  // Décors : chaque décor seul dans la salle, dessiné sans exception et là où il se tient.
+  const only = (kind: string) => {
+    const Q = rig({ level: { ...dojo, decos: dojo.decos.filter((d) => d.kind === kind) } });
+    Q.terrain.repaint();
+    return Q.texs[0].context.fills;
+  };
+  const bareRig = rig({ level: { ...dojo, decos: [] } });
+  bareRig.terrain.repaint();
+  const bare = bareRig.texs[0].context.fills;
+  let scroll: Fill[] | null = null;
+  let rack: Fill[] | null = null;
+  let err = '';
+  try {
+    scroll = only('scroll');
+    rack = only('rack');
+  } catch (e) {
+    err = String(e);
+  }
+  check('dojo : rouleau et râtelier dessinés sans exception', !err && !!scroll && !!rack, err);
+  if (scroll && rack) {
+    const inside = (fs: Fill[], x0: number, y0: number, x1: number, y1: number) => fs.filter((f) => f.pts.length > 0 && inBox([center(f)], x0, y0, x1, y1) === 1).length;
+    const sd = dojo.decos.find((d) => d.kind === 'scroll')!;
+    const s = sd.s;
+    const extra = inside(scroll, sd.x - 50, sd.y - 300 * s, sd.x + 50, sd.y - 40 * s) - inside(bare, sd.x - 50, sd.y - 300 * s, sd.x + 50, sd.y - 40 * s);
+    check('dojo : le rouleau pend au-dessus de la place de la finale', sd.x === DOJO_FINAL_X && extra > 30, `${extra} remplissages`);
+    // Papier du rouleau : de 32 px sous la baguette (y - 236 s) à 26 px au-dessus du rouleau du bas (y - 56 s).
+    const ink = styled(scroll, rgba(C.ink, 0.92), sd.x - 22 * s, sd.y - 204 * s, sd.x + 22 * s, sd.y - 82 * s);
+    check('dojo : 道場 calligraphié trait par trait sur le papier du rouleau (12 + 12 traits)', ink === 24, `${ink} traits`);
+    check('dojo : sceau vermillon sur le rouleau', styled(scroll, rgba(C.red, 0.82), sd.x - 22 * s, sd.y - 204 * s, sd.x, sd.y - 82 * s) === 1);
+    for (const d of dojo.decos.filter((dd) => dd.kind === 'rack')) {
+      const n = inside(rack, d.x - 60, d.y - 110, d.x + 60, d.y) - inside(bare, d.x - 60, d.y - 110, d.x + 60, d.y);
+      check(`dojo : râtelier dessiné à x = ${d.x}, posé sur le sol`, n > 40, `${n} remplissages`);
+      check(`dojo : cordon vermillon du sabre au fourreau (x = ${d.x})`, styled(rack, rgba(C.red, 0.8), d.x - 60, d.y - 110, d.x + 60, d.y) === 1);
+    }
+    check('dojo : décors sans NaN', finite(scroll.flatMap((f) => f.pts)) && finite(rack.flatMap((f) => f.pts)));
+  }
+  // Envois bornés : taches au milieu et contre les murs, rectangle rogné à la tranche de 1792 px.
+  R.reset();
+  R.terrain.stain(DOJO_TATAMIS[1], floor + 2, 6, 1, INK, 3);
+  R.terrain.flush();
+  const sub = R.gl.subs[0];
+  check('dojo : une tache = un envoi partiel, pas de refresh', R.gl.subs.length === 1 && R.fulls() === 0 && !!sub);
+  if (sub) check('dojo : rectangle petit et couvrant la tache', sub.w * sub.h < 1792 * 768 * 0.01 && covers(sub, bbox(t0.context.pts), t0.w, t0.h), JSON.stringify(sub));
+  for (const x of [2, dojo.pxW - 2]) {
+    R.reset();
+    R.terrain.stain(x, floor + 2, 8, x < 100 ? -1 : 1, INK, 9);
+    R.terrain.flush();
+    const s = R.gl.subs[0];
+    check(`dojo : tache contre le mur (x = ${x}) rognée à la tranche`, R.gl.subs.length === 1 && R.fulls() === 0 && !!s && s.x >= 0 && s.x + s.w <= t0.w && s.y >= 0 && s.y + s.h <= t0.h && covers(s, bbox(t0.context.pts), t0.w, t0.h), JSON.stringify(s));
+  }
+  // Retour au voyage : la toile reprend la taille du niveau historique, nouvelles tranches.
+  R.terrain.repaint(buildLevel());
+  check('dojo → voyage : tranches recréées à la largeur du niveau', R.texs.length > 1 && R.texs.slice(1).every((t) => t.h === 768), `${R.texs.length} textures créées`);
+}
+
+// ─── 9. Fond du dojo : couche de shōji, montagnes et lune ─────────────────
+{
+  const made = new Map<string, FakeTex>();
+  interface Spr { key: string; x: number; y: number; tilePositionX: number; tint: number | null }
+  const sprites: Spr[] = [];
+  const sprite = (x: number, y: number, key: string) => {
+    const s: Spr & Record<string, unknown> = { key, x, y, tilePositionX: 0, tint: null };
+    Object.assign(s, {
+      setOrigin: () => s,
+      setTexture: (k: string) => { s.key = k; return s; },
+      setTint: (t: number) => { s.tint = t; return s; },
+      clearTint: () => { s.tint = null; return s; },
+      setPosition: (px: number, py: number) => { s.x = px; s.y = py; return s; },
+    });
+    sprites.push(s);
+    return s;
+  };
+  const scene = {
+    scale: { width: 1280, height: 720 },
+    textures: {
+      exists: (k: string) => made.has(k),
+      createCanvas: (key: string, w: number, h: number) => { const t = new FakeTex(key, w, h, null); made.set(key, t); return t; },
+    },
+    add: {
+      image: (x: number, y: number, key: string) => sprite(x, y, key),
+      tileSprite: (x: number, y: number, _w: number, _h: number, key: string) => sprite(x, y, key),
+    },
+  };
+  const bd = new Backdrop(scene as unknown as Phaser.Scene, ((o: unknown) => o) as never);
+  const bambooKeys = [...made.keys()];
+  const [far, mid, near] = sprites.slice(2);
+  const cam = { scrollX: 224, scrollY: 151 } as unknown as Phaser.Cameras.Scene2D.Camera; // vue de la finale, au repos
+  bd.update(cam);
+  const bambooNearY = near.y;
+  let err = '';
+  try {
+    bd.setBiome('dojo');
+  } catch (e) {
+    err = String(e);
+  }
+  check('fond du dojo généré sans exception', !err, err);
+  check('fond du dojo : clés de texture propres (mFar_dojo, mMid_dojo, near_dojo)', far.key === 'mFar_dojo' && mid.key === 'mMid_dojo' && near.key === 'near_dojo' && ['mFar_dojo', 'mMid_dojo', 'near_dojo'].every((k) => made.has(k)));
+  check('fond du dojo : textures historiques de la forêt de bambous intactes', bambooKeys.every((k) => made.has(k)) && ['mFar', 'mMid', 'bamboo', 'sun'].every((k) => bambooKeys.includes(k)));
+  const shoji = made.get('near_dojo');
+  if (shoji) {
+    const sp = shoji.context.pts;
+    check('couche de shōji : 2048 px (tuilable) et beaucoup de traits', shoji.w === 2048 && sp.length > 5000, `${shoji.w} px, ${sp.length} sommets`);
+    check('couche de shōji : sans NaN', finite(sp));
+    // Double travée ouverte (512 – 1024) : pas de papier de shōji entre le linteau et le seuil.
+    const papered = (x0: number, x1: number) => inBox(sp, x0, 200, x1, 400);
+    check('couche de shōji : la double travée du centre est ouverte (store et garde-corps seulement)', papered(560, 980) < papered(1060, 1480) / 2, `${papered(560, 980)} contre ${papered(1060, 1480)}`);
+    // Raccord : le pilier de x = 0 est repeint en x = 2048.
+    check('couche de shōji : pilier repeint aux deux bords (raccord du tuilage)', inBox(sp, -12, 100, 0, 400) > 0 && inBox(sp, 2048, 100, 2060, 400) > 0);
+  }
+  bd.update(cam);
+  const lift = near.y - bambooNearY;
+  // Double saut : ~190 px ; la couche proche descend de 0,42 × 0,6 de la montée de la caméra.
+  check('fond du dojo : le mur couvre le haut de l’écran au repos et pendant un double saut', near.y <= -50 && near.y + 0.42 * 0.6 * 190 < 0, `y = ${near.y.toFixed(1)}`);
+  check('fond du dojo : couche proche remontée de 190 px', Math.abs(lift + 190) < 1e-9, `${lift}`);
+  const moon = sprites[1];
+  check('fond du dojo : lune discrète dans l’ouverture', moon.key === 'orb_moon' && moon.x > 640 && moon.x < 900, `${moon.key} en x = ${moon.x.toFixed(0)}`);
+  bd.setBiome('bamboo');
+  bd.update(cam);
+  check('retour à la forêt de bambous : couche proche à sa place historique, sans teinte', near.y === bambooNearY && near.key === 'bamboo' && near.tint === null);
+  bd.setBiome('castle');
+  bd.update(cam);
+  check('château après le dojo : décalage habituel des couches posées (-130 px)', Math.abs(near.y - bambooNearY + 130) < 1e-9);
 }
 
 if (failures) {
