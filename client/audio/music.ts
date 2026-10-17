@@ -84,7 +84,9 @@ export class Music {
   private ducked = false;
   private readonly volume = 0.42;
 
-  constructor(private ctx: AudioContext, dest: AudioNode) {
+  /** `enabled` : faux si la musique a été coupée (N) avant le déblocage de l'audio. */
+  constructor(private ctx: AudioContext, dest: AudioNode, enabled = true) {
+    this.enabled = enabled;
     this.out = ctx.createGain();
     this.out.gain.value = 0.0001;
     this.out.connect(dest);
@@ -136,7 +138,7 @@ export class Music {
 
     this.startPad();
     this.nextTime = ctx.currentTime + 0.15;
-    this.out.gain.setTargetAtTime(this.volume, ctx.currentTime, 1.2); // fondu d'entrée
+    if (this.enabled) this.out.gain.setTargetAtTime(this.volume, ctx.currentTime, 1.2); // fondu d'entrée
     this.timer = window.setInterval(() => this.schedule(), 25);
   }
 

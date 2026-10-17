@@ -2,6 +2,7 @@ import { BTN } from '../../shared/input';
 
 // On lit `event.code` (position physique de la touche) : ZQSD sur AZERTY et
 // WASD sur QWERTY tombent donc sur les mêmes boutons, sans configuration.
+// Les raccourcis mnémoniques (H, M, N) se lisent au contraire par la lettre produite (onChar).
 const KEYMAP: Record<string, number> = {
   ArrowLeft: BTN.LEFT,
   KeyA: BTN.LEFT,
@@ -34,13 +35,28 @@ const TEXT_PREVENT = new Set(['Backspace', 'Space', 'Enter', 'NumpadEnter', 'Tab
 
 type TextFn = (key: string, code: string) => void;
 
+/**
+ * Lettre (a–z) d'un raccourci mnémonique : celle que produit la touche selon la disposition
+ * (M est sur « ; » en AZERTY) ; pour une lettre d'une autre écriture (cyrillique, grec…),
+ * celle de la position physique, comme avant. '' sinon (« , », chiffres, touches spéciales).
+ */
+export function shortcutChar(key: string, code: string): string {
+  const k = key.length === 1 ? key.toLowerCase() : '';
+  if (k >= 'a' && k <= 'z') return k;
+  if (/^\p{L}$/u.test(key) && /^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+  return '';
+}
+
 export class Controls {
   private held = 0;
   private latched = 0; // pressions brèves survenues entre deux ticks
   private mouse = 0;
   private handlers = new Map<string, () => void>();
+  private charHandlers = new Map<string, () => void>();
+  private anyKey: (() => void) | null = null;
   private textFn: TextFn | null = null; // mode saisie : toutes les touches vont au champ texte
-  private muteMouse = false; // après reset() : le clic en cours (ex. « Hard ») ne doit pas devenir une attaque
+  // Heure du dernier reset() : le clic alors en cours (ex. « Hard ») ne doit pas devenir une attaque.
+  private resetAt = -Infinity;
   private padPrev = 0; // boutons de menu de la manette au tick précédent (fronts montants)
 
   constructor(target: HTMLElement) {
@@ -63,6 +79,9 @@ export class Controls {
         this.latched |= b;
       }
       this.handlers.get(e.code)?.();
+      // Une touche de jeu ne déclenche jamais de raccourci (en Colemak, J produit « n »).
+      if (!b) this.charHandlers.get(shortcutChar(e.key, e.code))?.();
+      this.anyKey?.();
     });
     window.addEventListener('keyup', (e) => {
       const b = KEYMAP[e.code];
@@ -74,13 +93,13 @@ export class Controls {
     });
     target.addEventListener('contextmenu', (e) => e.preventDefault());
     target.addEventListener('mousedown', (e) => {
-      if (this.textFn || this.muteMouse) return;
+      // Événement antérieur au reset() : c'est le clic qui l'a provoqué (Phaser l'a traité avant nous).
+      if (this.textFn || e.timeStamp <= this.resetAt) return;
       const b = e.button === 0 ? BTN.ATTACK : e.button === 2 ? BTN.PARRY : e.button === 1 ? BTN.IAI : 0;
       this.mouse |= b;
       this.latched |= b;
     });
     window.addEventListener('mouseup', (e) => {
-      this.muteMouse = false;
       const b = e.button === 0 ? BTN.ATTACK : e.button === 2 ? BTN.PARRY : e.button === 1 ? BTN.IAI : 0;
       this.mouse &= ~b;
     });
@@ -88,6 +107,16 @@ export class Controls {
 
   onKey(code: string, fn: () => void): void {
     this.handlers.set(code, fn);
+  }
+
+  /** Raccourci mnémonique, par la lettre produite (insensible à la casse), hors touches de jeu. */
+  onChar(ch: string, fn: () => void): void {
+    this.charHandlers.set(ch.toLowerCase(), fn);
+  }
+
+  /** Appelé à chaque touche pressée (hors répétition et hors saisie), après ses autres actions. */
+  onAnyKey(fn: () => void): void {
+    this.anyKey = fn;
   }
 
   /**
@@ -99,12 +128,12 @@ export class Controls {
     this.reset();
   }
 
-  /** Oublie toutes les touches et clics en cours (changement d'écran, pause…). */
+  /** Oublie toutes les touches et clics en cours (changement d'écran, pause…) ; le clic suivant compte. */
   reset(): void {
     this.held = 0;
     this.latched = 0;
     this.mouse = 0;
-    this.muteMouse = true;
+    this.resetAt = performance.now();
     this.padPrev = padMenuBits();
   }
 

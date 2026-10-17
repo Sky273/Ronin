@@ -24,13 +24,39 @@ const HELP = [
   'G   challenge / accept a duel (online) · hold G to forfeit',
 ];
 
+// Cartes d'amélioration : rangée centrée en bas de l'écran ; pendant le bilan coop, dont le panneau
+// descend jusqu'en bas (x de W/2 - 334 à W/2 + 332, voir results.ts), colonne dans la marge de gauche.
+const CARD_STEP = 190;
+const CARD_ROW_DY = 120; // centre de la rangée, depuis le bas de l'écran
+const CARD_COL_X = 153; // milieu de la marge de gauche du bilan (0 à 306 px)
+const CARD_COL_Y0 = 246; // sous le rang, la vie et l'Honneur
+const CARD_COL_STEP = 150;
+
+/** Une carte, dessinée autour de l'origine de son conteneur. */
 interface Card {
+  root: Phaser.GameObjects.Container;
   g: Phaser.GameObjects.Graphics;
   kanji: Text;
   name: Text;
   desc: Text;
   lvl: Text;
   key: Text;
+}
+
+interface Banner {
+  kanji: string;
+  title: string;
+  sub: string;
+  color: string;
+  hold: number;
+  /** Encore d'actualité au moment de l'afficher ? */
+  still?: () => boolean;
+  rank?: boolean;
+}
+
+/** setColor redessine le texte (et sa texture) à chaque appel : seulement si la couleur change. */
+function recolor(t: Text, color: string): void {
+  if (t.style.color !== color) t.setColor(color);
 }
 
 export class Hud {
@@ -54,8 +80,13 @@ export class Hud {
   private lostMark: Text;
   private cards: Card[] = [];
   private cardRoot: Phaser.GameObjects.Container;
+  private cardColumn = false;
   private offerKey = '';
   private cardsIn = 0;
+  private helpOn = true;
+  /** Fin de la tenue de la bannière en cours (scene.time.now) ; celles en attente passent ensuite. */
+  private bannerUntil = 0;
+  private queue: Banner[] = [];
   private lastCombo = 0;
   private comboPop = 0;
   private shownHp = P.MAX_HP;
@@ -87,18 +118,28 @@ export class Hud {
 
     this.cardRoot = put(scene.add.container(0, 0).setDepth(120), 'ui');
     for (let i = 0; i < 3; i++) {
-      const cx = W / 2 + (i - 1) * 190;
-      const cy = H - 120;
       const g = scene.add.graphics();
-      const kanji = scene.add.text(cx, cy - 38, '', { fontFamily: FONT_BRUSH, fontSize: '44px', color: '#15120e' }).setOrigin(0.5);
-      const name = scene.add.text(cx, cy + 4, '', { fontFamily: FONT_TEXT, fontSize: '16px', color: '#15120e' }).setOrigin(0.5);
-      const desc = scene.add.text(cx, cy + 34, '', { fontFamily: FONT_TEXT, fontSize: '12px', color: '#3a342d', align: 'center' }).setOrigin(0.5);
-      const lvl = scene.add.text(cx + 64, cy - 62, '', { fontFamily: FONT_TEXT, fontSize: '11px', color: '#4a433b' }).setOrigin(1, 0);
-      const key = scene.add.text(cx - 66, cy - 66, String(i + 1), { fontFamily: FONT_BRUSH, fontSize: '22px', color: '#b8321f' });
-      this.cardRoot.add([g, kanji, name, desc, lvl, key]);
-      this.cards.push({ g, kanji, name, desc, lvl, key });
+      const kanji = scene.add.text(0, -38, '', { fontFamily: FONT_BRUSH, fontSize: '44px', color: '#15120e' }).setOrigin(0.5);
+      const name = scene.add.text(0, 4, '', { fontFamily: FONT_TEXT, fontSize: '16px', color: '#15120e' }).setOrigin(0.5);
+      const desc = scene.add.text(0, 34, '', { fontFamily: FONT_TEXT, fontSize: '12px', color: '#3a342d', align: 'center' }).setOrigin(0.5);
+      const lvl = scene.add.text(64, -62, '', { fontFamily: FONT_TEXT, fontSize: '11px', color: '#4a433b' }).setOrigin(1, 0);
+      const key = scene.add.text(-66, -66, String(i + 1), { fontFamily: FONT_BRUSH, fontSize: '22px', color: '#b8321f' });
+      const root = scene.add.container(0, 0, [g, kanji, name, desc, lvl, key]);
+      this.cardRoot.add(root);
+      this.cards.push({ root, g, kanji, name, desc, lvl, key });
     }
+    this.placeCards();
     this.cardRoot.setVisible(false);
+  }
+
+  /** Cartes en rangée en bas de l'écran, ou en colonne à gauche du panneau du bilan coop. */
+  private placeCards(): void {
+    const W = this.scene.scale.width;
+    const H = this.scene.scale.height;
+    this.cards.forEach((c, i) => {
+      if (this.cardColumn) c.root.setPosition(CARD_COL_X, CARD_COL_Y0 + i * CARD_COL_STEP);
+      else c.root.setPosition(W / 2 + (i - 1) * CARD_STEP, H - CARD_ROW_DY);
+    });
   }
 
   /** Connexion en ligne (null hors ligne) : nombre de joueurs et latence, colorée selon la qualité. */
@@ -117,9 +158,8 @@ export class Hud {
 
   /** Nouvelle partie : oublie l'état affiché de la précédente. */
   reset(): void {
-    const els = [this.bannerKanji, this.bannerTitle, this.bannerSub];
-    this.scene.tweens.killTweensOf(els);
-    for (const e of els) e.setAlpha(0);
+    this.clearBanner();
+    this.queue = [];
     this.offerKey = '';
     this.cardsIn = 0;
     this.lastCombo = 0;
@@ -130,8 +170,10 @@ export class Hud {
     this.cardRoot.setVisible(false);
   }
 
+  /** Aide affichée ou non (H) ; elle reste effacée tant que des cartes d'amélioration sont proposées. */
   toggleHelp(): void {
-    this.help.setVisible(!this.help.visible);
+    this.helpOn = !this.helpOn;
+    this.help.setVisible(this.helpOn && !this.cardRoot.visible);
   }
 
   /** Grande bannière calligraphiée au centre de l'écran. */
@@ -145,20 +187,48 @@ export class Hud {
     this.scene.tweens.add({ targets: els, alpha: 1, duration: 220, ease: 'Sine.easeOut' });
     this.scene.tweens.add({ targets: this.bannerKanji, scale: 1, duration: 300, ease: 'Back.easeOut' });
     this.scene.tweens.add({ targets: els, alpha: 0, delay: hold, duration: 700, ease: 'Sine.easeIn' });
+    this.bannerUntil = this.scene.time.now + hold;
   }
 
-  update(p: Player, w: World, best: number, dt: number, time: number, cam: Phaser.Cameras.Scene2D.Camera): void {
+  /**
+   * Bannière montrée une fois la bannière en cours tenue jusqu'au bout (et jamais sur le bilan),
+   * si `still()` est encore vrai à ce moment.
+   */
+  queueBanner(kanji: string, title: string, sub: string, color: string, hold: number, still?: () => boolean): void {
+    this.queue.push({ kanji, title, sub, color, hold, still });
+  }
+
+  /** Efface la bannière en cours (ouverture du bilan) ; celles en attente le restent. */
+  clearBanner(): void {
+    const els = [this.bannerKanji, this.bannerTitle, this.bannerSub];
+    this.scene.tweens.killTweensOf(els);
+    for (const e of els) e.setAlpha(0);
+    this.bannerUntil = 0;
+  }
+
+  /** Bannières en attente : la suivante encore d'actualité, quand l'écran est libre. */
+  private flushBanners(free: boolean): void {
+    while (free && this.queue.length > 0 && this.scene.time.now >= this.bannerUntil) {
+      const b = this.queue.shift()!;
+      if (!b.still || b.still()) this.banner(b.kanji, b.title, b.sub, b.color, b.hold);
+    }
+  }
+
+  /** `play` : écran de jeu (hors menus et 討死 de fin de partie : ni cartes ni annonce de rang). */
+  update(p: Player, w: World, best: number, dt: number, time: number, cam: Phaser.Cameras.Scene2D.Camera, play: boolean): void {
     const g = this.g;
     g.clear();
     const r = seeded(Math.floor(time / 120));
     const W = this.scene.scale.width;
 
-    // Rang
+    // Rang : annoncé sans couper une autre bannière, ni passer par-dessus le bilan d'étape.
     const rk = rankOf(p.level);
     if (rk.kanji !== this.lastRank) {
-      if (rk.level > 0 && p.level > 0) this.banner(rk.kanji, `Rank attained: ${rk.name}`, '', '#b8321f', 1300);
+      this.queue = this.queue.filter((b) => !b.rank);
+      if (play && rk.level > 0 && p.level > 0) this.queue.push({ kanji: rk.kanji, title: `Rank attained: ${rk.name}`, sub: '', color: '#b8321f', hold: 1300, rank: true });
       this.lastRank = rk.kanji;
     }
+    this.flushBanners(play && w.stage.state !== 'cleared');
     this.rank.setText(rk.kanji);
     this.rankName.setText(`${rk.name} · level ${p.level}`);
 
@@ -209,11 +279,11 @@ export class Hud {
       this.combo.setText(`${p.combo}\n連撃`);
       this.combo.setAlpha(Math.min(1, p.comboTimer / 30));
       this.combo.setScale(1 + this.comboPop * 0.35);
-      this.combo.setColor(p.combo >= 10 ? '#b8321f' : '#15120e');
+      recolor(this.combo, p.combo >= 10 ? '#b8321f' : '#15120e');
     } else this.combo.setText('');
 
     this.updateWave(w, g, r);
-    this.updateCards(p, dt, time);
+    this.updateCards(p, w, play, dt, time);
     this.updateLostMarker(p, cam, W, time);
   }
 
@@ -223,14 +293,14 @@ export class Hud {
     const W = this.scene.scale.width;
     const boss = w.enemies.find((e) => e.type === 'boss');
     const stagePrefix = `Stage ${st.loop + 1}  ·  `;
-    if (st.state === 'arena') this.wave.setText(`${stagePrefix}門  the guardian bars the way`).setColor('#8e2416');
-    else if (st.state === 'gateOpen') this.wave.setText(`${stagePrefix}門  the gate is open — press on →`).setColor('#b8321f');
+    if (st.state === 'arena') recolor(this.wave.setText(`${stagePrefix}門  the guardian bars the way`), '#8e2416');
+    else if (st.state === 'gateOpen') recolor(this.wave.setText(`${stagePrefix}門  the gate is open — press on →`), '#b8321f');
     else if (st.state === 'cleared') this.wave.setText('');
-    else if (wv.phase === 'tide') this.wave.setText(`${stagePrefix}潮  Tide ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`).setColor('#8e2416');
+    else if (wv.phase === 'tide') recolor(this.wave.setText(`${stagePrefix}潮  Tide ${wv.n}   ${Math.min(wv.kills, wv.quota)} / ${wv.quota}`), '#8e2416');
     else if (wv.phase === 'calm') {
       const left = Math.max(0, (calmLength(w) - wv.t) / 60);
-      this.wave.setText(`${stagePrefix}凪  calm — the Tide comes in ${Math.ceil(left)} s`).setColor('#4a433b');
-    } else this.wave.setText(`${stagePrefix}潮  the Tide is rising…`).setColor('#8e2416');
+      recolor(this.wave.setText(`${stagePrefix}凪  calm — the Tide comes in ${Math.ceil(left)} s`), '#4a433b');
+    } else recolor(this.wave.setText(`${stagePrefix}潮  the Tide is rising…`), '#8e2416');
 
     if (boss) {
       this.shownBoss += (boss.hp / boss.maxHp - this.shownBoss) * 0.15;
@@ -246,7 +316,7 @@ export class Hud {
     }
   }
 
-  private updateCards(p: Player, dt: number, time: number): void {
+  private updateCards(p: Player, w: World, play: boolean, dt: number, time: number): void {
     const key = p.offer.join(',');
     if (key !== this.offerKey) {
       this.offerKey = key;
@@ -259,30 +329,36 @@ export class Hud {
         c.desc.setText(t.desc);
         c.lvl.setText(`${p.up[id]} / ${UPGRADE_MAX[id]}`);
       });
-      for (let i = 0; i < 3; i++) {
-        const vis = i < p.offer.length;
-        const c = this.cards[i];
-        for (const o of [c.g, c.kanji, c.name, c.desc, c.lvl, c.key]) o.setVisible(vis);
-      }
+      for (let i = 0; i < 3; i++) this.cards[i].root.setVisible(i < p.offer.length);
     }
-    const show = p.offer.length > 0;
+    // Choix possible seulement en jeu et vivant (1 2 3 sont ignorés pendant 討死, et hors partie).
+    const show = play && p.offer.length > 0 && p.state !== 'dead' && !p.out;
     this.cardRoot.setVisible(show);
-    if (!show) return;
+    // L'aide, en bas à gauche, s'efface pendant le choix : les cartes portent leurs touches 1 2 3.
+    const help = this.helpOn && !show;
+    if (this.help.visible !== help) this.help.setVisible(help);
+    if (!show) {
+      this.cardsIn = 0;
+      return;
+    }
+    // Bilan coop : son pied de page et le tableau de la salle passeraient sous la rangée.
+    const column = w.mode === 'coop' && w.stage.state === 'cleared';
+    if (column !== this.cardColumn) {
+      this.cardColumn = column;
+      this.placeCards();
+      this.cardsIn = 0;
+    }
     this.cardsIn = Math.min(1, this.cardsIn + dt * 4);
     const e = 1 - Math.pow(1 - this.cardsIn, 3);
     this.cardRoot.setY((1 - e) * 140).setAlpha(e);
-    const W = this.scene.scale.width;
-    const H = this.scene.scale.height;
     const r = seeded(Math.floor(time / 140));
+    const quad = [{ x: -80, y: -74 }, { x: 80, y: -76 }, { x: 82, y: 62 }, { x: -81, y: 64 }];
     for (let i = 0; i < p.offer.length; i++) {
       const g = this.cards[i].g;
       g.clear();
-      const cx = W / 2 + (i - 1) * 190;
-      const cy = H - 120;
-      gFill(g, [{ x: cx - 80, y: cy - 74 }, { x: cx + 80, y: cy - 76 }, { x: cx + 82, y: cy + 62 }, { x: cx - 81, y: cy + 64 }], C.paper, 0.94);
-      const border = [{ x: cx - 80, y: cy - 74 }, { x: cx + 80, y: cy - 76 }, { x: cx + 82, y: cy + 62 }, { x: cx - 81, y: cy + 64 }, { x: cx - 80, y: cy - 74 }];
-      gStroke(g, border, C.ink, 0.85, { width: 2.6, taperStart: 0.02, taperEnd: 0.05, jitter: 0.25 }, r);
-      gBlob(g, cx - 58, cy - 54, 13, C.red, 0.12, r, 0.2);
+      gFill(g, quad, C.paper, 0.94);
+      gStroke(g, [...quad, quad[0]], C.ink, 0.85, { width: 2.6, taperStart: 0.02, taperEnd: 0.05, jitter: 0.25 }, r);
+      gBlob(g, -58, -54, 13, C.red, 0.12, r, 0.2);
     }
   }
 

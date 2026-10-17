@@ -70,6 +70,8 @@ export class GameScene extends Phaser.Scene {
   private controls!: Controls;
   private sfx = new Sfx();
   private music: Music | null = null;
+  /** Musique voulue (N) : retenue tant que l'audio n'est pas débloqué. */
+  private musicOn = true;
   private bgCam!: Phaser.Cameras.Scene2D.Camera;
   private worldCam!: Phaser.Cameras.Scene2D.Camera;
   private uiCam!: Phaser.Cameras.Scene2D.Camera;
@@ -106,6 +108,8 @@ export class GameScene extends Phaser.Scene {
   private difficulty: DifficultyId = 'normal';
   private prefs: Prefs = { difficulty: 'normal', name: '' };
   private scores: ScoreTable = loadScores();
+  /** Dernière inscription non enregistrée (stockage indisponible) : le tableau de la session fait foi. */
+  private scoresUnsaved = false;
   private overInfo: GameOverInfo | null = null;
   private overT = 0;
   private debug = false;
@@ -214,11 +218,20 @@ export class GameScene extends Phaser.Scene {
     this.buildScreens();
 
     this.controls = new Controls(this.game.canvas);
-    this.controls.onKey('F1', () => (this.debug = !this.debug));
-    this.controls.onKey('KeyM', () => this.sfx.toggleMute());
-    this.controls.onKey('KeyN', () => this.music?.toggle());
-    this.controls.onKey('KeyH', () => this.hud.toggleHelp());
+    // Raccourcis (H, M, N par la lettre : M est sur « ; » en AZERTY). Sans effet sur l'écran 討死,
+    // où toute touche sert à passer (onAnyKey) : rien n'y bascule au passage.
+    const shortcut = (fn: () => void) => () => {
+      if (this.screen !== 'over') fn();
+    };
+    this.controls.onKey('F1', shortcut(() => (this.debug = !this.debug)));
+    this.controls.onChar('m', shortcut(() => this.sfx.toggleMute()));
+    this.controls.onChar('n', shortcut(() => (this.musicOn = this.music ? this.music.toggle() : !this.musicOn)));
+    this.controls.onChar('h', shortcut(() => this.hud.toggleHelp()));
     for (const code of MENU_KEYS) this.controls.onKey(code, () => this.menuKey(code));
+    // « press any key » : n'importe quelle touche passe l'écran 討死, après le délai minimal.
+    this.controls.onAnyKey(() => {
+      if (this.screen === 'over' && this.overT > GAME_OVER_SKIP) this.leaveGameOver();
+    });
     if (import.meta.env.DEV) {
       // Raccourcis de test : F2 phase de Marée suivante, F3 arène du gardien, F4 +100 Honneur.
       this.controls.onKey('F2', () => this.screen === 'play' && this.src === this.local && skipWavePhase(this.world));
@@ -235,8 +248,10 @@ export class GameScene extends Phaser.Scene {
         if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
         const w = this.world;
         const me = this.me;
+        // Un mort ne se bat pas en duel (startDuel le relèverait, à 0 PV).
+        if (me.state === 'dead') return;
         const other = w.players.find((p) => p.id !== me.id) ?? this.local.addEcho();
-        if (!other) return;
+        if (!other || other.state === 'dead') return;
         w.mode = 'coop';
         w.duels ??= [];
         w.duelInvites ??= [];
@@ -244,9 +259,10 @@ export class GameScene extends Phaser.Scene {
         for (const ev of w.events) this.onEvent(ev);
         w.events.length = 0;
       });
-      // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes.
+      // F7 : étape suivante (niveau généré suivant), pour parcourir les biomes. Sans effet pendant 討死 :
+      // nextStage relèverait le joueur sans renaissance (ni pénalité de mort), même sorti de la partie.
       this.controls.onKey('F7', () => {
-        if (this.screen !== 'play' || this.world.over || this.src !== this.local) return;
+        if (this.screen !== 'play' || this.world.over || this.src !== this.local || this.me.state === 'dead') return;
         nextStage(this.world);
         for (const ev of this.world.events) this.onEvent(ev);
         this.world.events.length = 0;
@@ -260,7 +276,11 @@ export class GameScene extends Phaser.Scene {
   private buildScreens(): void {
     this.titleScreen = new TitleScreen(this, this.put, {
       onPlay: () => this.goSelect(),
-      onScores: () => this.goScores(this.difficulty, -1),
+      onScores: () => {
+        // Relu à chaque ouverture : un autre onglet a pu inscrire un score entre-temps.
+        if (!this.scoresUnsaved) this.scores = loadScores();
+        this.goScores(this.difficulty, -1);
+      },
       onOnline: () => this.goOnline(),
     });
     this.onlineMenu = new OnlineMenu(this, this.put, {
@@ -292,7 +312,7 @@ export class GameScene extends Phaser.Scene {
     this.sfx.init();
     const out = this.sfx.output;
     if (out && !this.music) {
-      this.music = new Music(out.ctx, out.dest);
+      this.music = new Music(out.ctx, out.dest, this.musicOn);
       this.events.once('destroy', () => this.music?.dispose());
     }
   }
@@ -385,7 +405,8 @@ export class GameScene extends Phaser.Scene {
     this.screen = 'play';
     this.sfx.taiko(false);
     const n = this.world.players.length;
-    this.hud.banner('縁', 'The shared road', `${n} ronin on the road · Esc to leave`, '#15120e', 2400);
+    // En file : arrivé pendant le bilan, l'accueil attend qu'il se referme (rien par-dessus le bilan).
+    this.hud.queueBanner('縁', 'The shared road', `${n} ronin on the road · Esc to leave`, '#15120e', 2400);
   }
 
   /** Quitte la salle (Échap, retour du menu, connexion perdue) ; `reason` : message d'erreur à afficher. */
@@ -395,7 +416,14 @@ export class GameScene extends Phaser.Scene {
     this.pending = null;
     p?.dispose();
     this.controls.setTextMode(null);
-    if (this.src !== this.local) this.useSource(this.local); // libère la source en ligne
+    if (this.src !== this.local) {
+      this.useSource(this.local); // libère la source en ligne
+      // L'état client de la partie en ligne (best, effets, bannières) ne suit pas sur le monde local.
+      this.flash = this.shake = this.zoomPunch = this.wipe = 0;
+      this.orbStreak = this.orbStreakT = this.lastLost = 0;
+      this.best = 0;
+      this.hud.reset();
+    }
     this.results.hide();
     this.deathText.setAlpha(0);
     this.deathSub.setAlpha(0);
@@ -493,6 +521,16 @@ export class GameScene extends Phaser.Scene {
     this.labels.clear();
   }
 
+  /** Bilan de fin d'étape (結果), sans bannière par-dessus ; coop : récapitulatif de la salle et vote. */
+  private openResults(): void {
+    const w = this.world;
+    this.hud.clearBanner();
+    this.results.show(w.stage, this.me, { stage: w.level.stage, biome: w.level.biome }, w.mode === 'coop' ? buildRoster(w, this.src.meId) : undefined);
+    this.rosterShown = w.stage.byPlayer !== undefined;
+    // Le fond du biome suivant est généré pendant le bilan, pas au moment du changement d'étape.
+    this.backdrop.prewarm(biomeForStage(w.level.stage + 1));
+  }
+
   private onGameOver(info: GameOverInfo): void {
     this.overInfo = info;
     this.overT = 0;
@@ -535,7 +573,8 @@ export class GameScene extends Phaser.Scene {
     const { list, rank } = insertScore(this.scores[this.difficulty], this.entryFor(info, name));
     this.scores = { ...this.scores, [this.difficulty]: list };
     // Stockage indisponible (navigation privée, quota) : le tableau reste valable pour la session.
-    if (!saveScores(this.scores)) console.warn('Ronin.io: high scores could not be saved (storage unavailable).');
+    this.scoresUnsaved = !saveScores(this.scores);
+    if (this.scoresUnsaved) console.warn('Ronin.io: high scores could not be saved (storage unavailable).');
     this.prefs = { ...this.prefs, name };
     savePrefs(this.prefs);
     this.sfx.bell();
@@ -658,11 +697,13 @@ export class GameScene extends Phaser.Scene {
     if (this.orbStreakT <= 0) this.orbStreak = 0;
     const src = this.src;
     this.hud.setNet(src instanceof RemoteSource ? { rtt: src.rtt, jitter: src.jitterMs, players: w.players.length } : null);
-    this.hud.update(this.me, w, this.best, dt, time, this.worldCam);
+    this.hud.update(this.me, w, this.best, dt, time, this.worldCam, this.screen === 'play');
     // Bilan coop : coches « prêt », compte à rebours ; en ligne, les statistiques par joueur peuvent
     // arriver une image après l'événement stageClear : le bilan est alors réaffiché avec elles.
-    if (w.mode === 'coop' && w.stage.state === 'cleared' && this.results.visible) {
-      if (!this.rosterShown && w.stage.byPlayer) {
+    // Arrivé pendant le bilan, on n'a jamais reçu stageClear : il s'ouvre d'après l'état de l'étape.
+    if (w.mode === 'coop' && w.stage.state === 'cleared' && this.screen === 'play') {
+      if (!this.results.visible) this.openResults();
+      else if (!this.rosterShown && w.stage.byPlayer) {
         this.results.show(w.stage, this.me, { stage: w.level.stage, biome: w.level.biome }, buildRoster(w, this.src.meId));
         this.rosterShown = true;
       }
@@ -1134,7 +1175,7 @@ export class GameScene extends Phaser.Scene {
         const h = 22 * SCALE[ev.enemyType];
         fx.inkBurst(ev.x, ev.y - h, ev.dir, ev.byIai ? 34 : boss ? 70 : 22, ev.byIai ? 520 : boss ? 620 : 380);
         if (ev.byIai || boss) fx.inkBurst(ev.x, ev.y - h, ev.dir, boss ? 30 : 8, 300, C.red);
-        this.sfx.slice();
+        if (hearHit(ev.x) || boss) this.sfx.slice();
         if (mine || boss) this.addShake(boss ? 18 : 5);
         this.lastPose.delete(ev.id);
         this.prev.delete(ev.id);
@@ -1270,7 +1311,7 @@ export class GameScene extends Phaser.Scene {
         if (mine) this.addShake(8);
         break;
       case 'windSlash':
-        this.sfx.swing(true);
+        if (hearHit(ev.x)) this.sfx.swing(true);
         fx.mist(ev.x, ev.y, 4, { color: C.wash, size: 6, alpha: 0.3, vx: ev.dir * 200 });
         break;
       case 'orb': {
@@ -1342,7 +1383,8 @@ export class GameScene extends Phaser.Scene {
         break;
       case 'slam': {
         const big = ev.w > 100;
-        this.sfx.slam(big);
+        // Les ondes de choc du gardien s'entendent dans toute la salle, le slam d'un oni de près.
+        if (big || this.near(ev.x)) this.sfx.slam(big);
         fx.dust(ev.x, ev.y, 1, big ? 14 : 6);
         fx.dust(ev.x, ev.y, -1, big ? 14 : 6);
         if (big) {
@@ -1405,18 +1447,16 @@ export class GameScene extends Phaser.Scene {
           fx.sparks(sx, ev.y - 74, 10, C.red, 260);
           fx.mist(sx, ev.y - 74, 5, { color: C.redDeep, size: 6, alpha: 0.35, vy: -50, life: 0.9, front: true });
         }
-        this.hud.banner('開', 'The gate is open', 'pass through the torii to end the stage', '#b8321f', 2000);
+        // Même tick que la mort du gardien : « Akaoni has fallen! » (et son gain d'Honneur) reste
+        // lisible, la porte est annoncée ensuite, si elle est encore à franchir.
+        this.hud.queueBanner('開', 'The gate is open', 'pass through the torii to end the stage', '#b8321f', 2000, () => this.world.stage.state === 'gateOpen');
         break;
       }
       case 'stageClear':
         this.sfx.bell();
         this.flash = 0.25;
         fx.ring(this.world.level.gate.x, this.world.level.gate.y - 50, 10, 120, 0.8, C.red, 4);
-        // Coop : récapitulatif de la salle (note et statistiques de chacun, vote pour repartir).
-        this.results.show(this.world.stage, this.me, { stage: this.world.level.stage, biome: this.world.level.biome }, this.world.mode === 'coop' ? buildRoster(this.world, this.src.meId) : undefined);
-        this.rosterShown = this.world.stage.byPlayer !== undefined;
-        // Le fond du biome suivant est généré pendant le bilan, pas au moment du changement d'étape.
-        this.backdrop.prewarm(biomeForStage(this.world.level.stage + 1));
+        this.openResults();
         break;
       case 'gameOver':
         if (this.src !== this.local) break; // pas de fin de partie en coopération
