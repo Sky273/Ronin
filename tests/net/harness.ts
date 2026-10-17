@@ -5,6 +5,7 @@ import { pack, unpack } from 'msgpackr';
 import { RemoteSource } from '../../client/net/remoteSource';
 import type { Transport } from '../../client/net/transport';
 import { CoopSession } from '../../server/session';
+import { DojoSession } from '../../server/dojoSession';
 import { Rng } from '../../shared/math';
 import type { SnapshotWire } from '../../shared/net/codec';
 import { SNAP_EVERY, type InputMsg, type WelcomeMsg } from '../../shared/net/protocol';
@@ -141,6 +142,8 @@ export interface BenchOptions {
   seed?: number;
   lagMs?: number;
   jitterMs?: number;
+  /** Salle simulée : la route partagée (défaut) ou le dojo (DojoSession, tournoi). */
+  mode?: 'coop' | 'dojo';
   /** Durée d'une image client (ms). */
   frameMs?: number;
 }
@@ -173,7 +176,7 @@ export class NetBench {
   readonly frameMs: number;
 
   constructor(private opts: BenchOptions = {}) {
-    this.session = new CoopSession(opts.seed ?? 1);
+    this.session = opts.mode === 'dojo' ? new DojoSession(opts.seed ?? 1) : new CoopSession(opts.seed ?? 1);
     this.linkSeed = (opts.seed ?? 1) * 7919;
     this.frameMs = opts.frameMs ?? 1000 / 60;
   }

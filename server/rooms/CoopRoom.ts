@@ -33,7 +33,9 @@ export class CoopRoom extends Room {
   // Pas d'état Schema : pas de boucle de patchs.
   patchRate = null;
 
-  private session!: CoopSession;
+  /** Préfixe des journaux (type de salle). */
+  protected readonly label: string = 'coop';
+  protected session!: CoopSession;
   private readonly pids = new Map<string, number>();
   private readonly rates = new Map<string, RateState>();
   private readonly lag = new LagLine(lagFromEnv());
@@ -51,7 +53,7 @@ export class CoopRoom extends Room {
     // Graine aléatoire : Math.random est permis côté serveur (jamais dans shared/).
     // Les options de création viennent du client : elles sont volontairement ignorées.
     const seed = Math.floor(Math.random() * 0x7fffffff);
-    this.session = new CoopSession(seed);
+    this.session = this.createSession(seed);
 
     this.onMessage(MSG.input, (client: Client, msg: unknown) => {
       // Duelliste : entrée jamais ignorée (sa file stricte suppose qu'aucune ne manque), mais comptée ; la session
@@ -89,7 +91,7 @@ export class CoopRoom extends Room {
     this.lastTickAt = performance.now();
     this.setTimestep(() => this.tick(), 1000 / NET_TICK);
     if (STATS_EVERY_MS > 0) this.clock.setInterval(() => this.report(), STATS_EVERY_MS);
-    console.log(`[coop ${this.roomId}] salle créée (graine ${seed}${this.lag.enabled ? ', latence simulée' : ''})`);
+    console.log(`[${this.label} ${this.roomId}] salle créée (graine ${seed}${this.lag.enabled ? ', latence simulée' : ''})`);
   }
 
   onJoin(client: Client, options?: { name?: unknown }): void {
@@ -98,7 +100,7 @@ export class CoopRoom extends Room {
     this.rates.set(client.sessionId, { tokens: RATE_LIMIT_PER_S * RATE_LIMIT_BURST_S, at: performance.now() });
     this.deliver(client, MSG.welcome, this.session.welcomeFor(pid));
     const p = this.session.world.players.find((q) => q.id === pid);
-    console.log(`[coop ${this.roomId}] + ${p?.name ?? '?'} (pid ${pid}, couleur ${color}) — ${this.session.playerCount} joueur(s)`);
+    console.log(`[${this.label} ${this.roomId}] + ${p?.name ?? '?'} (pid ${pid}, couleur ${color}) — ${this.session.playerCount} joueur(s)`);
   }
 
   onLeave(client: Client): void {
@@ -109,7 +111,7 @@ export class CoopRoom extends Room {
     this.lag.forget(`out:${client.sessionId}`);
     if (pid === undefined) return;
     this.session.leave(pid);
-    console.log(`[coop ${this.roomId}] - pid ${pid} — ${this.session.playerCount} joueur(s)`);
+    console.log(`[${this.label} ${this.roomId}] - pid ${pid} — ${this.session.playerCount} joueur(s)`);
   }
 
   /**
@@ -117,7 +119,7 @@ export class CoopRoom extends Room {
    * remonter au processus, qui s'arrête avec toutes ses salles. On ne ferme que la salle fautive.
    */
   onUncaughtException(error: RoomException, methodName: RoomMethodName): void {
-    console.error(`[coop ${this.roomId}] exception dans ${methodName} : salle fermée`, error);
+    console.error(`[${this.label} ${this.roomId}] exception dans ${methodName} : salle fermée`, error);
     // Pendant onCreate, le framework jette lui-même la salle et renvoie l'erreur au client (« server full ») ;
     // disconnect y lèverait une autre exception, qui remplacerait ce message.
     if (methodName === 'onCreate') return;
@@ -129,12 +131,17 @@ export class CoopRoom extends Room {
     // Création refusée (salle jamais ouverte) : pas de session, rien à résumer.
     if (!this.session) return;
     this.report();
-    console.log(`[coop ${this.roomId}] salle fermée`);
+    console.log(`[${this.label} ${this.roomId}] salle fermée`);
   }
 
   /** Session de la salle (tests). */
   get coop(): CoopSession {
     return this.session;
+  }
+
+  /** Session d'une nouvelle salle (graine tirée par onCreate) : la route partagée. */
+  protected createSession(seed: number): CoopSession {
+    return new CoopSession(seed);
   }
 
   /**
@@ -151,7 +158,7 @@ export class CoopRoom extends Room {
     r.at = now;
     if (--r.tokens >= 0) return true;
     if (r.tokens <= -RATE_LIMIT_PER_S * RATE_LIMIT_SECONDS) {
-      console.warn(`[coop ${this.roomId}] client ${client.sessionId} expulsé (trop de messages)`);
+      console.warn(`[${this.label} ${this.roomId}] client ${client.sessionId} expulsé (trop de messages)`);
       this.rates.delete(client.sessionId);
       client.leave(CloseCode.WITH_ERROR, 'trop de messages');
       return false;
@@ -172,13 +179,13 @@ export class CoopRoom extends Room {
   }
 
   /** Renvoie les joueurs absents depuis trop longtemps : leur place revient à d'autres. */
-  private kickIdle(): void {
+  protected kickIdle(): void {
     const idle = this.session.idleOut();
     if (!idle.length) return;
     for (const client of this.clients) {
       const pid = this.pids.get(client.sessionId);
       if (pid === undefined || !idle.includes(pid)) continue;
-      console.log(`[coop ${this.roomId}] pid ${pid} renvoyé (absent)`);
+      console.log(`[${this.label} ${this.roomId}] pid ${pid} renvoyé (absent)`);
       this.pids.delete(client.sessionId);
       this.session.leave(pid);
       client.leave(AWAY_CLOSE_CODE, 'away');
@@ -189,21 +196,21 @@ export class CoopRoom extends Room {
    * Journal des duels : fin de série, et réactions anormalement rapides (< SUSPECT_REACT ticks, ~130 ms),
    * signe possible d'un script (le signal est connu à l'avance). Les sanctions viendront avec le dojo.
    */
-  private logDuels(): void {
+  protected logDuels(): void {
     for (const ev of this.session.pendingEvents) {
       if (ev.type === 'duelRound') {
         if (ev.why === DUEL_WHY.FOUL || ev.why === DUEL_WHY.DOUBLE_FOUL) continue; // anticipation honnête
         const d = this.session.world.duels?.find((x) => x.id === ev.id);
         for (const [pid, r] of [[d?.a.pid ?? -1, ev.ra], [d?.b.pid ?? -1, ev.rb]] as const) {
-          if (r >= 0 && r < DUEL.SUSPECT_REACT) console.warn(`[coop ${this.roomId}] duel ${ev.id} : réaction suspecte du joueur ${pid} : ${Math.round((r * 1000) / NET_TICK)} ms`);
+          if (r >= 0 && r < DUEL.SUSPECT_REACT) console.warn(`[${this.label} ${this.roomId}] duel ${ev.id} : réaction suspecte du joueur ${pid} : ${Math.round((r * 1000) / NET_TICK)} ms`);
         }
       } else if (ev.type === 'duelEnd') {
-        console.log(`[coop ${this.roomId}] duel ${ev.id} terminé : ${ev.wa}–${ev.wb}, vainqueur ${ev.winner}, issue ${ev.why}`);
+        console.log(`[${this.label} ${this.roomId}] duel ${ev.id} terminé : ${ev.wa}–${ev.wb}, vainqueur ${ev.winner}, issue ${ev.why}`);
       }
     }
   }
 
-  private tick(): void {
+  protected tick(): void {
     const t0 = performance.now();
     const elapsed = t0 - this.lastTickAt;
     this.lastTickAt = t0;
@@ -238,7 +245,7 @@ export class CoopRoom extends Room {
     if (this.tickMs.count) {
       const f = (v: number) => v.toFixed(3);
       console.log(
-        `[coop ${this.roomId}] ${this.session.playerCount} joueur(s) | ${(this.tickMs.count / secs).toFixed(1)} pas/s | tick p50 ${f(this.tickMs.percentile(50))} ms, p99 ${f(this.tickMs.percentile(99))} ms, max ${f(this.tickMs.max)} ms` +
+        `[${this.label} ${this.roomId}] ${this.session.playerCount} joueur(s) | ${(this.tickMs.count / secs).toFixed(1)} pas/s | tick p50 ${f(this.tickMs.percentile(50))} ms, p99 ${f(this.tickMs.percentile(99))} ms, max ${f(this.tickMs.max)} ms` +
           ` | envoi p50 ${f(this.sendMs.percentile(50))} ms, p99 ${f(this.sendMs.percentile(99))} ms` +
           ` | instantané moy. ${Math.round(this.snapBytes.mean)} o, ${(this.bytesOut / secs / 1024).toFixed(1)} Kio/s sortants` +
           ` | retard L p50 ${lag.percentile(50)}, p95 ${lag.percentile(95)} ticks`,

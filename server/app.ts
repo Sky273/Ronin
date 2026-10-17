@@ -3,7 +3,9 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import type { AddressInfo } from 'node:net';
 import { createEndpoint, createRouter, defineRoom, defineServer, matchMaker, type Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
+import { ROOMS } from '../shared/net/protocol';
 import { CoopRoom } from './rooms/CoopRoom';
+import { DojoRoom } from './rooms/DojoRoom';
 
 /** Taille maximale d'un message client (octets) : les entrées font une dizaine d'octets. */
 export const MAX_PAYLOAD = 4096;
@@ -106,7 +108,9 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
     transport,
     greet: opts.greet ?? false,
     gracefullyShutdown: opts.handleSignals ?? false,
-    rooms: { coop: defineRoom(CoopRoom) },
+    // Plafond MAX_ROOMS commun aux deux types (onCreate compte toutes les salles du processus) : il borne la charge
+    // du processus (une boucle à 60 Hz par salle, quel qu'en soit le type) ; un plafond par type la doublerait.
+    rooms: { [ROOMS.coop]: defineRoom(CoopRoom), [ROOMS.dojo]: defineRoom(DojoRoom) },
     routes: createRouter({
       // Sonde de santé : nombre de salles et de joueurs de ce processus.
       health: createEndpoint('/health', { method: 'GET' }, async () => {

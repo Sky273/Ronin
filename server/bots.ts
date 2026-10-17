@@ -1,30 +1,36 @@
-// Bots de charge : N clients @colyseus/sdk qui jouent dans la salle 'coop'.
-// Lancer : npm run bots -- 12 [--url ws://localhost:2567] [--seconds 20]
+// Bots de charge : N clients @colyseus/sdk qui jouent dans la salle 'coop' (ou 'dojo' : duellistes du tournoi).
+// Lancer : npm run bots -- 12 [--url ws://localhost:2567] [--seconds 20] [--room dojo]
 import { Client, type Room } from '@colyseus/sdk';
+import { DUEL } from '../shared/constants';
 import { BTN } from '../shared/input';
 import { decodeSnapshot, type SnapshotWire } from '../shared/net/codec';
-import { INTERP_TICKS, MSG, NET_TICK, type WelcomeMsg } from '../shared/net/protocol';
+import { INTERP_TICKS, MSG, NET_TICK, ROOMS, type RoomName, type Snapshot, type WelcomeMsg } from '../shared/net/protocol';
 
 interface Args {
   count: number;
   url: string;
   seconds: number; // 0 : jusqu'à Ctrl+C
+  room: RoomName;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { count: 12, url: process.env.SERVER_URL ?? 'ws://localhost:2567', seconds: 0 };
+  const args: Args = { count: 12, url: process.env.SERVER_URL ?? 'ws://localhost:2567', seconds: 0, room: ROOMS.coop };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const [key, inline] = a.split('=', 2);
     const value = () => inline ?? argv[++i];
     if (key === '--url') args.url = value();
     else if (key === '--seconds') args.seconds = Math.max(0, Number(value()) || 0);
+    else if (key === '--room') args.room = value() === ROOMS.dojo ? ROOMS.dojo : ROOMS.coop;
     else if (/^\d+$/.test(a)) args.count = Math.max(1, Math.min(64, Number(a)));
   }
   return args;
 }
 
-/** Un bot : comportement simple mais plausible (courir, sauter, frapper, parfois rien). */
+/**
+ * Un bot : comportement simple mais plausible (courir, sauter, frapper, parfois rien). Au dojo : prêt (G) en attente,
+ * iai tenu pendant la garde et relâché au hasard après le signal, comme un humain.
+ */
 class Bot {
   room: Room | null = null;
   pid = -1;
@@ -38,11 +44,17 @@ class Bot {
   private mode: 'right' | 'left' | 'idle' = 'right';
   private modeT = 0;
   private tick = 0;
+  /** Dernier instantané décodé (dojo : duels et tournoi). */
+  private snap: Snapshot | null = null;
+  /** Dojo : réaction tirée pour chaque manche (clé « duel:manche jouée »), en ticks après le signal. */
+  private readonly reacts = new Map<string, number>();
+  /** Dojo : tick d'arrivée dans l'attente du tournoi en cours (prêt un peu plus tard), -1 hors attente. */
+  private waitSince = -1;
 
-  constructor(readonly index: number) {}
+  constructor(readonly index: number, readonly roomName: RoomName) {}
 
   async connect(client: Client): Promise<void> {
-    const room = await client.joinOrCreate('coop', { name: `bot-${this.index}` });
+    const room = await client.joinOrCreate(this.roomName, { name: `bot-${this.index}` });
     this.room = room;
     // Compte les octets reçus (trames brutes, avant décodage).
     const events = room.connection.events;
@@ -59,6 +71,7 @@ class Bot {
       this.snaps++;
       this.lastAck = s.ack;
       this.lastT = s.t;
+      this.snap = s;
     });
     room.onMessage(MSG.ping, (m: { t: number }) => {
       this.rtt.push(performance.now() - m.t);
@@ -68,6 +81,7 @@ class Bot {
   /** Boutons du tick courant. */
   buttons(): number {
     this.tick++;
+    if (this.roomName === ROOMS.dojo) return this.dojoButtons();
     if (--this.modeT <= 0) {
       const r = Math.random();
       this.mode = r < 0.6 ? 'right' : r < 0.8 ? 'left' : 'idle';
@@ -85,6 +99,39 @@ class Bot {
     return b;
   }
 
+  /**
+   * Dojo, en match : iai tenu pendant la garde, relâché quand le tick prédit (tick de l'instantané + entrées non
+   * acquittées, comme le prédicteur du client) atteint signal + réaction, tirée par manche au-dessus de DUEL.SUSPECT_REACT
+   * (jusqu'à 40 ticks : jamais suspecte), avec de rares faux départs. En attente : G bref (prêt) quelques secondes après
+   * l'arrivée. Sinon (éliminé, spectateur) : quelques pas, pour ne pas être renvoyé comme absent.
+   */
+  private dojoButtons(): number {
+    const s = this.snap;
+    if (!s) return 0;
+    const d = s.duels.find((x) => x.a.pid === this.pid || x.b.pid === this.pid);
+    if (d) {
+      if ((d.phase !== 'kamae' && d.phase !== 'open') || d.sigTick < 0) return 0;
+      const key = `${d.id}:${d.played}`;
+      let r = this.reacts.get(key);
+      if (r === undefined) {
+        r = Math.random() < 0.03 ? -20 : DUEL.SUSPECT_REACT + 1 + Math.floor(Math.random() * (40 - DUEL.SUSPECT_REACT));
+        this.reacts.set(key, r);
+        if (this.reacts.size > 64) this.reacts.delete(this.reacts.keys().next().value!);
+      }
+      // Entrée en construction : séquence this.seq − 1 (sendInput l'a déjà comptée) ; celles d'avant non acquittées la précèdent.
+      const predicted = s.t + this.seq - 2 - Math.max(s.ack, 0);
+      return predicted < d.sigTick + r ? BTN.IAI : 0;
+    }
+    if (s.tournament?.phase === 'waiting') {
+      if (this.waitSince < 0) this.waitSince = this.tick;
+      const k = this.tick - this.waitSince - 180 - this.index * 7;
+      return k >= 0 && k < 6 ? BTN.DUEL : 0;
+    }
+    this.waitSince = -1;
+    const phase = (this.tick + this.index * 37) % 240;
+    return phase < 10 ? BTN.RIGHT : phase >= 120 && phase < 130 ? BTN.LEFT : 0;
+  }
+
   sendInput(): void {
     // Tick de vue comme un vrai client : dernier instantané moins le recul d'interpolation.
     const v = this.lastT >= 0 ? Math.max(0, this.lastT - INTERP_TICKS) : undefined;
@@ -94,9 +141,9 @@ class Bot {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  console.log(`[bots] ${args.count} bot(s) → ${args.url}`);
+  console.log(`[bots] ${args.count} bot(s) → ${args.url} (salle '${args.room}')`);
   const client = new Client(args.url);
-  const bots = Array.from({ length: args.count }, (_, i) => new Bot(i + 1));
+  const bots = Array.from({ length: args.count }, (_, i) => new Bot(i + 1, args.room));
   const results = await Promise.allSettled(bots.map((b) => b.connect(client)));
   const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
   if (failed.length) console.error(`[bots] ${failed.length} connexion(s) échouée(s) : ${String(failed[0].reason?.message ?? failed[0].reason)}`);
