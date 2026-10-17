@@ -375,13 +375,16 @@ function ninja(c: Ctx): void {
       c.gravity = false;
       e.vx = 0;
       if (e.stateT >= 16) {
-        // Destination choisie avant la fermeture de l'arène : pas de réapparition de l'autre côté du kekkai.
-        if (!kekkaiSplits(w, e.x, e.tx)) e.x = e.tx;
-        if (t) {
-          const gy = findGround(w.level, e.x, t.y, 1);
-          if (gy !== null) e.y = gy;
-          e.facing = t.x >= e.x ? 1 : -1;
+        // Destination choisie par vanish 16 ticks plus tôt, revalidée : l'arène a pu se fermer entre-temps
+        // (ni de l'autre côté de la barrière, ni dans sa colonne), et le joueur changer de hauteur (sol
+        // recalculé près de lui, sans regarder la largeur du corps). Corps qui n'y tient pas : sur place.
+        const x = acrossBarrier(w, e, e.tx) ? e.x : e.tx;
+        const gy = t ? findGround(w.level, x, t.y, 1) : null;
+        if (fitsAt(w.level, x, gy ?? e.y, e.w, e.h)) {
+          e.x = x;
+          e.y = gy ?? e.y;
         }
+        if (t) e.facing = t.x >= e.x ? 1 : -1;
         e.dodgeCd = 200;
         w.events.push({ type: 'appear', id: e.id, x: e.x, y: e.y - e.h / 2 });
         startWindup(c, 'slash');
@@ -424,7 +427,7 @@ function vanish(c: Ctx): void {
   const cands = [t.x - t.facing * 56, t.x + t.facing * 56];
   let tx: number | null = null;
   for (const x of cands) {
-    if (kekkaiSplits(w, e.x, x)) continue; // pas de téléportation à travers le kekkai
+    if (acrossBarrier(w, e, x)) continue; // pas de téléportation à travers le kekkai, ni dedans
     const gy = findGround(w.level, x, t.y, 1);
     if (gy !== null && Math.abs(gy - t.y) < 40 && fitsAt(w.level, x, gy, e.w, e.h)) {
       tx = x;
@@ -439,6 +442,17 @@ function vanish(c: Ctx): void {
   e.tx = tx;
   w.events.push({ type: 'vanish', id: e.id, x: e.x, y: e.y - e.h / 2 });
   setState(e, 'hidden', 'none');
+}
+
+/**
+ * Arène fermée : un corps de `e` centré en `x` serait-il de l'autre côté de la barrière, ou dedans ? Elle
+ * compte comme pleine (fitsAt ignore le kekkai de la coop ; un ninja réapparu dans sa colonne en sortait
+ * par l'estoc, dans l'arène).
+ */
+function acrossBarrier(w: World, e: Enemy, x: number): boolean {
+  if (w.stage.state !== 'arena') return false;
+  const col = w.level.arena.col;
+  return kekkaiSplits(w, e.x, x) || (x + e.w / 2 > col * TILE && x - e.w / 2 < (col + 1) * TILE);
 }
 
 // ─── Akaoni : le général démon ─────────────────────────────────────────────

@@ -297,8 +297,9 @@ function clearLostMarkers(players: Player[]): void {
 
 /**
  * Orbe dans une tuile pleine ou hors du niveau (l'attraction traverse le décor) : ramenée, sans
- * vitesse, dans la première case libre en remontant sa colonne (elle se pose alors à la surface),
- * sinon dans les colonnes voisines, du côté le plus proche d'abord. Sans effet sur une orbe libre.
+ * vitesse, dans la case libre la plus proche de sa colonne, au-dessus ou en dessous (une orbe prise
+ * dans le plafond d'un tunnel retombe dans le tunnel, pas sur le dessus du bloc), sinon dans les
+ * colonnes voisines, du côté le plus proche d'abord. Sans effet sur une orbe libre.
  */
 function unburyOrb(l: Level, o: Orb): void {
   if (fitsAt(l, o.x, o.y + ORB_SIZE / 2, ORB_SIZE, ORB_SIZE)) return;
@@ -306,16 +307,19 @@ function unburyOrb(l: Level, o: Orb): void {
   const c0 = clamp(Math.floor(o.x / TILE), 0, l.w - 1);
   const r0 = clamp(Math.floor(o.y / TILE), 0, l.h - 1);
   const side = o.x < (c0 + 0.5) * TILE ? -1 : 1;
+  const vside = o.y < (r0 + 0.5) * TILE ? -1 : 1; // à distance égale, la rangée du côté le plus proche d'abord
   for (let d = 0; d < l.w; d++) {
     for (const c of d === 0 ? [c0] : [c0 + side * d, c0 - side * d]) {
       if (c < 0 || c >= l.w) continue;
-      for (let r = r0; r >= 0; r--) {
-        if (tileAt(l, c, r) === T_SOLID) continue;
-        o.x = clamp(o.x, c * TILE + half, (c + 1) * TILE - half);
-        o.y = clamp(o.y, r * TILE + half, (r + 1) * TILE - half);
-        o.vx = 0;
-        o.vy = 0;
-        return;
+      for (let k = 0; k < l.h; k++) {
+        for (const r of k === 0 ? [r0] : [r0 + vside * k, r0 - vside * k]) {
+          if (r < 0 || r >= l.h || tileAt(l, c, r) === T_SOLID) continue;
+          o.x = clamp(o.x, c * TILE + half, (c + 1) * TILE - half);
+          o.y = clamp(o.y, r * TILE + half, (r + 1) * TILE - half);
+          o.vx = 0;
+          o.vy = 0;
+          return;
+        }
       }
     }
   }
@@ -351,6 +355,9 @@ function stepWaves(w: World): void {
       if (done) {
         const bonus = 25 * wv.n;
         const p = w.players.find((q) => q.state !== 'dead');
+        // Point dans un plafond (accroupi dans un tunnel bas, tête contre le plafond) : unburyOrb ramène les
+        // orbes juste dessous, sans vitesse, et elles retombent sur le joueur. Versées à un point libre sous le
+        // plafond, elles garderaient leur jaillissement horizontal et s'étaleraient hors de l'aimant.
         if (p) spawnOrbs(w, p.x, p.y - 60, bonus, false);
         for (const q of w.players) if (!q.out) addScore(w, q, bonus);
         w.events.push({ type: 'tideEnd', n: wv.n, bonus });
